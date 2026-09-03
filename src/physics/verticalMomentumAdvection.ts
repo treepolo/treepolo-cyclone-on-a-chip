@@ -4,24 +4,21 @@ import { VerticalGrid } from '../grid/vertical.js';
 import { DryState, edge3DIndex, w3DIndex } from '../solver/state.js';
 
 /**
- * First-order donor-cell advection for the prognostic vertical velocity.
+ * First-order donor-cell material-advection tendency for prognostic w:
  *
- * Supplies the missing material-advection terms
+ *   dw/dt = -u_h · grad_h(w) - w dw/dz.
  *
- *   - u_h · grad_h(w) - w d(w)/dz
- *
- * on the staggered w interfaces. The result is computed out of place so the
- * horizontal- and vertical-momentum tendencies can both be formed from the
- * same pre-advection velocity field before either update is committed.
+ * The returned array is a pure tendency evaluated from one immutable state.
+ * Boundary interfaces are zero.  Keeping this operator in tendency form is
+ * required by the Stage-4 RK3 split-explicit integrator, where the slow RHS is
+ * evaluated once per RK stage and then frozen during acoustic substeps.
  */
-export function computeAdvectedVerticalVelocity(
+export function computeVerticalVelocityAdvectionTendency(
   h:CubedSphereGrid,
   v:VerticalGrid,
   s:DryState,
-  dt:number,
 ):Float64Array {
-  if(!(dt>0))throw new Error('vertical-momentum advection dt must be positive');
-  const nz=v.nz,R=EARTH.radius,old=s.wInterface,out=old.slice();
+  const nz=v.nz,R=EARTH.radius,old=s.wInterface,out=new Float64Array(old.length);
   for(let c=0;c<h.cellCount;c++){
     const area=h.cellAreaUnit[c]!*R*R;
     for(let i=1;i<nz;i++){
@@ -42,7 +39,28 @@ export function computeAdvectedVerticalVelocity(
       }else if(wi<0){
         tendency-=wi*(old[w3DIndex(c,i+1,nz)]!-wi)/v.dz[i]!;
       }
-      out[q]=wi+dt*tendency;
+      out[q]=tendency;
+    }
+  }
+  return out;
+}
+
+/**
+ * Compatibility finite-step wrapper used by the existing Stage-4 production
+ * path. It is deliberately implemented from the pure tendency above so the
+ * old path and the future RK3 stage RHS cannot silently diverge.
+ */
+export function computeAdvectedVerticalVelocity(
+  h:CubedSphereGrid,
+  v:VerticalGrid,
+  s:DryState,
+  dt:number,
+):Float64Array {
+  if(!(dt>0))throw new Error('vertical-momentum advection dt must be positive');
+  const tendency=computeVerticalVelocityAdvectionTendency(h,v,s),out=s.wInterface.slice(),nz=v.nz;
+  for(let c=0;c<h.cellCount;c++){
+    for(let i=1;i<nz;i++){
+      const q=w3DIndex(c,i,nz);out[q]=out[q]!+dt*tendency[q]!;
     }
     out[w3DIndex(c,0,nz)]=0;
     out[w3DIndex(c,nz,nz)]=0;
