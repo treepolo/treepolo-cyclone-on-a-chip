@@ -2,7 +2,7 @@ import { EARTH } from '../core/constants.js';
 import { Vec3, dot3, scale3, sub3 } from '../core/math.js';
 import { CubedSphereGrid } from '../grid/cubedSphere.js';
 import { VerticalGrid } from '../grid/vertical.js';
-import { applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
+import { acousticDivergenceCoefficientForDt, applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
 import { applyHeldSuarezForcing } from '../physics/heldSuarez.js';
 import { applyModelTopSponge } from '../physics/modelTopSponge.js';
 import { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
@@ -22,7 +22,7 @@ export class RotatingDryCoreCpu{
     if(mom){if(!this.dry.lastTransport)throw new Error('missing transport snapshot');this.advectMomentum(s,dt,this.dry.lastTransport)}
     if(hs)applyHeldSuarezForcing(this.h,this.v,s,dt);
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
-    if(divDamp)applyAcousticDivergenceDamping(this.h,this.v,this.ref,s);
+    if(divDamp)applyAcousticDivergenceDamping(this.h,this.v,this.ref,s,acousticDivergenceCoefficientForDt(dt));
     if(sponge)applyModelTopSponge(this.v,s,dt);
     return d;
   }
