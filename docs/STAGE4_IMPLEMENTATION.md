@@ -1,128 +1,152 @@
 # Stage 4 — 旋轉全球乾大氣 / Rotating Global Dry Atmosphere
 
-狀態：**實作中，尚未封關。** CPU V2 reference path 已擴充至 6 項回歸；real-device rotating WebGPU smoke 與 short-term CPU/GPU agreement 已通過。30-day Held–Suarez development gate 目前正在處理長時間 acoustic/divergence instability，詳見 `STAGE4_LONGRUN_FAILURE_20260904.md`。
+狀態：**實作中，尚未封關。** Stage 3 CPU regressions 目前為 8 項；Stage 4 CPU regressions 在本次 implicit upper-absorber 修改後應為 9 項，需由本機重新執行 `npm test` 驗證。real-device WebGPU smoke、GPU/CPU agreement 與 30-day Held–Suarez gate 都必須在這一版重新跑。
 
 ## 1. 本階段範圍
 
-Stage 4 在 Stage 3 的三維 fully-compressible / nonhydrostatic dry core 上加入：
+Stage 4 在 Stage 3 fully-compressible / nonhydrostatic 3-D dry core 上加入：
 
-- Earth rotation / traditional Coriolis；
+- Earth rotation / traditional Coriolis reference mode；
 - cubed-sphere 局地 east/north tangent basis；
-- C-grid edge-normal velocity ↔ cell horizontal vector wind reconstruction；
-- 與 mass flux 共用通量的三維水平 momentum transport；
+- C-grid edge-normal velocity ↔ cell horizontal wind reconstruction；
+- 與 mass flux 共用通量的 3-D horizontal momentum transport；
 - Held–Suarez Newtonian thermal relaxation；
 - near-surface Rayleigh drag；
-- model-top absorbing sponge；
-- 3-D acoustic divergence damping；
-- zonal-mean temperature / zonal wind / meridional wind / overturning diagnostics；
-- WebGPU rotating-core path 與真機 validation harness。
+- HEVI vertical acoustic off-centering；
+- horizontal acoustic-divergence damping；
+- HEVI-integrated model-top implicit Rayleigh absorbing layer；
+- zonal-mean wind / temperature / overturning diagnostics；
+- WebGPU rotating-core path 與 real-device validation harness。
 
-本階段仍無水汽、雲、微物理、地形、海氣交互作用，也沒有任何 hard-coded jet、Hadley cell、Rossby wave 或 cyclone generator。
+本階段仍無水汽、雲、微物理、地形、海氣交互作用；沒有任何 hard-coded jet、Hadley cell、Rossby wave 或 cyclone generator。
 
 ## 2. Rotation / Coriolis
 
-每個 cubed-sphere cell 由 unit radial vector 建立局地 east/north 正交 tangent basis。四條 C-grid edge-normal velocity 以最小平方法重建為 cell-centered `(u_east, v_north)`，更新後再投影回 shared-edge normal velocity。
+每個 cubed-sphere cell 由 radial vector 建立局地 east/north tangent basis。C-grid edge-normal velocity 重建為 cell horizontal vector，更新後再投影回 shared-edge normal velocity。
 
-Stage 4 reference path 使用 traditional shallow-atmosphere Coriolis：
+Stage 4 reference path 使用：
 
 `f = 2 Ω sin(phi)`
 
-`du/dt = f v`
-
-`dv/dt = -f u`
-
-Coriolis 子步使用解析旋轉矩陣，不以 forward Euler 人為改變純 inertial-oscillation 振幅。
+Coriolis half-step 使用解析旋轉，不以 forward Euler 人為改變 inertial-oscillation 振幅。
 
 ## 3. 三維水平動量輸送
 
-Stage 4 沒有建立與 mass transport 脫鉤的獨立風場 advection：
+horizontal mass flux 攜帶 upwind cell horizontal momentum；vertical perturbation mass flux 同樣攜帶 horizontal momentum。momentum divergence 與 mass divergence 共用 canonical faces。
 
-- horizontal mass flux 攜帶 upwind cell 的 global 3-D tangent wind；
-- vertical perturbation mass flux 同樣攜帶 horizontal momentum；
-- momentum divergence 與 mass divergence 共用 canonical shared faces；
-- 更新後的 global vector 投影回 local tangent plane 與 C-grid edge velocity。
-
-目前 correctness core 仍使用 donor-cell / first-order upwind transport。Production high-order monotone transport 尚未完成，因此現階段不能把數值擴散程度當作最終天氣精度。
+目前 correctness core 仍使用 first-order donor-cell transport；production high-order monotone reconstruction 尚未完成，因此 Stage 4 development circulation 不能當成最終 climatology 精度。
 
 ## 4. Held–Suarez forcing
 
-核心 benchmark 參數：
+主要參數：
 
 - `T0 = 315 K`
-- equator-to-pole contrast `ΔTy = 60 K`
-- vertical stability term `Δθz = 10 K`
+- `ΔTy = 60 K`
+- `Δθz = 10 K`
 - `Tmin = 200 K`
 - `sigma_b = 0.7`
 - free-atmosphere thermal relaxation `1/40 day`
 - near-surface thermal relaxation `1/4 day`
-- surface Rayleigh drag `1/day`
+- surface drag `1/day`
 
-`Teq = max(200 K, [315 - 60 sin²(phi) - 10 ln(sigma) cos²(phi)] sigma^kappa)`
+potential temperature 使用 exponential Newtonian relaxation；surface drag 亦使用 exponential decay。初始狀態只加入約 `0.05 K` 平滑 zonal-wave perturbation 作 symmetry breaker。
 
-Newtonian relaxation 作用於 potential temperature；surface drag 使用 exponential decay。初始狀態只加入最大約 `0.05 K` 的平滑 wave perturbation 作 symmetry breaker。
+## 5. HEVI vertical acoustic treatment
 
-## 5. Model-top absorbing layer
+Stage 3 centered reference：
 
-30 km rigid model top 會反射非靜力重力／聲波，因此加入只作用在最上方 25% 高度的 vertical-velocity Rayleigh sponge：
+`epsilon = 0` → `theta = 0.5`
 
-- start = `0.75 H_top`
-- `sin²` ramp
-- top e-folding time = `600 s`
-- 只修改 `w`
-- 不修改 mass / pressure / thermodynamic variables
+Stage 4：
 
-此 sponge 專門處理人工上界反射，不用來壓對流層 circulation。
+`epsilon = 0.10` → `theta = 0.55`
 
-## 6. Acoustic divergence damping
+new-time acoustic coupling coefficient 為 `theta^2 dt^2`，old-time coupling 為 `theta(1-theta) dt^2`。vertical `rho` / `rhoTheta` flux 使用同一 theta，維持 conservative column flux-divergence form。
 
-第二次 long-run 真機測試顯示：即使 `dt=10 s` 並有 top sponge，`max |w|` 仍從約 `0.1 m/s` 持續增長至 day 9.5 的 `10.05 m/s`。因此正式補上 HEVI/split-explicit compressible core 常用的 acoustic-divergence filter。
+Stage 3 有獨立 regression 確認 centered standing acoustic wave 仍保持相位／振幅，以及 `epsilon=0.1` 能選擇性耗散 vertical acoustic energy。
 
-Stage 4 使用：
+## 6. Horizontal acoustic-divergence damping
 
-`D = div_h(u) + (1/rho0) d(rho0 w)/dz`
+目前只使用 horizontal divergence：
 
-並在 canonical horizontal edge 上做：
+`D = div_h(u)`
 
-`u_e <- u_e + gamma_d * d_e * (D_R - D_L)`
+`u_e <- u_e + gamma(dt) d_e (D_R - D_L)`
+
+不再把 `(1/rho0)d(rho0 w)/dz` 送入 horizontal filter，避免全球網格巨大 horizontal/vertical aspect ratio 將 Float32 `w` 差異放大成 spurious horizontal wind。
+
+filter strength 以物理時間正規化：歷史 reference 為 `100 s` 作用一次 `gamma=0.1`；任意 timestep 使用等效 exponential cadence。`dt=10 s` 時約 `gamma=0.01048`。
+
+## 7. Model-top absorbing layer：HEVI implicit Rayleigh
+
+### 7.1 為何淘汰舊 post-step sponge
+
+早期 Stage 4 使用完整 timestep 結束後的：
+
+`w <- w * exp(-tau(z) dt)`
+
+peak `tau = 1/600 s^-1`。真機定位顯示：
+
+- `30 km × 20` 版長期最大 `w` 長時間集中在上層，day 14.75 才污染到 20.28 km；
+- 將垂直域提升到 `40 km × 48`、令 absorber 有約 7 個 active interfaces 後，反而 day 2 就在 `38.47 km` 出現 `18.95 m/s`；
+- 同時 below-absorber max `|w|` 只有 `1.82 m/s`、vertical CFL `0.128`、horizontal CFL `6.2e-5`。
+
+這證明問題不是單純 absorber 層數不足，而是舊 formulation 本身對 artificial rigid top reflection 太弱。
+
+### 7.2 新 formulation
+
+Stage 4 改採 nonhydrostatic models 常用的 HEVI-integrated implicit Rayleigh absorber。HEVI tridiagonal solve 得到 `w_tilde` 後，在形成 new-time vertical flux 前：
+
+`w_new = w_tilde / (1 + tau(z) dt)`
 
 其中：
 
-- `gamma_d = 0.1`，在看到下一次 30-day 結果前固定；
-- `d_e` 是 edge 相鄰 cell-center distance；
-- 只修改 horizontal velocity 的 divergent component；
-- 不修改 mass / `rhoTheta`；
-- 不做 `w` clamp 或 state normalization。
+- absorber start = `0.75 H_top`；
+- profile = `sin^2` ramp；
+- peak `tau = 0.2 s^-1`；
+- production long-run grid `H_top=40 km`, `Nz=48`，所以 absorber 約 `30–40 km`；
+- active interior absorber interfaces 必須 `>=6`，否則 long-run gate 拒絕啟動；
+- Stage 4 不再另外執行 post-step GPU/CPU `w` sponge；
+- Stage 3 無 absorber，reference benchmarks 不變。
 
-CPU 與 WebGPU 使用相同離散幾何。GPU 最重的 divergence pass 維持 8 個 storage buffers，符合本專案 WebGPU baseline target。
+此 absorber 只直接修改 `w`，但因為它位於 HEVI new-time flux 建立之前，`rho` / `rhoTheta` 的垂直 acoustic update 使用的是已吸收後的 new-time `w`。
 
-## 7. Reference timestep / long-run cadence
+目前 explicit buoyancy slow substep 仍在 HEVI 之後；若下一輪只剩 absorber 區在 buoyancy 後重新長出 `w`，再檢查 vertical forcing/operator split，而不是再加 post-step clamp。
 
-第一次 long-run 使用 `dt=20 s`，day 4 進入 NaN；因此 long-run reference timestep 已修正為：
+## 8. Long-run development grid
 
-- `dt = 10 s`
-- 每 `0.25 simulated day` readback
-- invalid state、`|mass drift| > 5e-5` 或 `max |w| >= 10 m/s` 立即提前 FAIL
+目前 30-day gate：
 
-降低 timestep 是根據長期穩定性證據修正 correctness configuration，並非放寬驗收。
+- cubed-sphere `N=8` → 384 horizontal columns；
+- `Nz=48`；
+- `H_top=40 km`；
+- 18,432 3-D cells；
+- `dt=10 s`；
+- checkpoint 每 0.25 simulated day。
 
-## 8. CPU V2 regressions
+這符合 Stage 2 原先的第一版全球 dry-core 垂直候選範圍（40 km、48–72 layers），但水平 N=8 仍只是 development resolution。
 
-`npm test` 會先跑 Stage 3 7/7，再跑 Stage 4 V2 tests。Stage 4 目前包含：
+## 9. CPU regressions
 
-1. cubed-sphere solid-body wind reconstruction across seams；
+`npm test` 先跑 Stage 3 tests，再跑 Stage 4 V2 tests。
+
+Stage 4 本版預期 9 項：
+
+1. solid-body wind reconstruction across cubed-sphere seams；
 2. inertial oscillation amplitude/period；
 3. discrete spherical geostrophic balance；
-4. acoustic-divergence filter 對 grid-scale divergent noise 的衰減；
-5. rotating hydrostatic rest；
-6. 1-day Held–Suarez dry-circulation sanity（`dt=10 s`）。
+4. time-normalized divergence-damping cadence；
+5. grid-scale horizontal divergent-noise damping；
+6. vertical motion 不得被 horizontal filter 轉成 horizontal wind；
+7. HEVI implicit top absorber 必須符合 `w_tilde/(1+tau dt)` 且 peak rate=`0.2 s^-1`；
+8. rotating hydrostatic rest；
+9. one-day Held–Suarez dry-circulation sanity。
 
-新增 acoustic filter 後需要由本機重新執行 `npm test`，確認 6/6 才進下一次 30-day 真機 gate。
+**本文件不宣稱本版已 9/9；需使用者本機 `npm test` 實測。**
 
-## 9. Real-device Gate A — GPU/CPU short-term agreement
+## 10. Real-device Gate A — GPU/CPU short-term agreement
 
-先前真機結果已 PASS。加入 acoustic filter 後必須重新跑一次，確保 CPU Float64 與 GPU Float32 的新 filter 一致。
-
-原先鎖定 threshold 維持：
+threshold：
 
 | Metric | Gate |
 |---|---:|
@@ -133,39 +157,43 @@ CPU 與 WebGPU 使用相同離散幾何。GPU 最重的 divergence pass 維持 8
 | max `|Δw|` | `<= 0.02 m/s` |
 | invalid state | forbidden |
 
-## 10. Real-device Gate B — 30-day Held–Suarez development
+implicit absorber 已同時加入 CPU 與 WGSL HEVI，因此必須重新跑 agreement gate。
 
-Grid：`6 × 4 × 4 × 12`，top `30 km`，`dt=10 s`。
+## 11. Real-device Gate B — 30-day Held–Suarez development
 
-每 0.25 日檢查：
+每 0.25 日診斷：
 
 - dry-mass drift；
-- max vertical velocity；
-- upper-midlatitude maximum zonal westerly；
+- global max `|w|`；
+- max `|w|` below / inside absorber；
+- max-`w` altitude / latitude；
+- max edge wind；
+- horizontal divergence RMS；
+- horizontal / vertical advective CFL；
+- upper-midlatitude westerly；
 - tropical low-level mean zonal wind；
-- meridional overturning streamfunction；
-- NH / SH dominant overturning sign。
+- overturning streamfunction 與 hemispheric sign。
 
-最終 development gates 不放寬：
+Gates 不放寬：
 
 - `|mass drift| <= 5e-5`
 - upper-midlatitude max westerly `> 0.5 m/s`
 - tropical low-level mean zonal wind `< 0`
-- max overturning streamfunction `> 1e9 kg/s`
+- max overturning `> 1e9 kg/s`
 - NH / SH dominant overturning signs opposite
 - `max |w| < 10 m/s` throughout development run
-- no invalid state
+- no invalid / NaN / non-positive density or pressure
 
-此 30-day coarse-grid test 只作 Stage 4 development gate。正式 Held–Suarez climatology 仍需更高解析與數百日 spin-up / averaging，再與標準 zonal-mean climate 統計定量比較。
+此 30-day run 只是 development gate。正式 Held–Suarez climatology 仍需要更高水平解析度與更長 spin-up / averaging。
 
-## 11. 封關條件
+## 12. 封關條件
 
-Stage 4 只有在以下全部通過後才標記 COMPLETE：
+Stage 4 只有以下全部通過才 COMPLETE：
 
-1. Stage 3 regressions — PASS；
-2. Stage 4 CPU V2 6/6 — PASS；
-3. rotating + acoustic filter + top-sponge WebGPU smoke — PASS；
-4. GPU/CPU short-term agreement — PASS；
-5. 30-day Held–Suarez development gate — PASS。
+1. Stage 3 regressions PASS；
+2. Stage 4 CPU V2 regressions PASS；
+3. rotating WebGPU smoke（含 HEVI implicit absorber）PASS；
+4. GPU/CPU short-term agreement PASS；
+5. 30-day Held–Suarez development gate PASS。
 
-任何 long-run instability 都先修數值核心，不以提高 `max |w|` gate、clamp state 或強制指定 circulation 來取得 PASS。
+任何 long-run instability 都先修 numerical core；不提高 `max|w|` gate、不 clamp state、不 hard-code circulation。
