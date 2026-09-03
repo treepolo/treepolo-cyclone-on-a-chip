@@ -4,7 +4,7 @@ import { CubedSphereGrid } from '../grid/cubedSphere.js';
 import { VerticalGrid } from '../grid/vertical.js';
 import { acousticDivergenceCoefficientForDt, applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
 import { applyHeldSuarezForcing } from '../physics/heldSuarez.js';
-import { applyModelTopSponge } from '../physics/modelTopSponge.js';
+import { buildModelTopSpongeRates } from '../physics/modelTopSponge.js';
 import { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
 import { RotationGeometry, addCellWindDeltaToEdges, applyTraditionalCoriolis, buildRotationGeometry, reconstructCellHorizontalWind } from '../physics/rotation.js';
 import { DryCoreCpu, StepDiagnostics, TransportSnapshot } from './dryCoreCpu.js';
@@ -14,16 +14,15 @@ import { DryState, cell3DIndex, edge3DIndex, w3DIndex } from './state.js';
 export interface RotatingStepOptions{heldSuarez?:boolean;momentumTransport?:boolean;coriolis?:boolean;topSponge?:boolean;divergenceDamping?:boolean}
 export class RotatingDryCoreCpu{
   readonly dry:DryCoreCpu;readonly rotation:RotationGeometry;
-  constructor(public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere){this.dry=new DryCoreCpu(h,v,ref,STAGE4_HEVI_OFFCENTERING);this.dry.captureTransport=true;this.rotation=buildRotationGeometry(h)}
+  constructor(public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere){this.dry=new DryCoreCpu(h,v,ref,STAGE4_HEVI_OFFCENTERING,buildModelTopSpongeRates(v));this.dry.captureTransport=true;this.rotation=buildRotationGeometry(h)}
   step(s:DryState,dt:number,opt:RotatingStepOptions={}):StepDiagnostics{
     const cor=opt.coriolis!==false,mom=opt.momentumTransport!==false,hs=opt.heldSuarez!==false,sponge=opt.topSponge!==false,divDamp=opt.divergenceDamping!==false;
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
-    const d=this.dry.step(s,dt);
+    const d=this.dry.step(s,dt,sponge);
     if(mom){if(!this.dry.lastTransport)throw new Error('missing transport snapshot');this.advectMomentum(s,dt,this.dry.lastTransport)}
     if(hs)applyHeldSuarezForcing(this.h,this.v,s,dt);
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
     if(divDamp)applyAcousticDivergenceDamping(this.h,this.v,this.ref,s,acousticDivergenceCoefficientForDt(dt));
-    if(sponge)applyModelTopSponge(this.v,s,dt);
     return d;
   }
   private advectMomentum(s:DryState,dt:number,t:TransportSnapshot):void{
