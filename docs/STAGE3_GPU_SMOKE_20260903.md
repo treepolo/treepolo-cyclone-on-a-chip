@@ -27,8 +27,32 @@ The final fix does not simply request 10 bindings. GPU data is repacked instead:
 
 The maximum Stage 3 compute-stage requirement is now **8 storage buffers**, matching the WebGPU baseline target used by the desktop/mobile architecture.
 
-## 狀態 / Status
+## 第二次真機結果：通過 / Second real-device result: PASS
 
-CPU Float64 的 7/7 Stage 3 tests 不受此 binding-layout 修正影響。更新後的 WGSL 仍需要在實際 WebGPU 裝置重新執行 smoke test；在重新測試成功以前，不宣稱 Stage 3 GPU gate 已通過。
+使用者在 Windows + Chrome、更新到 commit `0b95a239ef85fe8b1ac6ba826b0e5aff9390721c` 後重新執行：
 
-The CPU Float64 7/7 Stage 3 tests are unaffected by this binding-layout refactor. The updated WGSL still requires another real-device smoke run; the Stage 3 GPU gate remains pending until that test succeeds.
+- `npm test`：CPU Float64 **7/7 passed**。
+- WebGPU compute pipelines：**全部成功編譯**。
+- hydrostatic one-step smoke：**PASS**。
+- GPU hydrostatic smoke `max |w| = 6.843e-6 m/s`。
+- density / pressure / NaN validation：未觸發錯誤。
+- Stage 3 core 的 storage-buffer requirement = **8**，因此已不依賴桌機 adapter 額外提供的 16-buffer capability。
+
+After updating to commit `0b95a239ef85fe8b1ac6ba826b0e5aff9390721c`, the real Windows + Chrome run produced:
+
+- CPU Float64 tests: **7/7 passed**.
+- All WebGPU compute pipelines: **compiled successfully**.
+- One-step hydrostatic GPU smoke: **PASS**.
+- Hydrostatic GPU smoke `max |w| = 6.843e-6 m/s`.
+- No density / pressure / NaN validation failure.
+- Stage 3 core storage-buffer requirement = **8**, so the implementation no longer depends on the desktop adapter's optional 16-buffer capability.
+
+## 判定 / Assessment
+
+這個結果足以通過 **Stage 3 真機 WebGPU pipeline/smoke gate**：GPU 核心可在實際瀏覽器裝置建立、執行與 readback，而且沒有結構性 hydrostatic 爆炸。
+
+This result passes the **Stage 3 real-device WebGPU pipeline/smoke gate**: the GPU core can compile, execute and read back on a real browser device without a structural hydrostatic instability.
+
+但 one-step smoke 不等於長時間數值可信度驗證。Stage 3 正式封關前仍要增加 multi-step GPU hydrostatic-rest 與 CPU-vs-GPU comparison，確認 `f32` hydrostatic residual 不會單向累積，並量測 mass drift / max `|w|` 隨時間的演化。
+
+A one-step smoke is not a long-duration numerical-fidelity test. Before final Stage 3 closure, add a multi-step GPU hydrostatic-rest and CPU-vs-GPU comparison to verify that the `f32` hydrostatic residual does not accumulate monotonically and to measure mass drift / max `|w|` over time.
