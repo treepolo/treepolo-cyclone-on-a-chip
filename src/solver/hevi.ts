@@ -22,11 +22,11 @@ export interface ColumnState { rho:Float64Array; rhoTheta:Float64Array; w:Float6
  *
  *   w^(n+1) = w_tilde^(n+1) / (1 + tau(z) dt)
  *
- * Optional verticalAcceleration is an interface-centred explicit slow forcing
- * (Stage 3/4 currently uses buoyancy). It is inserted into the HEVI vertical-
- * momentum RHS before the Rayleigh absorber, so pressure, buoyancy and the
- * upper-boundary absorber form one vertical-momentum operator instead of a
- * post-HEVI forcing bypassing the absorber.
+ * Buoyancy remains a slow explicit vertical-momentum forcing outside this
+ * acoustic column solve. A real-device Stage-4 ablation showed that inserting
+ * the old-time density buoyancy directly into this linear acoustic RHS creates
+ * a severe imbalance; the coupled formulation must be re-derived before it is
+ * reconsidered.
  */
 export function heviColumnStep(
   v:VerticalGrid,
@@ -35,12 +35,10 @@ export function heviColumnStep(
   dt:number,
   offCentering=0,
   rayleighRates?:ArrayLike<number>,
-  verticalAcceleration?:ArrayLike<number>,
 ):void {
   const nz=v.nz; if(state.rho.length!==nz||state.rhoTheta.length!==nz||state.w.length!==nz+1) throw new Error('column shape mismatch');
   if(!(offCentering>=0&&offCentering<1))throw new Error('HEVI offCentering must be in [0,1)');
   if(rayleighRates&&rayleighRates.length!==nz+1)throw new Error('HEVI Rayleigh profile shape mismatch');
-  if(verticalAcceleration&&verticalAcceleration.length!==nz+1)throw new Error('HEVI vertical-acceleration profile shape mismatch');
   if(nz<2) return;
   const theta=0.5*(1+offCentering), oldWeight=1-theta;
   const n=nz-1, lo=new Float64Array(n), di=new Float64Array(n), up=new Float64Array(n), rhs=new Float64Array(n), sol=new Float64Array(n);
@@ -54,11 +52,10 @@ export function heviColumnStep(
     const Al=DRY_AIR.gamma*ref.pCenter[l]!/ref.rhoThetaCenter[l]!, Au=DRY_AIR.gamma*ref.pCenter[u]!/ref.rhoThetaCenter[u]!;
     const base=dt*dt/(rhoi*dzc), facNew=theta*theta*base, facOld=theta*oldWeight*base;
     const xim=ref.rhoThetaInterface[i-1]!, xi=ref.rhoThetaInterface[i]!, xip=ref.rhoThetaInterface[i+1]!;
-    const accel=verticalAcceleration?Number(verticalAcceleration[i]!):0;
     lo[ii]=-facNew*Al*xim/v.dz[l]!;
     di[ii]=1+facNew*(Au*xi/v.dz[u]!+Al*xi/v.dz[l]!);
     up[ii]=-facNew*Au*xip/v.dz[u]!;
-    rhs[ii]=wOld[i]!-dt*(pOld[u]!-pOld[l]!)/(rhoi*dzc)+dt*accel+facOld*(Au*Lold[u]!-Al*Lold[l]!);
+    rhs[ii]=wOld[i]!-dt*(pOld[u]!-pOld[l]!)/(rhoi*dzc)+facOld*(Au*Lold[u]!-Al*Lold[l]!);
   }
   lo[0]=0; up[n-1]=0; solveTridiagonal(lo,di,up,rhs,sol);
   state.w[0]=0; state.w[nz]=0;
