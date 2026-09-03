@@ -1,6 +1,6 @@
 # Stage 3 — 最小三維物理核心
 
-狀態：**CPU Float64 reference core 已完成並通過第一批 V0/V1 回歸；WebGPU compute core 已在真實 Windows + Chrome 裝置成功編譯並通過 one-step hydrostatic smoke。Stage 3 現在只剩 multi-step GPU hydrostatic-rest / CPU-vs-GPU 數值一致性驗證，通過後正式封關。**
+狀態：**完成 / COMPLETE。CPU Float64 reference core 已通過 7/7 V0/V1 回歸；WebGPU compute core 已在真實 Windows + Chrome 裝置成功編譯並通過 one-step hydrostatic smoke，以及 1000-step multi-step hydrostatic-rest / conservation / CPU-vs-GPU agreement gate。Stage 3 正式封關，可進入 Stage 4。**
 
 ## 1. 本階段範圍
 
@@ -21,7 +21,7 @@ Stage 3 固定為 dry、non-rotating、flat-surface core。計算域已經是六
 
 - flat-surface stretched geometric-height grid。
 - `zInterface[Nz+1]`、`zCenter[Nz]`、`dz[Nz]`。
-- Stage 3 debug 預設 top = 40 km；SLEVE terrain deformation 到 Stage 6/terrain work 再打開。
+- Stage 3 debug 預設 top = 40 km；SLEVE terrain deformation 到 terrain stage 再打開。
 
 ### 2.3 Hydrostatic reference atmosphere
 
@@ -55,20 +55,20 @@ Dry Stage 3：
 - horizontal flux 以 canonical shared edge 計算；正 flux 定義為 left cell → right cell。
 - cell divergence 由同一 edge flux 以相反 sign 更新兩側 cell。
 - vertical base-state acoustic flux 由 HEVI 推進；outer explicit transport 只輸送 vertical perturbation flux，避免 base flux double count。
-- Stage 3 reconstruction 仍是 donor-cell/upwind，只用於建立守恆骨架與 debug；production high-order monotone transport 仍按 Stage 2 roadmap 延後選型。
+- Stage 3 reconstruction 仍是 donor-cell/upwind，只用於建立守恆骨架與 debug；production high-order monotone transport 依 roadmap 後續升級。
 
 ### 2.7 HEVI vertical acoustic solve
 
 CPU 與 WGSL prototype 都採 per-column implicit tridiagonal solve：
 
-- pressure perturbation / base-state `rhoTheta` acoustic coupling隱式處理；
+- pressure perturbation / base-state `rhoTheta` acoustic coupling 隱式處理；
 - rigid lower/model-top `w=0` for Stage 3 tests；
 - buoyancy 作為 slow term，在 implicit acoustic solve 之外顯式加入；
 - CPU tridiagonal 使用 Thomas algorithm；GPU Stage 3 prototype 為 one invocation per column、`Nz<=128` 的 correctness-first Thomas implementation，未做效能最佳化。
 
-這裡曾抓到並修正一個重要 bug：如果用 total pressure gradient 而未先減掉 hydrostatic reference，靜止大氣會自行產生巨大假 `w`。現在 hydrostatic-rest regression 會防止此錯誤回歸。
+本階段曾抓到並修正一個重要 bug：如果用 total pressure gradient 而未先減掉 hydrostatic reference，靜止大氣會自行產生巨大假 `w`。現在 hydrostatic-rest regression 會防止此錯誤回歸。
 
-### 2.8 WebGPU compute prototype
+### 2.8 WebGPU compute core
 
 `src/gpu/dryCoreGpu.ts` 已包含：
 
@@ -84,7 +84,7 @@ CPU 與 WGSL prototype 都採 per-column implicit tridiagonal solve：
 
 第一版真機測試發現 compute stage 使用 10 個 storage buffers，超過 WebGPU baseline 的 8。之後已將垂直 reference fields 與 flux buffers 重新打包，使 Stage 3 所有 compute pipeline 的最高需求降為 **8 storage buffers/stage**；第二次真機測試成功建立所有 pipelines 並執行 hydrostatic smoke。
 
-Real-device result：Windows + Chrome，one-step hydrostatic smoke `max |w| = 6.843e-6 m/s`，無 NaN、負密度或負壓力錯誤。詳細紀錄見 `STAGE3_GPU_SMOKE_20260903.md`。
+One-step real-device result：Windows + Chrome，hydrostatic smoke `max |w| = 6.843e-6 m/s`，無 NaN、負密度或負壓力錯誤。詳細紀錄見 `STAGE3_GPU_SMOKE_20260903.md`。
 
 ### 2.9 3D Debug Viewer
 
@@ -109,24 +109,35 @@ Real-device result：Windows + Chrome，one-step hydrostatic smoke `max |w| = 6.
 | global isothermal hydrostatic rest | PASS；20 s mass drift = `0`，max `|w| = 1.23e-13 m/s` |
 | constant-pressure +3 K thermal bubble | PASS；15 s mass drift = `2.03e-16`，max `|w| = 3.83e-2 m/s` |
 
-這些測試主要驗證 Stage 3 的 reference-state、conservation、acoustic/buoyancy coupling 與三維資料流，還不能證明 production weather fidelity。
-
 ## 4. 真機 WebGPU 驗收 / Real-device WebGPU validation
 
-目前已通過：
+### 4.1 One-step smoke — PASS
 
-- WebGPU adapter / device 建立。
-- 所有 Stage 3 WGSL compute pipeline 編譯。
-- Stage 3 storage-buffer baseline compatibility：最高需求 8。
-- one-step hydrostatic state GPU integration + readback。
-- density / pressure / NaN smoke validation。
+- WebGPU adapter / device 建立：PASS。
+- 所有 Stage 3 WGSL compute pipeline 編譯：PASS。
+- storage-buffer baseline compatibility：最高需求 8。
+- hydrostatic state GPU integration + readback：PASS。
+- density / pressure / NaN validation：PASS。
 - one-step hydrostatic residual：`max |w| = 6.843e-6 m/s`。
 
-尚需補：
+### 4.2 1000-step multi-step gate — PASS
 
-- multi-step hydrostatic-rest，觀察 `f32` residual 是否累積。
-- GPU dry-mass drift。
-- CPU Float64 vs GPU Float32 state comparison over the same short integration。
+設定：`6 × 8 × 8 × 32`、`dt = 0.25 s`、1000 steps = 250 s simulation time；CPU Float64 與 GPU Float32 從同一靜力初始條件獨立積分。
+
+1000-step checkpoint：
+
+- GPU dry mass drift = `4.341e-7`，threshold `1e-6` → PASS。
+- GPU max `|w| = 9.828e-4 m/s`，threshold `1e-3 m/s` → PASS。
+- `rhoD` relative L2 = `1.605e-6`，threshold `2e-5` → PASS。
+- `rhoThetaM` relative L2 = `8.172e-7`，threshold `2e-5` → PASS。
+- max `|Δu| = 0`，threshold `1e-4 m/s` → PASS。
+- max `|Δw| = 9.828e-4 m/s`，threshold `1e-3 m/s` → PASS。
+- 無 NaN、負密度或負壓力 failure。
+- 真機驗證耗時約 `5.28 s`。
+
+詳細 checkpoint 結果見 `STAGE3_GPU_MULTISTEP_VALIDATION.md`。
+
+注意：`max |w|` 在 1000-step 時已達 gate 約 98.3%，因此 Stage 4 及更長時間積分必須繼續監控 hydrostatic/balance residual。此項目前通過事前規定的 correctness gate，但不得被解讀成可以忽略長時間 Float32 誤差。
 
 ## 5. 執行
 
@@ -140,13 +151,7 @@ npm run serve
 
 `http://127.0.0.1:5173`
 
-## 6. Stage 3 尚未宣稱完成的 production 項目
-
-在進 Stage 4 前必須完成：
-
-- multi-step real-GPU numerical agreement / conservation tolerance。
-
-可在後續 refinement 持續優化、但不阻擋 Stage 4 的項目：
+## 6. Stage 3 後續 refinement，不阻擋 Stage 4
 
 - GPU HEVI 效能與更平行的 tridiagonal algorithm；
 - RK3 outer integrator 完整 production 化；目前 CPU/GPU debug step 是 Stage 3 split operator；
@@ -155,14 +160,19 @@ npm run serve
 - model-top sponge；
 - SLEVE terrain geometry。
 
+其中 production horizontal momentum transport 會在 Stage 4 為旋轉全球乾大氣與 baroclinic dynamics 實際補齊；terrain/SLEVE 仍留在後續地表階段。
+
 ## 7. Stage 4 入口
 
-在 multi-step GPU hydrostatic-rest / CPU-vs-GPU comparison 通過後，Stage 4 才加入：
+**Stage 3 gate 已全部通過。Stage 4 可以開始。**
+
+Stage 4 首批工作：
 
 - planet rotation / Coriolis；
-- geostrophic/inertial tests；
+- inertial oscillation / geostrophic balance tests；
+- production horizontal momentum transport；
 - Held–Suarez thermal relaxation + near-surface drag；
 - long-run zonal-mean circulation；
-- Rossby / baroclinic development 所需的 production horizontal momentum transport。
+- Rossby / baroclinic development 所需的 dry-core dynamics。
 
-在 hydrostatic rest、mass conservation 或 GPU core validation 未通過的裝置上，不進 Stage 4。
+Stage 4 的每個新增物理層仍需保留 Stage 3 hydrostatic-rest、mass-conservation 與 GPU regression tests，避免新增功能破壞已通過的核心。
