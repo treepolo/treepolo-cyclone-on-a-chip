@@ -116,7 +116,7 @@ Acoustic filter 改為只計算：
 
 早期 long-run grid `N=4 × Nz=12` 僅有 96 個水平 column、1,152 個 3-D cells，適合 correctness smoke，但太粗，不應作為唯一長時間穩定性證據。
 
-下一個 30-day development gate 在**不改變物理、damping coefficient、`dt=10 s` 或驗收門檻**的前提下提升為：
+30-day development gate 在**不改變物理、damping coefficient、`dt=10 s` 或驗收門檻**的前提下提升為：
 
 - cubed-sphere `N=8`：384 horizontal columns；
 - `Nz=20`；
@@ -124,9 +124,46 @@ Acoustic filter 改為只計算：
 - total 3-D cells `7,680`；
 - zonal diagnostics 由 12 bins 提升到 24 bins。
 
-舊 N=4 路徑仍由 CPU 1-day sanity / short agreement 作便宜回歸。這次只改解析度，用來判斷 `w` growth 是否主要由極粗網格造成。
+### Failure E：提高解析度後反而在 day 4.25 更快失穩
 
-若 N=8 × 20 仍出現相同的長期 `w` 成長，下一個 solver-level 修改才是 vertical HEVI time off-centering。WRF/ARW 的 `epssm` 類方法用 slight forward-centering 專門阻尼 vertically propagating acoustic modes；不會以提高 top sponge 或放寬 `w` gate 取代。
+N=8 × Nz=20 真機結果：
+
+- day 0.25: mass `-1.578e-6`, jet `0.086 m/s`, trade `+0.004 m/s`, psi `1.633e10 kg/s`, `max|w|=0.1135 m/s`
+- day 1.00: mass `-3.194e-6`, jet `0.793 m/s`, trade `-0.108 m/s`, psi `3.189e10 kg/s`, `max|w|=0.4196 m/s`
+- day 2.00: mass `-3.621e-6`, jet `2.656 m/s`, trade `-0.260 m/s`, psi `8.950e10 kg/s`, `max|w|=2.255 m/s`
+- day 3.00: mass `-2.904e-6`, jet `4.793 m/s`, trade `-0.326 m/s`, psi `2.347e11 kg/s`, `max|w|=4.699 m/s`
+- day 4.00: mass `-2.772e-6`, jet `10.194 m/s`, trade `-0.336 m/s`, psi `4.841e11 kg/s`, `max|w|=8.938 m/s`
+- day 4.25: mass `-2.810e-6`, jet `12.024 m/s`, trade `-0.333 m/s`, psi `5.554e11 kg/s`, `max|w|=20.071 m/s` → FAIL
+
+解析度提高後 stability failure 從 N=4 的 day 10.25 提前到 day 4.25。mass drift 仍只有 `10^-6` 級，CPU/GPU 500-step agreement 仍 PASS，因此「只是 N=4 網格太粗」已被排除為主要解釋。較細的 vertical grid 反而讓未充分阻尼的垂直快模態／高垂直波數更容易被解析與成長，是目前更符合數據的方向。
+
+## Attempt E：HEVI vertical time off-centering
+
+Stage 4 現在採用可配置的 HEVI forward-centering：
+
+`theta = 0.5 * (1 + epsilon)`
+
+其中 Stage 3 reference 維持 `epsilon = 0`、`theta = 0.5`，保留 centered Crank-Nicolson acoustic benchmark；Stage 4 設定：
+
+`epsilon = 0.1` → `theta = 0.55`
+
+垂直 acoustic pair 同時使用同一個 `theta`：
+
+- pressure-gradient implicit coupling 的新時間層權重由 `0.5` 改為 `theta`；
+- vertical `rho` 與 `rhoTheta` base-state flux 更新改為 `(1-theta) F^n + theta F^(n+1)`；
+- tridiagonal operator 的 new-time coupling 係數為 `theta^2 dt^2`；
+- RHS old-time coupling 係數為 `theta(1-theta) dt^2`。
+
+這保持垂直 mass / scalar flux divergence 的 conservative form，但讓 fast vertical acoustic mode 具有小幅數值耗散。沒有修改 Held–Suarez forcing、horizontal divergence damping、top sponge、`dt=10 s`、mass gate 或 `max|w| < 10 m/s` gate。
+
+CPU 與 WebGPU 使用同一個共享 Stage 4 `epsilon` 設定，避免再次出現兩套離散式分岔。Stage 3 GPU 預設仍為 `epsilon=0`。
+
+新增 regression：
+
+1. 原 centered HEVI standing-wave phase/amplitude test 明確固定 `epsilon=0`；
+2. 新增 acoustic-energy test，比較相同 standing mode 的 centered 與 `epsilon=0.1` HEVI，要求 centered energy 近似守恆、off-centered case 明顯衰減。
+
+下一次真機驗證仍依序執行 `npm test`、Stage 4 GPU/CPU agreement、N=8 × Nz=20 30-day gate。若 short agreement 失敗，先修 CPU/GPU 離散一致性；若 agreement PASS 但 30-day 仍失穩，再根據 `w` growth curve 判斷是否需要調整垂直時間離散、timestep 或更完整的 split-explicit acoustic treatment，而不放寬物理 gate。
 
 ## Gate 不變 / Gates are not relaxed
 
@@ -140,4 +177,4 @@ Acoustic filter 改為只計算：
 - no invalid / NaN / non-positive density or pressure
 - development-run numerical stability guard `max |w| < 10 m/s`
 
-Stage 4 在新的 N=8 × 20、30-day gate 通過以前仍不封關。
+Stage 4 在新的 HEVI off-centering + N=8 × 20、30-day gate 通過以前仍不封關。
