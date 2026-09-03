@@ -15,10 +15,27 @@ export interface ColumnState { rho:Float64Array; rhoTheta:Float64Array; w:Float6
  * the fast vertically propagating computational mode. Both vertical mass and
  * rho*theta flux updates use the same theta, so the column flux divergence
  * remains conservative.
+ *
+ * Optional rayleighRates are interface-centred inverse time scales.  They are
+ * applied after the tridiagonal vertical acoustic solve and BEFORE the new-time
+ * mass/thermodynamic fluxes are formed:
+ *
+ *   w^(n+1) = w_tilde^(n+1) / (1 + tau(z) dt)
+ *
+ * This is the implicit upper-boundary gravity-wave absorber form used by
+ * Klemp et al. (2008) / WRF rather than a separate post-step velocity clamp.
  */
-export function heviColumnStep(v:VerticalGrid,ref:ReferenceAtmosphere,state:ColumnState,dt:number,offCentering=0):void {
+export function heviColumnStep(
+  v:VerticalGrid,
+  ref:ReferenceAtmosphere,
+  state:ColumnState,
+  dt:number,
+  offCentering=0,
+  rayleighRates?:ArrayLike<number>,
+):void {
   const nz=v.nz; if(state.rho.length!==nz||state.rhoTheta.length!==nz||state.w.length!==nz+1) throw new Error('column shape mismatch');
   if(!(offCentering>=0&&offCentering<1))throw new Error('HEVI offCentering must be in [0,1)');
+  if(rayleighRates&&rayleighRates.length!==nz+1)throw new Error('HEVI Rayleigh profile shape mismatch');
   if(nz<2) return;
   const theta=0.5*(1+offCentering), oldWeight=1-theta;
   const n=nz-1, lo=new Float64Array(n), di=new Float64Array(n), up=new Float64Array(n), rhs=new Float64Array(n), sol=new Float64Array(n);
@@ -38,7 +55,11 @@ export function heviColumnStep(v:VerticalGrid,ref:ReferenceAtmosphere,state:Colu
     rhs[ii]=wOld[i]!-dt*(pOld[u]!-pOld[l]!)/(rhoi*dzc)+facOld*(Au*Lold[u]!-Al*Lold[l]!);
   }
   lo[0]=0; up[n-1]=0; solveTridiagonal(lo,di,up,rhs,sol);
-  state.w[0]=0; state.w[nz]=0; for(let i=1;i<nz;i++) state.w[i]=sol[i-1]!;
+  state.w[0]=0; state.w[nz]=0;
+  for(let i=1;i<nz;i++){
+    const rate=rayleighRates?Math.max(0,Number(rayleighRates[i]!)):0;
+    state.w[i]=sol[i-1]!/(1+rate*dt);
+  }
   for(let k=0;k<nz;k++){
     const Lnew=(ref.rhoThetaInterface[k+1]!*state.w[k+1]!-ref.rhoThetaInterface[k]!*state.w[k]!)/v.dz[k]!;
     state.rhoTheta[k] = state.rhoTheta[k]! - dt*(oldWeight*Lold[k]!+theta*Lnew);
