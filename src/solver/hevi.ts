@@ -8,12 +8,19 @@ export interface ColumnState { rho:Float64Array; rhoTheta:Float64Array; w:Float6
 
 /**
  * Linearized HEVI acoustic step around the hydrostatic reference state.
- * The implicit operator advances the base-state vertical mass and rho*theta fluxes;
- * nonlinear perturbation transport is handled by the outer finite-volume step.
+ *
+ * offCentering uses theta = 0.5 * (1 + epsilon). epsilon=0 recovers the
+ * centered Crank-Nicolson form used by the Stage 3 reference tests; epsilon>0
+ * forward-centers the coupled vertical acoustic solve and selectively damps
+ * the fast vertically propagating computational mode. Both vertical mass and
+ * rho*theta flux updates use the same theta, so the column flux divergence
+ * remains conservative.
  */
-export function heviColumnStep(v:VerticalGrid,ref:ReferenceAtmosphere,state:ColumnState,dt:number):void {
+export function heviColumnStep(v:VerticalGrid,ref:ReferenceAtmosphere,state:ColumnState,dt:number,offCentering=0):void {
   const nz=v.nz; if(state.rho.length!==nz||state.rhoTheta.length!==nz||state.w.length!==nz+1) throw new Error('column shape mismatch');
+  if(!(offCentering>=0&&offCentering<1))throw new Error('HEVI offCentering must be in [0,1)');
   if(nz<2) return;
+  const theta=0.5*(1+offCentering), oldWeight=1-theta;
   const n=nz-1, lo=new Float64Array(n), di=new Float64Array(n), up=new Float64Array(n), rhs=new Float64Array(n), sol=new Float64Array(n);
   const wOld=state.w.slice(); const pOld=new Float64Array(nz);
   for(let k=0;k<nz;k++) pOld[k]=pressureFromRhoTheta(state.rhoTheta[k]!)-ref.pCenter[k]!;
@@ -23,21 +30,20 @@ export function heviColumnStep(v:VerticalGrid,ref:ReferenceAtmosphere,state:Colu
     const i=ii+1,l=i-1,u=i, dzc=v.zCenter[u]!-v.zCenter[l]!;
     const rho0i=0.5*(ref.rhoCenter[l]!+ref.rhoCenter[u]!); const rhoi=0.5*(rho0i+0.5*(state.rho[l]!+state.rho[u]!));
     const Al=DRY_AIR.gamma*ref.pCenter[l]!/ref.rhoThetaCenter[l]!, Au=DRY_AIR.gamma*ref.pCenter[u]!/ref.rhoThetaCenter[u]!;
-    const fac=0.25*dt*dt/(rhoi*dzc);
+    const base=dt*dt/(rhoi*dzc), facNew=theta*theta*base, facOld=theta*oldWeight*base;
     const xim=ref.rhoThetaInterface[i-1]!, xi=ref.rhoThetaInterface[i]!, xip=ref.rhoThetaInterface[i+1]!;
-    lo[ii]=-fac*Al*xim/v.dz[l]!;
-    di[ii]=1+fac*(Au*xi/v.dz[u]!+Al*xi/v.dz[l]!);
-    up[ii]=-fac*Au*xip/v.dz[u]!;
-    rhs[ii]=wOld[i]!-dt*(pOld[u]!-pOld[l]!)/(rhoi*dzc)+fac*(Au*Lold[u]!-Al*Lold[l]!);
+    lo[ii]=-facNew*Al*xim/v.dz[l]!;
+    di[ii]=1+facNew*(Au*xi/v.dz[u]!+Al*xi/v.dz[l]!);
+    up[ii]=-facNew*Au*xip/v.dz[u]!;
+    rhs[ii]=wOld[i]!-dt*(pOld[u]!-pOld[l]!)/(rhoi*dzc)+facOld*(Au*Lold[u]!-Al*Lold[l]!);
   }
   lo[0]=0; up[n-1]=0; solveTridiagonal(lo,di,up,rhs,sol);
   state.w[0]=0; state.w[nz]=0; for(let i=1;i<nz;i++) state.w[i]=sol[i-1]!;
   for(let k=0;k<nz;k++){
     const Lnew=(ref.rhoThetaInterface[k+1]!*state.w[k+1]!-ref.rhoThetaInterface[k]!*state.w[k]!)/v.dz[k]!;
-    state.rhoTheta[k] = state.rhoTheta[k]! - 0.5*dt*(Lold[k]!+Lnew);
+    state.rhoTheta[k] = state.rhoTheta[k]! - dt*(oldWeight*Lold[k]!+theta*Lnew);
     const Rold=(ref.rhoInterface[k+1]!*wOld[k+1]!-ref.rhoInterface[k]!*wOld[k]!)/v.dz[k]!;
     const Rnew=(ref.rhoInterface[k+1]!*state.w[k+1]!-ref.rhoInterface[k]!*state.w[k]!)/v.dz[k]!;
-    state.rho[k] = state.rho[k]! - 0.5*dt*(Rold+Rnew);
+    state.rho[k] = state.rho[k]! - dt*(oldWeight*Rold+theta*Rnew);
   }
-
 }
