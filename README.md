@@ -7,11 +7,12 @@
 - Stage 1：技術研究與核心選型 — 完成。
 - Stage 2：風險 prototype + 完整物理／數值／資料／驗證規格 — 完成。
 - Stage 3：最小三維 dry non-rotating core — **完成**。CPU Float64 7/7、真機 WebGPU pipeline/smoke、1000-step hydrostatic-rest / conservation / CPU-vs-GPU agreement 全部通過。
-- Stage 4：旋轉全球乾大氣 — **CPU V2 reference 5/5 tests 已通過；WebGPU rotating core、GPU/CPU agreement 與 30-day Held–Suarez development gate 已實作，等待真機驗收。**
+- Stage 4：旋轉全球乾大氣 — **實作與除錯中，尚未封關。** Rotation、Coriolis、3-D momentum transport、Held–Suarez forcing、model-top sponge 與 acoustic-divergence damping 已實作。短期 GPU/CPU agreement 曾通過；30-day gate 暴露 long-run acoustic/divergence instability，最新修正需重新驗收。
 
 Stage 2：`docs/STAGE2_COMPLETE_SPEC.md`  
 Stage 3：`docs/STAGE3_IMPLEMENTATION.md`  
-Stage 4：`docs/STAGE4_IMPLEMENTATION.md`
+Stage 4：`docs/STAGE4_IMPLEMENTATION.md`  
+Stage 4 long-run failure log：`docs/STAGE4_LONGRUN_FAILURE_20260904.md`
 
 ## 執行 / Run
 
@@ -24,12 +25,12 @@ npm run serve
 Stage 3 Debug Viewer：`http://127.0.0.1:5173/`  
 Stage 4 Validation：`http://127.0.0.1:5173/stage4.html`
 
-Stage 4 頁面啟動時會先建立並執行 rotating WebGPU pipeline smoke。通過後依序執行：
+Stage 4 頁面啟動時會建立並執行 rotating + acoustic-divergence-filter + model-top-sponge WebGPU smoke。通過後依序執行：
 
 1. `執行一致性驗證 / Run agreement validation`
 2. `執行 30 日驗證 / Run 30-day validation`
 
-真機結果未通過以前，Stage 4 不標記 COMPLETE。
+最新 acoustic filter 加入後，請先確認 `npm test` 顯示 Stage 3 `7/7` 與 Stage 4 `6/6`，再跑真機 gate。真機結果未通過以前，Stage 4 不標記 COMPLETE。
 
 使用者介面依 `docs/UI_SPEC.md` 固定採繁體中文 + English 同時顯示，不使用語言切換作為主要介面模式。
 
