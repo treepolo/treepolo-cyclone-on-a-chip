@@ -20,7 +20,7 @@ export class RotatingDryCoreCpu{
     const cor=opt.coriolis!==false,mom=opt.momentumTransport!==false,hs=opt.heldSuarez!==false,sponge=opt.topSponge!==false,divDamp=opt.divergenceDamping!==false;
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
     const d=this.dry.step(s,dt,sponge);
-    if(mom){if(!this.dry.lastTransport)throw new Error('missing transport snapshot');this.advectHorizontalMomentum(s,dt,this.dry.lastTransport);advectVerticalVelocity(this.h,this.v,s,dt)}
+    if(mom){if(!this.dry.lastTransport)throw new Error('missing transport snapshot');advectVerticalVelocity(this.h,this.v,s,dt);this.advectHorizontalMomentum(s,dt,this.dry.lastTransport)}
     if(hs)applyHeldSuarezForcing(this.h,this.v,s,dt);
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
     if(divDamp)applyAcousticDivergenceDamping(this.h,this.v,this.ref,s,acousticDivergenceCoefficientForDt(dt));
