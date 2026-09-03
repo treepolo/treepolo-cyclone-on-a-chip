@@ -2,6 +2,7 @@ import { EARTH } from '../core/constants.js';
 import { Vec3, dot3, scale3, sub3 } from '../core/math.js';
 import { CubedSphereGrid } from '../grid/cubedSphere.js';
 import { VerticalGrid } from '../grid/vertical.js';
+import { applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
 import { applyHeldSuarezForcing } from '../physics/heldSuarez.js';
 import { applyModelTopSponge } from '../physics/modelTopSponge.js';
 import { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
@@ -9,18 +10,19 @@ import { RotationGeometry, addCellWindDeltaToEdges, applyTraditionalCoriolis, bu
 import { DryCoreCpu, StepDiagnostics, TransportSnapshot } from './dryCoreCpu.js';
 import { DryState, cell3DIndex, edge3DIndex, w3DIndex } from './state.js';
 
-export interface RotatingStepOptions{heldSuarez?:boolean;momentumTransport?:boolean;coriolis?:boolean;topSponge?:boolean}
+export interface RotatingStepOptions{heldSuarez?:boolean;momentumTransport?:boolean;coriolis?:boolean;topSponge?:boolean;divergenceDamping?:boolean}
 export class RotatingDryCoreCpu{
   readonly dry:DryCoreCpu;readonly rotation:RotationGeometry;
   constructor(public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere){this.dry=new DryCoreCpu(h,v,ref);this.dry.captureTransport=true;this.rotation=buildRotationGeometry(h)}
   step(s:DryState,dt:number,opt:RotatingStepOptions={}):StepDiagnostics{
-    const cor=opt.coriolis!==false,mom=opt.momentumTransport!==false,hs=opt.heldSuarez!==false,sponge=opt.topSponge!==false;
+    const cor=opt.coriolis!==false,mom=opt.momentumTransport!==false,hs=opt.heldSuarez!==false,sponge=opt.topSponge!==false,divDamp=opt.divergenceDamping!==false;
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
     const d=this.dry.step(s,dt);
     if(mom){if(!this.dry.lastTransport)throw new Error('missing transport snapshot');this.advectMomentum(s,dt,this.dry.lastTransport)}
     if(hs)applyHeldSuarezForcing(this.h,this.v,s,dt);
-    if(sponge)applyModelTopSponge(this.v,s,dt);
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
+    if(divDamp)applyAcousticDivergenceDamping(this.h,this.v,this.ref,s);
+    if(sponge)applyModelTopSponge(this.v,s,dt);
     return d;
   }
   private advectMomentum(s:DryState,dt:number,t:TransportSnapshot):void{
