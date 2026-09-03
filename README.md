@@ -6,15 +6,14 @@
 
 - Stage 1：技術研究與核心選型 — 完成。
 - Stage 2：風險 prototype + 完整物理／數值／資料／驗證規格 — 完成。
-- Stage 3：最小三維 dry non-rotating core — **完成**。CPU Float64 7/7 tests、真機 WebGPU pipeline/smoke、1000-step hydrostatic-rest / conservation / CPU-vs-GPU agreement gate 全部通過。
-- 下一步：Stage 4 — 旋轉全球乾大氣。
+- Stage 3：最小三維 dry non-rotating core — **完成**。CPU Float64 7/7、真機 WebGPU pipeline/smoke、1000-step hydrostatic-rest / conservation / CPU-vs-GPU agreement 全部通過。
+- Stage 4：旋轉全球乾大氣 — **CPU V2 reference 5/5 tests 已通過；WebGPU rotating core、GPU/CPU agreement 與 30-day Held–Suarez development gate 已實作，等待真機驗收。**
 
-Stage 2 入口：`docs/STAGE2_COMPLETE_SPEC.md`  
-Stage 3 實作與結果：`docs/STAGE3_IMPLEMENTATION.md`  
-Stage 3 真機 GPU smoke：`docs/STAGE3_GPU_SMOKE_20260903.md`  
-Stage 3 GPU 多步驗證：`docs/STAGE3_GPU_MULTISTEP_VALIDATION.md`
+Stage 2：`docs/STAGE2_COMPLETE_SPEC.md`  
+Stage 3：`docs/STAGE3_IMPLEMENTATION.md`  
+Stage 4：`docs/STAGE4_IMPLEMENTATION.md`
 
-## Stage 3 run
+## 執行 / Run
 
 ```bash
 npm install
@@ -22,7 +21,15 @@ npm test
 npm run serve
 ```
 
-開啟 `http://127.0.0.1:5173`。Debug Viewer 可以旋轉真正的 3D 大氣球殼、單步／連續積分並插入 constant-pressure thermal bubble；頁面會建立 WebGPU compute pipelines、跑 hydrostatic smoke，並可手動重跑 1000-step GPU correctness gate。
+Stage 3 Debug Viewer：`http://127.0.0.1:5173/`  
+Stage 4 Validation：`http://127.0.0.1:5173/stage4.html`
+
+Stage 4 頁面啟動時會先建立並執行 rotating WebGPU pipeline smoke。通過後依序執行：
+
+1. `執行一致性驗證 / Run agreement validation`
+2. `執行 30 日驗證 / Run 30-day validation`
+
+真機結果未通過以前，Stage 4 不標記 COMPLETE。
 
 使用者介面依 `docs/UI_SPEC.md` 固定採繁體中文 + English 同時顯示，不使用語言切換作為主要介面模式。
 
@@ -52,7 +59,7 @@ P1 WebGPU 裝置 benchmark：由本機 HTTP server 開啟 `prototypes/p1_webgpu.
 ## 核心硬限制
 
 - 真正 3D、有厚度的大氣球殼。
-- fully compressible、non-hydrostatic atmosphere；旋轉從 Stage 4 開始加入。
+- fully compressible、non-hydrostatic atmosphere。
 - 天氣系統不可硬編生成。
 - Eulerian field 才是物理狀態；可見粒子只作 Lagrangian tracer / visualization。
 - mass / water transport 使用 conservative finite-volume flux。

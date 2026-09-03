@@ -1,0 +1,15 @@
+import { EARTH } from '../core/constants.js';
+import { CubedSphereGrid } from '../grid/cubedSphere.js';
+import { VerticalGrid } from '../grid/vertical.js';
+import { pressureFromRhoTheta, temperatureFromThetaP } from '../physics/thermodynamics.js';
+import { RotationGeometry, buildRotationGeometry, reconstructCellHorizontalWind } from '../physics/rotation.js';
+import { DryState, cell3DIndex } from './state.js';
+
+export interface ZonalMeanDiagnostics{bins:number;latDeg:Float64Array;temperature:Float64Array;zonalWind:Float64Array;meridionalWind:Float64Array;streamfunction:Float64Array;maxUpperMidlatitudeWesterly:number;meanTropicalLowLevelZonal:number;maxAbsStreamfunction:number;nhDominantStreamfunction:number;shDominantStreamfunction:number}
+export function diagnoseZonalMeans(h:CubedSphereGrid,v:VerticalGrid,s:DryState,bins=18,g:RotationGeometry=buildRotationGeometry(h)):ZonalMeanDiagnostics{
+  const n=bins*v.nz,T=new Float64Array(n),U=new Float64Array(n),V=new Float64Array(n),RhoV=new Float64Array(n),Wgt=new Float64Array(n),latDeg=new Float64Array(bins),psi=new Float64Array(n);for(let b=0;b<bins;b++)latDeg[b]=-90+(b+.5)*180/bins;const winds:Float64Array[]=Array.from({length:v.nz},(_,k)=>reconstructCellHorizontalWind(h,g,s,k));
+  for(let c=0;c<h.cellCount;c++){const z=h.cellCenters[c*3+2]!,lat=Math.asin(z),b=Math.max(0,Math.min(bins-1,Math.floor((lat+Math.PI/2)/Math.PI*bins))),xy=Math.hypot(h.cellCenters[c*3]!,h.cellCenters[c*3+1]!),east:[number,number,number]=xy>1e-14?[-h.cellCenters[c*3+1]!/xy,h.cellCenters[c*3]!/xy,0]:[0,1,0],north:[number,number,number]=[-z*east[1],z*east[0],xy],wt=h.cellAreaUnit[c]!;for(let k=0;k<v.nz;k++){const q=cell3DIndex(c,k,v.nz),p=pressureFromRhoTheta(s.rhoThetaM[q]!),theta=s.rhoThetaM[q]!/s.rhoD[q]!,temp=temperatureFromThetaP(theta,p),w=winds[k]!,u=w[c*3]!*east[0]+w[c*3+1]!*east[1]+w[c*3+2]!*east[2],vv=w[c*3]!*north[0]+w[c*3+1]!*north[1]+w[c*3+2]!*north[2],id=b*v.nz+k;T[id]=T[id]!+wt*temp;U[id]=U[id]!+wt*u;V[id]=V[id]!+wt*vv;RhoV[id]=RhoV[id]!+wt*s.rhoD[q]!*vv;Wgt[id]=Wgt[id]!+wt;}}
+  for(let i=0;i<n;i++)if(Wgt[i]!>0){T[i]=T[i]!/Wgt[i]!;U[i]=U[i]!/Wgt[i]!;V[i]=V[i]!/Wgt[i]!;RhoV[i]=RhoV[i]!/Wgt[i]!}
+  let maxW=-Infinity,tropSum=0,tropW=0,maxPsi=0,nhDom=0,shDom=0;for(let b=0;b<bins;b++){const lat=latDeg[b]!*Math.PI/180,fac=2*Math.PI*EARTH.radius*Math.max(0,Math.cos(lat));let acc=0;for(let k=0;k<v.nz;k++){const id=b*v.nz+k;acc+=RhoV[id]!*v.dz[k]!;psi[id]=fac*acc;maxPsi=Math.max(maxPsi,Math.abs(psi[id]!));if(latDeg[b]!>0&&Math.abs(psi[id]!)>Math.abs(nhDom))nhDom=psi[id]!;if(latDeg[b]!<0&&Math.abs(psi[id]!)>Math.abs(shDom))shDom=psi[id]!;if(Math.abs(latDeg[b]!)>=20&&Math.abs(latDeg[b]!)<=70&&v.zCenter[k]!>=5000&&v.zCenter[k]!<=18000)maxW=Math.max(maxW,U[id]!);if(Math.abs(latDeg[b]!)>=5&&Math.abs(latDeg[b]!)<=30&&v.zCenter[k]!<=2500){tropSum+=U[id]!*Wgt[id]!;tropW+=Wgt[id]!;}}}
+  return{bins,latDeg,temperature:T,zonalWind:U,meridionalWind:V,streamfunction:psi,maxUpperMidlatitudeWesterly:maxW,meanTropicalLowLevelZonal:tropW?tropSum/tropW:NaN,maxAbsStreamfunction:maxPsi,nhDominantStreamfunction:nhDom,shDominantStreamfunction:shDom};
+}
