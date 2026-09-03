@@ -6,9 +6,19 @@ export interface ModelTopSpongeConfig {
   maxRate:number;
 }
 
+/**
+ * Stage-4 upper absorbing layer.
+ *
+ * The production path applies this profile implicitly inside the HEVI vertical
+ * acoustic solve.  The 0.2 s^-1 peak follows the Klemp et al. (2008) / WRF
+ * implicit gravity-wave absorber convention; it is intentionally much
+ * stronger than the old post-step 1/600 s^-1 w-only sponge because a thin
+ * acoustic/gravity-wave buffer must remove upward-propagating energy before it
+ * reaches the rigid lid.
+ */
 export const MODEL_TOP_SPONGE:ModelTopSpongeConfig={
   startFraction:0.75,
-  maxRate:1/600,
+  maxRate:0.2,
 };
 
 export function modelTopSpongeRate(z:number,top:number,config:ModelTopSpongeConfig=MODEL_TOP_SPONGE):number{
@@ -26,10 +36,9 @@ export function buildModelTopSpongeRates(v:VerticalGrid,config:ModelTopSpongeCon
 }
 
 /**
- * Absorbing-layer treatment for the artificial rigid model top.
- * Only vertical velocity is damped and only in the uppermost part of the domain.
- * Mass and thermodynamic state are untouched, so this does not repair conservation
- * by normalization or clamp an invalid state.
+ * Legacy explicit helper retained for isolated experiments only.  Stage 4 does
+ * NOT call this function: the production absorber is applied implicitly inside
+ * HEVI before the new-time vertical mass/thermodynamic fluxes are evaluated.
  */
 export function applyModelTopSponge(v:VerticalGrid,s:DryState,dt:number,config:ModelTopSpongeConfig=MODEL_TOP_SPONGE):void{
   if(!(dt>0))throw new Error('sponge dt must be positive');
@@ -37,6 +46,6 @@ export function applyModelTopSponge(v:VerticalGrid,s:DryState,dt:number,config:M
     const rate=modelTopSpongeRate(v.zInterface[i]!,v.top,config);
     if(rate<=0)continue;
     const q=w3DIndex(c,i,v.nz);
-    s.wInterface[q]=s.wInterface[q]!*Math.exp(-rate*dt);
+    s.wInterface[q]=s.wInterface[q]!/(1+rate*dt);
   }
 }
