@@ -1,19 +1,20 @@
-# Stage 4 長時間 Held–Suarez 首次真機失敗與修正 / First long-run failure and correction
+# Stage 4 長時間 Held–Suarez 真機失敗與修正紀錄 / Long-run real-device failures and corrections
 
 日期 / Date: 2026-09-04
 
-## 真機結果 / Real-device result
+## Gate A：短期 GPU/CPU 一致性 / Short-term agreement
 
-Stage 4 Gate A（GPU Float32 / CPU Float64 short-term agreement）通過：
+真機 PASS（500 steps）：
 
-- 500 steps
-- GPU mass drift `6.138e-8`
-- `rhoD` relative L2 `1.398e-5`
-- `rhoThetaM` relative L2 `3.932e-6`
-- max `|Δu| = 2.578e-3 m/s`
-- max `|Δw| = 2.302e-3 m/s`
+- GPU mass drift `6.138e-8`（加入 top sponge 後重跑為 `3.588e-8`）；
+- `rhoD` relative L2 約 `1.4e-5`；
+- `rhoThetaM` relative L2 約 `3.9e-6`；
+- max `|Δu|` 約 `2.6e-3 m/s`；
+- max `|Δw|` 約 `2.3e-3 m/s`，top-sponge 版約 `1.68e-3 m/s`。
 
-原 30-day Held–Suarez gate 使用 `dt=20 s`，在第 4 日失敗。前 3 日：
+因此目前沒有證據顯示 Stage 4 GPU WGSL 與 CPU Float64 在短期內有符號、投影或 forcing 實作分歧。
+
+## Failure A：原始 `dt=20 s`，第 4 日 NaN
 
 | Day | mass drift | upper-midlatitude westerly | tropical low-level zonal wind | max overturning | max `|w|` |
 |---:|---:|---:|---:|---:|---:|
@@ -22,53 +23,57 @@ Stage 4 Gate A（GPU Float32 / CPU Float64 short-term agreement）通過：
 | 3 | `3.601e-7` | `4.364 m/s` | `-0.304 m/s` | `3.478e10 kg/s` | `7.208 m/s` |
 | 4 | `NaN` | `NaN` | `NaN` | `NaN` | `NaN` |
 
-這代表西風、低層熱帶東風與翻轉環流在失敗前確實已開始自行形成，但垂直快模態的振幅快速增長，最終使狀態失效。不能把這次結果判為氣候 gate 通過。
+修正 A：補上 30 km rigid model top 的 Rayleigh sponge，作用於上方 25% 高度且只阻尼 `w`；長期 reference timestep 改為 `10 s`；checkpoint 改成每 0.25 日。
 
-## 技術判讀 / Technical interpretation
+## Failure B：`dt=10 s` + top sponge，第 9.5 日 stability guard
 
-兩個先前尚未被長期證據驗證的項目被暴露出來：
+第二次真機測試沒有 NaN，但 `max |w|` 仍持續長大並在 day 9.5 超過事先設定的 `10 m/s` stability guard：
 
-1. Stage 2 數值規格原本要求 model-top sponge，但 Stage 3/4 第一版尚未實作。30 km rigid `w=0` artificial top 會反射非靜力重力／聲波，長時間下可能使快模態能量累積。
-2. `dt=20 s` 只通過一日 CPU sanity；一日穩定不足以證明它可作長期 reference timestep。第 4 日真機爆炸否定了先前較樂觀的長期假設。
+- day 0.25: `max|w| = 0.1004 m/s`
+- day 1.00: `0.2952 m/s`
+- day 2.00: `0.8485 m/s`
+- day 3.00: `2.680 m/s`
+- day 4.00: `4.835 m/s`
+- day 6.00: `7.284 m/s`
+- day 8.00: `9.050 m/s`
+- day 9.25: `9.932 m/s`
+- day 9.50: `10.049 m/s` → FAIL
 
-本次不使用 density/pressure clamp、事後 normalization 或放寬 circulation gate 來掩蓋問題。
+同期間：
 
-## 修正 / Correction
+- mass drift 仍只有約 `10^-6`；
+- upper-midlatitude westerly 已發展至約 `6.6 m/s`；
+- tropical low-level zonal wind 持續為 easterly（約 `-0.47 m/s`）；
+- overturning 約 `10^10 kg/s`。
 
-### Model-top absorbing layer
+這表示 model-top reflection 確實是第一個問題的一部分，但 top sponge 並不足以處理整個可壓縮快模態噪音。不能用加強整層 Rayleigh drag、clamp `w` 或把 10 m/s gate 往上調來掩蓋它。
 
-新增 `src/physics/modelTopSponge.ts` 與 WebGPU 對應 pipeline：
+## 修正 B：3-D acoustic divergence damping
 
-- sponge start = `0.75 H_top`；
-- 往上使用平滑 `sin²` ramp；
-- top maximum Rayleigh rate = `1/600 s^-1`；
-- 只阻尼 vertical velocity `w`；
-- 下方 75% 大氣完全不受 sponge 影響；
-- 不修改 mass / thermodynamic variables。
+Stage 2 的數值規格原先就保留 numerical divergence / acoustic filtering。現在正式加入：
 
-它的用途是吸收人工模式頂反射的垂直波，不是壓掉對流層的 Hadley circulation。
+- CPU: `src/physics/acousticDivergenceDamping.ts`
+- WebGPU: `src/gpu/acousticDivergenceDampingGpu.ts`
+- dimensionless coefficient 固定 `gamma_d = 0.1`
+- 使用與 cubed-sphere finite-volume transport 相同 canonical shared-edge geometry；
+- cell divergence 採 base-state-mass-weighted 3-D form：
+  `div_h(u) + (1/rho0) d(rho0 w)/dz`
+- filter 只修改 horizontal edge velocity 的 divergent component；
+- 不修改 mass、`rhoTheta`，不做 velocity clamp；
+- model-top sponge 繼續保留，因為兩者處理不同來源：sponge 處理人工頂界反射，divergence filter 處理可壓縮 acoustic divergence。
 
-### Long-run reference timestep
+此方向與 MPAS / WRF 類 HEVI、split-explicit fully-compressible dynamical core 的常見 acoustic filtering 原理一致。
 
-30-day development gate 改為 `dt=10 s`。這是由 long-run stability evidence 修正 reference timestep，不是放寬驗收。
+## Gate 不變 / Gates are not relaxed
 
-### Better early diagnostics
+長期 development gate 仍要求：
 
-30-day gate 改為每 `0.25 day` readback；若以下任一條件發生則提早 FAIL：
+- `|mass drift| <= 5e-5`
+- upper-midlatitude westerly `> 0.5 m/s`
+- tropical low-level mean zonal wind `< 0`
+- max overturning `> 1e9 kg/s`
+- NH / SH dominant overturning signs opposite
+- no invalid / NaN / non-positive density or pressure
+- development-run numerical stability guard `max |w| < 10 m/s`
 
-- invalid / NaN / non-positive density or pressure；
-- `|dry-mass drift| > 5e-5`；
-- `max |w| >= 10 m/s` numerical-stability guard。
-
-最終 circulation gates（westerly / tropical easterly / overturning / opposite hemispheric signs）維持原本物理方向要求。
-
-## 狀態 / Status
-
-修正已提交，等待同一真實 WebGPU 裝置重新執行：
-
-1. `npm test`
-2. Stage 4 rotating + top-sponge smoke
-3. GPU/CPU agreement
-4. 30-day Held–Suarez development gate
-
-在新的 30-day gate 通過以前，Stage 4 仍未封關。
+加入 filter 後先重跑 CPU regressions、GPU/CPU agreement，再重跑同一個 30-day gate。結果出來以前 Stage 4 仍未封關。
