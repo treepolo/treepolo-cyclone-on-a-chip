@@ -4,7 +4,7 @@
 
 ## Gate A：短期 GPU/CPU 一致性 / Short-term agreement
 
-真機 PASS（500 steps）：
+最初 rotating-core 真機 PASS（500 steps）：
 
 - GPU mass drift `6.138e-8`（加入 top sponge 後重跑為 `3.588e-8`）；
 - `rhoD` relative L2 約 `1.4e-5`；
@@ -12,7 +12,7 @@
 - max `|Δu|` 約 `2.6e-3 m/s`；
 - max `|Δw|` 約 `2.3e-3 m/s`，top-sponge 版約 `1.68e-3 m/s`。
 
-因此目前沒有證據顯示 Stage 4 GPU WGSL 與 CPU Float64 在短期內有符號、投影或 forcing 實作分歧。
+因此原始 Stage 4 GPU WGSL 與 CPU Float64 在短期內沒有符號、投影或 forcing 實作分歧。
 
 ## Failure A：原始 `dt=20 s`，第 4 日 NaN
 
@@ -39,30 +39,56 @@
 - day 9.25: `9.932 m/s`
 - day 9.50: `10.049 m/s` → FAIL
 
-同期間：
-
-- mass drift 仍只有約 `10^-6`；
-- upper-midlatitude westerly 已發展至約 `6.6 m/s`；
-- tropical low-level zonal wind 持續為 easterly（約 `-0.47 m/s`）；
-- overturning 約 `10^10 kg/s`。
+同期間：mass drift 仍只有約 `10^-6`；upper-midlatitude westerly 已發展至約 `6.6 m/s`；tropical low-level zonal wind 持續為 easterly（約 `-0.47 m/s`）；overturning 約 `10^10 kg/s`。
 
 這表示 model-top reflection 確實是第一個問題的一部分，但 top sponge 並不足以處理整個可壓縮快模態噪音。不能用加強整層 Rayleigh drag、clamp `w` 或把 10 m/s gate 往上調來掩蓋它。
 
-## 修正 B：3-D acoustic divergence damping
+## Attempt B：初版 3-D acoustic divergence damping
 
-Stage 2 的數值規格原先就保留 numerical divergence / acoustic filtering。現在正式加入：
+依 Stage 2 原先保留的 acoustic/divergence stabilization，加入 coefficient `gamma_d = 0.1` 的 divergence filter。第一版 cell divergence 採：
 
-- CPU: `src/physics/acousticDivergenceDamping.ts`
-- WebGPU: `src/gpu/acousticDivergenceDampingGpu.ts`
-- dimensionless coefficient 固定 `gamma_d = 0.1`
-- 使用與 cubed-sphere finite-volume transport 相同 canonical shared-edge geometry；
-- cell divergence 採 base-state-mass-weighted 3-D form：
-  `div_h(u) + (1/rho0) d(rho0 w)/dz`
-- filter 只修改 horizontal edge velocity 的 divergent component；
+`div_h(u) + (1/rho0) d(rho0 w)/dz`
+
+並用此 divergence 的水平梯度修正 horizontal edge velocity。CPU regression 對人工水平 divergent noise 可降低 RMS，因此初步單元測試通過。
+
+### Failure C：3-D filter 造成 GPU/CPU 快速分岔
+
+真機 short-term agreement 立即暴露跨尺度問題：
+
+| Step | max `|Δu|` | max `|Δw|` |
+|---:|---:|---:|
+| 1 | `5.891e-4 m/s` | `2.209e-5 m/s` |
+| 10 | `6.159e-2 m/s` | `2.383e-4 m/s` |
+| 100 | `1.469 m/s` | `2.836e-3 m/s` |
+| 250 | `6.190 m/s` | `9.375e-3 m/s` |
+| 500 | `178.1 m/s` | `0.8857 m/s` |
+
+質量漂移在 step 500 仍只有 `-6.974e-9`，所以不是 mass conservation 爆掉；差異由 velocity operator 快速放大。
+
+根因是全球粗網格具有巨大的 horizontal/vertical aspect ratio。CPU Float64 與 GPU Float32 在 HEVI 後只有約 `10^-5 m/s` 級的 `w` 差異，但 `(1/rho0)d(rho0 w)/dz` 被送入以水平 grid length 尺度化的 velocity correction，會把微小垂直差異直接放大成水平速度擾動，再透過動力核心回饋。這個離散形式對本專案的 anisotropic global grid 不合適。
+
+## 修正 C：horizontal-divergence-only acoustic damping
+
+Acoustic filter 改為只計算：
+
+`D = div_h(u)`
+
+並維持：
+
+`u_edge <- u_edge + gamma_d * d_edge * (D_R - D_L)`
+
+理由與責任分工：
+
+- HEVI 負責 vertically propagating acoustic mode；
+- model-top sponge 吸收人工 rigid-top 的垂直波反射；
+- horizontal divergence damping 只處理 horizontally propagating acoustic/divergent grid-scale mode；
+- vertical velocity `w` 不再作為 horizontal filter 的直接輸入；
 - 不修改 mass、`rhoTheta`，不做 velocity clamp；
-- model-top sponge 繼續保留，因為兩者處理不同來源：sponge 處理人工頂界反射，divergence filter 處理可壓縮 acoustic divergence。
+- `gamma_d = 0.1` 與所有 long-run physical gates 維持不變。
 
-此方向與 MPAS / WRF 類 HEVI、split-explicit fully-compressible dynamical core 的常見 acoustic filtering 原理一致。
+新增 regression：建立 `u=0`、`w!=0` 的狀態後執行 acoustic filter，要求 `u` 必須保持精確為 0，以防 vertical-to-horizontal aspect-ratio leakage 再次出現。
+
+GPU divergence pass 也移除 `w` 與 vertical metric storage buffers，使 filter 的 CPU/GPU 離散形式重新一一對應。
 
 ## Gate 不變 / Gates are not relaxed
 
@@ -76,4 +102,4 @@ Stage 2 的數值規格原先就保留 numerical divergence / acoustic filtering
 - no invalid / NaN / non-positive density or pressure
 - development-run numerical stability guard `max |w| < 10 m/s`
 
-加入 filter 後先重跑 CPU regressions、GPU/CPU agreement，再重跑同一個 30-day gate。結果出來以前 Stage 4 仍未封關。
+修正後仍必須依序重跑 CPU regressions、GPU/CPU agreement，再重跑同一個 30-day gate。結果出來以前 Stage 4 仍未封關。
