@@ -34,7 +34,7 @@ GPU mass drift uses the uploaded-and-read-back Float32 initial state as its base
 
 ## Stage 3 gate thresholds / 門檻
 
-第一版 gate 使用下列明確門檻；若真機結果失敗，先分析誤差來源，不以放寬門檻掩蓋 solver 問題。
+以下門檻在真機結果產生前已先鎖定；不依結果事後放寬。
 
 | Metric | Threshold |
 |---|---:|
@@ -48,25 +48,36 @@ GPU mass drift uses the uploaded-and-read-back Float32 initial state as its base
 
 這些門檻屬 Stage 3 debug-grid correctness gate，不是未來 production weather accuracy 的最終誤差規範。
 
-These thresholds are correctness gates for the Stage 3 debug grid, not final production-weather accuracy requirements.
+## 真機結果 / Real-device result — PASS
 
-## UI / 執行方式
+Windows + Chrome 真機執行 1000-step validation：**PASS**。
 
-更新本機後：
+| Step | GPU mass drift | GPU max `|w|` (m/s) | `rhoD` rel. L2 | `rhoThetaM` rel. L2 |
+|---:|---:|---:|---:|---:|
+| 1 | `0.000e+0` | `6.843e-6` | `2.033e-8` | `2.848e-8` |
+| 10 | `-6.751e-9` | `5.893e-5` | `4.519e-8` | `2.848e-8` |
+| 100 | `-1.260e-7` | `2.513e-4` | `7.522e-7` | `1.142e-7` |
+| 250 | `6.664e-8` | `3.496e-4` | `1.019e-6` | `2.580e-7` |
+| 500 | `1.649e-7` | `3.107e-4` | `1.316e-6` | `3.931e-7` |
+| 1000 | `4.341e-7` | `9.828e-4` | `1.605e-6` | `8.172e-7` |
 
-```bash
-npm test
-npm run serve
-```
+1000-step final checkpoint：
 
-開啟 `http://127.0.0.1:5173`。one-step WebGPU smoke 通過後，按：
+- GPU dry-mass drift = `4.341e-7` ≤ `1e-6` → PASS。
+- GPU max `|w| = 9.828e-4 m/s` ≤ `1e-3 m/s` → PASS。
+- `rhoD` CPU/GPU relative L2 = `1.605e-6` ≤ `2e-5` → PASS。
+- `rhoThetaM` CPU/GPU relative L2 = `8.172e-7` ≤ `2e-5` → PASS。
+- max `|Δu| = 0` ≤ `1e-4 m/s` → PASS。
+- max `|Δw| = 9.828e-4 m/s` ≤ `1e-3 m/s` → PASS。
+- 全程未觸發 NaN、負密度或負壓力 validation failure。
+- 1000 步共 250 s 模擬時間，真機驗證耗時約 `5.28 s`。
 
-`執行 1000 步驗證 / Run 1000-step validation`
+## 判讀 / Interpretation
 
-頁面會顯示 checkpoint 數值與最終 `通過 / PASS` 或 `失敗 / FAIL`；完整失敗原因同時寫入中英雙語 Log。
+Stage 3 的多步 GPU hydrostatic-rest、守恆與 CPU/GPU agreement gate **正式通過**。Float32 GPU 解在 1000 步內沒有出現爆炸、質量失控或 CPU/GPU 場量快速發散。
+
+需要持續監控的一點：1000-step `max |w| = 9.828e-4 m/s` 已達目前 `1e-3 m/s` gate 的約 98.3%。它仍符合事前門檻，因此 Stage 3 可以封關；但 Stage 4 加入旋轉與長時間積分後，hydrostatic residual / balance error 必須繼續列入 regression diagnostics，若繼續成長則需改善 reference-state、Float32 conditioning 或時間積分，而不能把它當成真實環流。
 
 ## 狀態 / Status
 
-驗證 harness 已實作；仍需在真實 WebGPU 裝置執行。只有真機 1000-step gate 通過後，Stage 3 才正式封關並進入 Stage 4。
-
-The validation harness is implemented and awaits a real-device run. Stage 3 closes only after the real-device 1000-step gate passes.
+**PASS — Stage 3 final GPU gate complete. Stage 3 is closed and Stage 4 may begin.**
