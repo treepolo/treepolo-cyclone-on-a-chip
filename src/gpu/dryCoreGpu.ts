@@ -64,10 +64,12 @@ const HEVI_SHADER = COMMON + /* wgsl */`
 const MAX_NZ:u32=128u;
 @group(0) @binding(1) var<storage,read> layerRef:array<f32>;
 @group(0) @binding(2) var<storage,read> interfaceRef:array<f32>;
-@group(0) @binding(3) var<storage,read_write> rho:array<f32>;
-@group(0) @binding(4) var<storage,read_write> rhoTheta:array<f32>;
-@group(0) @binding(5) var<storage,read_write> w:array<f32>;
-@group(0) @binding(6) var<storage,read> heviRayleigh:array<f32>;
+@group(0) @binding(3) var<storage,read> cellArea:array<f32>;
+@group(0) @binding(4) var<storage,read_write> rho:array<f32>;
+@group(0) @binding(5) var<storage,read_write> rhoTheta:array<f32>;
+@group(0) @binding(6) var<storage,read_write> w:array<f32>;
+@group(0) @binding(7) var<storage,read> heviRayleigh:array<f32>;
+@group(0) @binding(8) var<storage,read_write> heviRefMass:array<f32>;
 fn lz(k:u32)->f32{return layerRef[k*5u];}
 fn ldz(k:u32)->f32{return layerRef[k*5u+1u];}
 fn lp(k:u32)->f32{return layerRef[k*5u+2u];}
@@ -78,13 +80,13 @@ fn ix(i:u32)->f32{return interfaceRef[i*2u+1u];}
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let c=gid.x; if(c>=params.cellCount || params.nz>MAX_NZ){return;}
-  let nz=params.nz; let n=nz-1u;
+  let nz=params.nz; let n=nz-1u; let baseW=c*(nz+1u);
   let theta=0.5*(1.0+clamp(params.heviOffCentering,0.0,0.999));
   let oldWeight=1.0-theta;
   var oldW:array<f32,129>; var pPrime:array<f32,128>; var Lold:array<f32,128>;
   var lo:array<f32,127>; var di:array<f32,127>; var up:array<f32,127>; var rhs:array<f32,127>;
   var cp:array<f32,127>; var dp:array<f32,127>; var sol:array<f32,127>;
-  for(var k:u32=0u;k<=nz;k++){ oldW[k]=w[c*(nz+1u)+k]; }
+  for(var k:u32=0u;k<=nz;k++){ oldW[k]=w[baseW+k]; }
   for(var k:u32=0u;k<nz;k++){
     let q=c*nz+k;
     pPrime[k]=p_from_x(rhoTheta[q])-lp(k);
@@ -119,18 +121,22 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     var jj:i32=i32(n)-2;
     loop{if(jj<0){break;} let j=u32(jj); sol[j]=dp[j]-cp[j]*sol[j+1u]; jj=jj-1;}
   }
-  w[c*(nz+1u)]=0.0; w[c*(nz+1u)+nz]=0.0;
+  w[baseW]=0.0; w[baseW+nz]=0.0;
   for(var i:u32=1u;i<nz;i++){
     let rate=max(0.0,heviRayleigh[i]);
-    w[c*(nz+1u)+i]=sol[i-1u]/(1.0+rate*params.dt);
+    w[baseW+i]=sol[i-1u]/(1.0+rate*params.dt);
+  }
+  heviRefMass[baseW]=0.0; heviRefMass[baseW+nz]=0.0;
+  for(var i:u32=1u;i<nz;i++){
+    heviRefMass[baseW+i]=irho(i)*(oldWeight*oldW[i]+theta*w[baseW+i])*cellArea[c];
   }
   for(var k:u32=0u;k<nz;k++){
     let q=c*nz+k;
     let dz=ldz(k);
-    let Lnew=(ix(k+1u)*w[c*(nz+1u)+k+1u]-ix(k)*w[c*(nz+1u)+k])/dz;
+    let Lnew=(ix(k+1u)*w[baseW+k+1u]-ix(k)*w[baseW+k])/dz;
     rhoTheta[q]=rhoTheta[q]-params.dt*(oldWeight*Lold[k]+theta*Lnew);
     let Rold=(irho(k+1u)*oldW[k+1u]-irho(k)*oldW[k])/dz;
-    let Rnew=(irho(k+1u)*w[c*(nz+1u)+k+1u]-irho(k)*w[c*(nz+1u)+k])/dz;
+    let Rnew=(irho(k+1u)*w[baseW+k+1u]-irho(k)*w[baseW+k])/dz;
     rho[q]=rho[q]-params.dt*(oldWeight*Rold+theta*Rnew);
   }
 }`;
@@ -262,13 +268,14 @@ export class GpuDryCorePrototype {
     this.buffers.layerRef=makeBuffer(device,layerRef,storage,'layerRef[z,dz,p0,rho0,rhoTheta0]');
     this.buffers.interfaceRef=makeBuffer(device,interfaceRef,storage,'interfaceRef[rho0,rhoTheta0]');
     this.buffers.heviRayleigh=makeBuffer(device,rayleigh,storage,'HEVI implicit Rayleigh profile');
+    this.buffers.heviRefMass=makeEmpty(device,state.wInterface.length*4,storage,'HEVI reference vertical mass flux');
     this.buffers.rho=makeBuffer(device,f32(state.rhoD),storage,'rhoD');
     this.buffers.rhoTheta=makeBuffer(device,f32(state.rhoThetaM),storage,'rhoThetaM');
     this.buffers.u=makeBuffer(device,f32(state.uEdge),storage,'uEdge');
     this.buffers.w=makeBuffer(device,f32(state.wInterface),storage,'wInterface');
     this.buffers.pressure=makeEmpty(device,state.rhoD.length*4,storage,'pressure');
     this.buffers.hFlux=makeEmpty(device,state.uEdge.length*8,storage,'hFlux[rho,rhoTheta]');
-    this.buffers.vFlux=makeEmpty(device,state.wInterface.length*8,storage,'vFlux[rho,rhoTheta]');
+    this.buffers.vFlux=makeEmpty(device,state.wInterface.length*8,storage,'vFlux[perturbation rho,rhoTheta]');
     this.buildPipelines();
   }
 
@@ -296,7 +303,7 @@ export class GpuDryCorePrototype {
     const defs:[string,string,string[]][]=[
       ['pressure',PRESSURE_SHADER,['params','rhoTheta','pressure']],
       ['hvel',HVEL_SHADER,['params','edgeCells','edgeMetric','rho','pressure','u']],
-      ['hevi',HEVI_SHADER,['params','layerRef','interfaceRef','rho','rhoTheta','w','heviRayleigh']],
+      ['hevi',HEVI_SHADER,['params','layerRef','interfaceRef','cellArea','rho','rhoTheta','w','heviRayleigh','heviRefMass']],
       ['buoyancy',BUOYANCY_SHADER,['params','layerRef','rho','w']],
       ['hflux',HFLUX_SHADER,['params','edgeCells','edgeMetric','layerRef','rho','rhoTheta','u','hFlux']],
       ['vflux',VFLUX_SHADER,['params','cellArea','layerRef','rho','rhoTheta','w','vFlux']],
