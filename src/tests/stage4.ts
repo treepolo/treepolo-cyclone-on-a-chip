@@ -85,6 +85,19 @@ test('V2 implicit HEVI top absorber applies the configured Rayleigh profile befo
   assert(Math.abs(damp.w[i]!)<Math.abs(free.w[i]!),`implicit top absorber did not reduce upper w: free=${free.w[i]}, damp=${damp.w[i]}`);
 });
 
+test('V2 buoyancy forcing is inside the HEVI absorber instead of bypassing it',()=>{
+  const v=buildStretchedVerticalGrid(48,40000,1.4),ref=buildHeldSuarezReference(v),rates=buildModelTopSpongeRates(v),i=v.nz-1,dt=1,accel=new Float64Array(v.nz+1);
+  accel[i]=2;
+  const free={rho:Float64Array.from(ref.rhoCenter),rhoTheta:Float64Array.from(ref.rhoThetaCenter),w:new Float64Array(v.nz+1)};
+  const damp={rho:Float64Array.from(ref.rhoCenter),rhoTheta:Float64Array.from(ref.rhoThetaCenter),w:new Float64Array(v.nz+1)};
+  heviColumnStep(v,ref,free,dt,.1,undefined,accel);
+  heviColumnStep(v,ref,damp,dt,.1,rates,accel);
+  const rate=rates[i]!,expected=free.w[i]!/(1+rate*dt);
+  assert(Math.abs(free.w[i]!)>1e-6,`vertical forcing failed to produce w: ${free.w[i]}`);
+  assert(Math.abs(damp.w[i]!-expected)<1e-12,`buoyancy/absorber coupling mismatch: got=${damp.w[i]}, expected=${expected}`);
+  assert(Math.abs(damp.w[i]!)<Math.abs(free.w[i]!),`Rayleigh absorber was bypassed by vertical forcing: free=${free.w[i]}, damp=${damp.w[i]}`);
+});
+
 test('V2 rotating core keeps resting hydrostatic atmosphere at rest',()=>{
   const h=buildCubedSphere(4),v=buildStretchedVerticalGrid(16,30000,1.4),ref=buildHeldSuarezReference(v),s=createHydrostaticState(h,v,ref),core=new RotatingDryCoreCpu(h,v,ref),m0=diagnoseState(h,v,s).dryMass;
   for(let i=0;i<50;i++)core.step(s,1,{heldSuarez:false,momentumTransport:true,coriolis:true});
