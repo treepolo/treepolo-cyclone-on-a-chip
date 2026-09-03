@@ -1,0 +1,14 @@
+{
+  "name": "treepolo-cyclone-on-a-chip",
+  "version": "0.0.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node dist/tests/run.js",
+    "serve": "node tools/serve.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

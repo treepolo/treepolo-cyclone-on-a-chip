@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>treepolo Cyclone on a Chip — Stage 3 Debug Viewer</title>
+<style>
+html,body{margin:0;height:100%;background:#05070a;color:#dbe5ef;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}body{display:grid;grid-template-columns:minmax(0,1fr) 320px}canvas{width:100%;height:100%;display:block}.panel{padding:14px;border-left:1px solid #26303b;overflow:auto;background:#0a0e13}.panel h1{font-size:16px;margin:0 0 10px}.panel h2{font-size:13px;margin:16px 0 6px}.row{display:flex;justify-content:space-between;gap:12px;font-size:12px;line-height:1.55}.muted{color:#8da0b3}.ok{color:#91d6a7}.bad{color:#ff9a9a}button,select,input{font:inherit;background:#101821;color:#dbe5ef;border:1px solid #334354;padding:5px 7px}.controls{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:#05070a;padding:8px;border:1px solid #1d2833;min-height:100px}@media(max-width:760px){body{grid-template-columns:1fr;grid-template-rows:62vh 38vh}.panel{border-left:0;border-top:1px solid #26303b}}
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<section class="panel">
+<h1>Cyclone on a Chip — Stage 3</h1>
+<div class="muted">Dry / non-rotating / flat-surface debug core</div>
+<div class="controls"><button id="reset">Reset</button><button id="bubble">Thermal bubble</button><button id="step">Step</button><button id="run">Run</button></div>
+<div class="row"><span>WebGPU</span><span id="gpu">checking</span></div>
+<div class="row"><span>Grid</span><span id="grid"></span></div>
+<div class="row"><span>Cells</span><span id="cells"></span></div>
+<div class="row"><span>Atmosphere top</span><span>40 km</span></div>
+<h2>Diagnostics</h2>
+<div class="row"><span>dry mass drift</span><span id="mass">—</span></div>
+<div class="row"><span>max |w|</span><span id="wmax">—</span></div>
+<div class="row"><span>min ρ</span><span id="rhomin">—</span></div>
+<div class="row"><span>min p</span><span id="pmin">—</span></div>
+<div class="row"><span>sim time</span><span id="time">0 s</span></div>
+<h2>Viewer</h2>
+<div class="muted">Drag to rotate. Wheel/pinch changes zoom. Points are sampled 3D air cells; radial displacement is exaggerated so atmospheric thickness is visible.</div>
+<h2>Log</h2><div id="log" class="log"></div>
+</section>
+<script type="module" src="./dist/main.js"></script>
+</body>
+</html>
