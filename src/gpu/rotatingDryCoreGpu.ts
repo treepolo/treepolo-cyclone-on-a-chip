@@ -47,7 +47,7 @@ const VMOM=COMMON+/* wgsl */`
 `;
 const WADVECT=COMMON+/* wgsl */`
 struct SlotMeta{edge:i32,neighbor:i32,sign:i32,_pad:i32};
-@group(0)@binding(1)var<storage,read>meta:array<SlotMeta>;
+@group(0)@binding(1)var<storage,read>slotMeta:array<SlotMeta>;
 @group(0)@binding(2)var<storage,read>edgeMetric:array<vec2<f32>>;
 @group(0)@binding(3)var<storage,read>layerRef:array<f32>;
 @group(0)@binding(4)var<storage,read>cellArea:array<f32>;
@@ -60,7 +60,7 @@ fn ldz(k:u32)->f32{return layerRef[k*5u+1u];}
   if(i==0u||i==P.nz){wOut[q]=0.0;return;}
   let wi=w[q];var tend=0.0;
   for(var s:u32=0u;s<4u;s++){
-    let m=meta[c*4u+s];let e=u32(m.edge);let ue=.5*(u[e*P.nz+i-1u]+u[e*P.nz+i]);let outward=f32(m.sign)*ue;
+    let m=slotMeta[c*4u+s];let e=u32(m.edge);let ue=.5*(u[e*P.nz+i-1u]+u[e*P.nz+i]);let outward=f32(m.sign)*ue;
     if(outward<0.0){let wn=w[u32(m.neighbor)*(P.nz+1u)+i];tend-=outward*edgeMetric[e].x*(wn-wi)/cellArea[c];}
   }
   if(wi>0.0){tend-=wi*(wi-w[q-1u])/ldz(i-1u);}else if(wi<0.0){tend-=wi*(w[q+1u]-wi)/ldz(i);}
