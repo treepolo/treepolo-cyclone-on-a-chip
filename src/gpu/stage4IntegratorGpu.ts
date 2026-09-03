@@ -23,11 +23,11 @@ export class GpuStage4Integrator{
     }catch(e){try{await core.device.popErrorScope?.();}catch{}core.destroy();throw e;}
   }
   private prepare(dt:number):void{
-    // GpuRotatingDryCore keeps these encoder helpers private to its implementation;
-    // Stage 4 intentionally composes them here so the long-run and agreement gates
-    // use the exact same per-timestep operator ordering without extra queue submits.
+    // The long-run and agreement gates use the exact same per-timestep operator
+    // ordering. Divergence damping is normalized by physical dt so batching does
+    // not change its strength per unit simulated time.
     (this.core as any).prepare(dt);
-    this.divergence.prepare();
+    this.divergence.prepare(dt);
     this.sponge.prepare(dt);
   }
   private encodeOne(enc:any,heldSuarez:boolean):void{
@@ -38,12 +38,7 @@ export class GpuStage4Integrator{
   step(dt:number,heldSuarez=true):void{
     this.prepare(dt);const enc=this.device.createCommandEncoder({label:'stage4 full timestep'});this.encodeOne(enc,heldSuarez);this.device.queue.submit([enc.finish()]);
   }
-  /**
-   * Batch many complete Stage 4 timesteps into one command buffer. Every timestep
-   * receives the same operator sequence as `step`: rotating dry core -> horizontal
-   * divergence damping -> model-top sponge. This is a correctness requirement, not
-   * merely a performance choice.
-   */
+  /** Batch complete Stage 4 timesteps into one command buffer without changing the numerical operator. */
   stepBatch(dt:number,count:number,heldSuarez=true):void{
     if(!Number.isInteger(count)||count<1)throw new Error('batch count must be positive integer');
     this.prepare(dt);const enc=this.device.createCommandEncoder({label:`stage4 full batch ${count}`});
