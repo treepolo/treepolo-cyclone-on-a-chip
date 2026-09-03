@@ -27,6 +27,15 @@ export interface ColumnState { rho:Float64Array; rhoTheta:Float64Array; w:Float6
  * the old-time density buoyancy directly into this linear acoustic RHS creates
  * a severe imbalance; the coupled formulation must be re-derived before it is
  * reconsidered.
+ *
+ * The returned array is the effective HEVI reference-state vertical mass flux
+ * per unit horizontal area:
+ *
+ *   F_ref(i) = rho0(i) * [(1-theta) w_old(i) + theta w_new(i)]
+ *
+ * This is the exact flux used by the HEVI rho update. Stage 4 combines it with
+ * the outer perturbation mass flux before transporting horizontal momentum, so
+ * momentum and continuity use the same split mass carrier.
  */
 export function heviColumnStep(
   v:VerticalGrid,
@@ -35,11 +44,12 @@ export function heviColumnStep(
   dt:number,
   offCentering=0,
   rayleighRates?:ArrayLike<number>,
-):void {
+):Float64Array {
   const nz=v.nz; if(state.rho.length!==nz||state.rhoTheta.length!==nz||state.w.length!==nz+1) throw new Error('column shape mismatch');
   if(!(offCentering>=0&&offCentering<1))throw new Error('HEVI offCentering must be in [0,1)');
   if(rayleighRates&&rayleighRates.length!==nz+1)throw new Error('HEVI Rayleigh profile shape mismatch');
-  if(nz<2) return;
+  const referenceMassFlux=new Float64Array(nz+1);
+  if(nz<2) return referenceMassFlux;
   const theta=0.5*(1+offCentering), oldWeight=1-theta;
   const n=nz-1, lo=new Float64Array(n), di=new Float64Array(n), up=new Float64Array(n), rhs=new Float64Array(n), sol=new Float64Array(n);
   const wOld=state.w.slice(); const pOld=new Float64Array(nz);
@@ -63,6 +73,7 @@ export function heviColumnStep(
     const rate=rayleighRates?Math.max(0,Number(rayleighRates[i]!)):0;
     state.w[i]=sol[i-1]!/(1+rate*dt);
   }
+  for(let i=0;i<=nz;i++) referenceMassFlux[i]=ref.rhoInterface[i]!*(oldWeight*wOld[i]!+theta*state.w[i]!);
   for(let k=0;k<nz;k++){
     const Lnew=(ref.rhoThetaInterface[k+1]!*state.w[k+1]!-ref.rhoThetaInterface[k]!*state.w[k]!)/v.dz[k]!;
     state.rhoTheta[k] = state.rhoTheta[k]! - dt*(oldWeight*Lold[k]!+theta*Lnew);
@@ -70,4 +81,5 @@ export function heviColumnStep(
     const Rnew=(ref.rhoInterface[k+1]!*state.w[k+1]!-ref.rhoInterface[k]!*state.w[k]!)/v.dz[k]!;
     state.rho[k] = state.rho[k]! - dt*(oldWeight*Rold+theta*Rnew);
   }
+  return referenceMassFlux;
 }
