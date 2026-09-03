@@ -29,7 +29,7 @@ const COMMON = /* wgsl */`
 struct Params {
   nz:u32, edgeCount:u32, cellCount:u32, _pad0:u32,
   dt:f32, radius:f32, gravity:f32, rd:f32,
-  gamma:f32, pRef:f32, _pad1:vec2<f32>,
+  gamma:f32, pRef:f32, heviOffCentering:f32, _pad1:f32,
 };
 @group(0) @binding(0) var<uniform> params:Params;
 fn p_from_x(x:f32)->f32 { return params.pRef * pow(params.rd*x/params.pRef, params.gamma); }
@@ -78,6 +78,8 @@ fn ix(i:u32)->f32{return interfaceRef[i*2u+1u];}
 fn main(@builtin(global_invocation_id) gid:vec3<u32>){
   let c=gid.x; if(c>=params.cellCount || params.nz>MAX_NZ){return;}
   let nz=params.nz; let n=nz-1u;
+  let theta=0.5*(1.0+clamp(params.heviOffCentering,0.0,0.999));
+  let oldWeight=1.0-theta;
   var oldW:array<f32,129>; var pPrime:array<f32,128>; var Lold:array<f32,128>;
   var lo:array<f32,127>; var di:array<f32,127>; var up:array<f32,127>; var rhs:array<f32,127>;
   var cp:array<f32,127>; var dp:array<f32,127>; var sol:array<f32,127>;
@@ -95,12 +97,14 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     let rhoi=max(0.5*(rho0i+0.5*(rho[ql]+rho[qu])),1e-8);
     let Al=params.gamma*lp(l)/lx(l);
     let Au=params.gamma*lp(u)/lx(u);
-    let fac=0.25*params.dt*params.dt/(rhoi*dzc);
+    let base=params.dt*params.dt/(rhoi*dzc);
+    let facNew=theta*theta*base;
+    let facOld=theta*oldWeight*base;
     let xim=ix(i-1u); let xi=ix(i); let xip=ix(i+1u);
-    lo[ii]=-fac*Al*xim/ldz(l);
-    di[ii]=1.0+fac*(Au*xi/ldz(u)+Al*xi/ldz(l));
-    up[ii]=-fac*Au*xip/ldz(u);
-    rhs[ii]=oldW[i]-params.dt*(pPrime[u]-pPrime[l])/(rhoi*dzc)+fac*(Au*Lold[u]-Al*Lold[l]);
+    lo[ii]=-facNew*Al*xim/ldz(l);
+    di[ii]=1.0+facNew*(Au*xi/ldz(u)+Al*xi/ldz(l));
+    up[ii]=-facNew*Au*xip/ldz(u);
+    rhs[ii]=oldW[i]-params.dt*(pPrime[u]-pPrime[l])/(rhoi*dzc)+facOld*(Au*Lold[u]-Al*Lold[l]);
   }
   if(n>0u){
     lo[0u]=0.0; up[n-1u]=0.0;
@@ -120,10 +124,10 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     let q=c*nz+k;
     let dz=ldz(k);
     let Lnew=(ix(k+1u)*w[c*(nz+1u)+k+1u]-ix(k)*w[c*(nz+1u)+k])/dz;
-    rhoTheta[q]=rhoTheta[q]-0.5*params.dt*(Lold[k]+Lnew);
+    rhoTheta[q]=rhoTheta[q]-params.dt*(oldWeight*Lold[k]+theta*Lnew);
     let Rold=(irho(k+1u)*oldW[k+1u]-irho(k)*oldW[k])/dz;
     let Rnew=(irho(k+1u)*w[c*(nz+1u)+k+1u]-irho(k)*w[c*(nz+1u)+k])/dz;
-    rho[q]=rho[q]-0.5*params.dt*(Rold+Rnew);
+    rho[q]=rho[q]-params.dt*(oldWeight*Rold+theta*Rnew);
   }
 }`;
 
@@ -212,7 +216,7 @@ export class GpuDryCorePrototype {
   readonly status:GpuCoreStatus;
   private readonly paramsBuffer:GPUAny;
 
-  private constructor(device:GPUAny,adapter:GPUAny,public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere,state:DryState){
+  private constructor(device:GPUAny,adapter:GPUAny,public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere,state:DryState,public readonly heviOffCentering=0){
     this.device=device;
     this.status={adapterInfo:adapter.info,limits:Object.fromEntries(Object.entries(adapter.limits).filter(([,x])=>typeof x==='number')) as Record<string,number>,requiredStorageBuffersPerStage:8};
     const U=(globalThis as any).GPUBufferUsage;
@@ -252,9 +256,10 @@ export class GpuDryCorePrototype {
     this.buildPipelines();
   }
 
-  static async create(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,state:DryState):Promise<GpuDryCorePrototype>{
+  static async create(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,state:DryState,heviOffCentering=0):Promise<GpuDryCorePrototype>{
     const nav=(globalThis as any).navigator;
     if(!nav?.gpu) throw new Error('WebGPU unavailable');
+    if(!(heviOffCentering>=0&&heviOffCentering<1))throw new Error('HEVI offCentering must be in [0,1)');
     const adapter=await nav.gpu.requestAdapter();
     if(!adapter) throw new Error('No WebGPU adapter');
     if(v.nz>128) throw new Error('Stage 3 GPU HEVI supports nz<=128');
@@ -263,7 +268,7 @@ export class GpuDryCorePrototype {
     if(supported<requiredStorageBuffersPerStage) throw new Error(`WebGPU adapter exposes maxStorageBuffersPerShaderStage=${supported}; Stage 3 requires ${requiredStorageBuffersPerStage}.`);
     const device=await adapter.requestDevice({requiredLimits:{maxStorageBuffersPerShaderStage:requiredStorageBuffersPerStage}});
     device.pushErrorScope?.('validation');
-    const core=new GpuDryCorePrototype(device,adapter,h,v,ref,state);
+    const core=new GpuDryCorePrototype(device,adapter,h,v,ref,state,heviOffCentering);
     const err=await device.popErrorScope?.();
     if(err){core.destroy();throw new Error(`WebGPU validation: ${err.message||err}`);}
     return core;
@@ -285,7 +290,7 @@ export class GpuDryCorePrototype {
   private writeParams(dt:number):void{
     const ab=new ArrayBuffer(48),u=new Uint32Array(ab),f=new Float32Array(ab);
     u[0]=this.v.nz;u[1]=this.h.edgeCount;u[2]=this.h.cellCount;
-    f[4]=dt;f[5]=EARTH.radius;f[6]=EARTH.gravity;f[7]=DRY_AIR.rd;f[8]=DRY_AIR.gamma;f[9]=DRY_AIR.pRef;
+    f[4]=dt;f[5]=EARTH.radius;f[6]=EARTH.gravity;f[7]=DRY_AIR.rd;f[8]=DRY_AIR.gamma;f[9]=DRY_AIR.pRef;f[10]=this.heviOffCentering;
     this.device.queue.writeBuffer(this.paramsBuffer,0,ab);
   }
   private dispatch(pass:GPUAny,name:string,count:number,size=128):void{pass.setPipeline(this.pipelines[name]);pass.setBindGroup(0,this.bindGroups[name]);pass.dispatchWorkgroups(Math.ceil(count/size));}
