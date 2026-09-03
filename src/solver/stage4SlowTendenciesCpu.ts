@@ -65,7 +65,7 @@ export function computeStage4SlowTendencies(
       const qe=edge3DIndex(e,k,nz),vel=s.uEdge[qe]!,l=cell3DIndex(ge.leftCell,k,nz),r=cell3DIndex(ge.rightCell,k,nz),up=vel>=0?l:r,A=edgeLength*v.dz[k]!;
       const fm=s.rhoD[up]!*vel*A,fx=s.rhoThetaM[up]!*vel*A;
       hMass[qe]=fm;hTheta[qe]=fx;
-      rhoT[l]-=fm;rhoT[r]+=fm;xT[l]-=fx;xT[r]+=fx;
+      rhoT[l]=rhoT[l]!-fm;rhoT[r]=rhoT[r]!+fm;xT[l]=xT[l]!-fx;xT[r]=xT[r]!+fx;
     }
   }
 
@@ -79,14 +79,14 @@ export function computeStage4SlowTendencies(
       const fx=(ref.rhoThetaInterface[i]!+(s.rhoThetaM[src]!-ref.rhoThetaCenter[srcK]!))*vel*area;
       vMass[qi]=fm;vTheta[qi]=fx;
       const l=cell3DIndex(c,i-1,nz),u=cell3DIndex(c,i,nz);
-      rhoT[l]-=fm;rhoT[u]+=fm;xT[l]-=fx;xT[u]+=fx;
+      rhoT[l]=rhoT[l]!-fm;rhoT[u]=rhoT[u]!+fm;xT[l]=xT[l]!-fx;xT[u]=xT[u]!+fx;
     }
   }
 
   // Convert integrated flux divergence to local scalar tendencies.
   for(let c=0;c<h.cellCount;c++)for(let k=0;k<nz;k++){
     const q=cell3DIndex(c,k,nz),vol=h.cellAreaUnit[c]!*R*R*v.dz[k]!;
-    rhoT[q]/=vol;xT[q]/=vol;
+    rhoT[q]=rhoT[q]!/vol;xT[q]=xT[q]!/vol;
   }
 
   if(momentum||coriolis){
@@ -115,9 +115,9 @@ export function computeStage4SlowTendencies(
         mx+=vmx[qb]!-vmx[qt]!;my+=vmy[qb]!-vmy[qt]!;mz+=vmz[qb]!-vmz[qt]!;
         const rho=Math.max(s.rhoD[q]!,1e-12),wd=windByK[k]!,o=c*3,rhodot=rhoT[q]!;
         const dv=cellVT[k]!;
-        dv[o]+=(mx/vol-wd[o]!*rhodot)/rho;
-        dv[o+1]+=(my/vol-wd[o+1]!*rhodot)/rho;
-        dv[o+2]+=(mz/vol-wd[o+2]!*rhodot)/rho;
+        dv[o]=dv[o]!+(mx/vol-wd[o]!*rhodot)/rho;
+        dv[o+1]=dv[o+1]!+(my/vol-wd[o+1]!*rhodot)/rho;
+        dv[o+2]=dv[o+2]!+(mz/vol-wd[o+2]!*rhodot)/rho;
       }
     }
 
@@ -127,7 +127,7 @@ export function computeStage4SlowTendencies(
         for(let c=0;c<h.cellCount;c++){
           const o=c*3,ex=g.east[o]!,ey=g.east[o+1]!,ez=g.east[o+2]!,nx=g.north[o]!,ny=g.north[o+1]!,nzv=g.north[o+2]!,wx=wind[o]!,wy=wind[o+1]!,wz=wind[o+2]!;
           const ue=wx*ex+wy*ey+wz*ez,vn=wx*nx+wy*ny+wz*nzv,f=2*EARTH.omega*g.radial[o+2]!;
-          dv[o]+=f*vn*ex-f*ue*nx;dv[o+1]+=f*vn*ey-f*ue*ny;dv[o+2]+=f*vn*ez-f*ue*nzv;
+          dv[o]=dv[o]!+f*vn*ex-f*ue*nx;dv[o+1]=dv[o+1]!+f*vn*ey-f*ue*ny;dv[o+2]=dv[o+2]!+f*vn*ez-f*ue*nzv;
         }
       }
     }
@@ -136,9 +136,9 @@ export function computeStage4SlowTendencies(
     for(let e=0;e<h.edgeCount;e++){
       const ge=h.edges[e]!,l=ge.leftCell,r=ge.rightCell,n=ge.normal;
       for(let k=0;k<nz;k++){
-        const dv=cellVT[k]!,lx=l*3,rx=r*3;
+        const dv=cellVT[k]!,lx=l*3,rx=r*3,q=edge3DIndex(e,k,nz);
         const ax=.5*(dv[lx]!+dv[rx]!),ay=.5*(dv[lx+1]!+dv[rx+1]!),az=.5*(dv[lx+2]!+dv[rx+2]!);
-        uT[edge3DIndex(e,k,nz)]+=ax*n[0]+ay*n[1]+az*n[2];
+        uT[q]=uT[q]!+ax*n[0]+ay*n[1]+az*n[2];
       }
     }
   }
@@ -148,14 +148,14 @@ export function computeStage4SlowTendencies(
       const lat=Math.asin(h.cellCenters[c*3+2]!);
       for(let k=0;k<nz;k++){
         const q=cell3DIndex(c,k,nz),rho=Math.max(s.rhoD[q]!,1e-12),x=s.rhoThetaM[q]!,p=pressureFromRhoTheta(x),theta=x/rho,sigma=p/DRY_AIR.pRef,thetaEq=thetaFromTP(heldSuarezTeq(lat,p),p),rate=heldSuarezThermalRate(lat,sigma);
-        xT[q]+=rho*rate*(thetaEq-theta);
+        xT[q]=xT[q]!+rho*rate*(thetaEq-theta);
       }
     }
     for(let e=0;e<h.edgeCount;e++){
       const ge=h.edges[e]!;
       for(let k=0;k<nz;k++){
         const l=cell3DIndex(ge.leftCell,k,nz),r=cell3DIndex(ge.rightCell,k,nz),sigma=.5*(pressureFromRhoTheta(s.rhoThetaM[l]!)+pressureFromRhoTheta(s.rhoThetaM[r]!))/DRY_AIR.pRef,rate=heldSuarezDragRate(sigma),q=edge3DIndex(e,k,nz);
-        uT[q]-=rate*s.uEdge[q]!;
+        uT[q]=uT[q]!-rate*s.uEdge[q]!;
       }
     }
   }
