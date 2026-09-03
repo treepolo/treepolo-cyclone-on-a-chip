@@ -5,8 +5,10 @@ import { buildCubedSphere } from '../grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from '../grid/vertical.js';
 import { ACOUSTIC_DIVERGENCE_REFERENCE_COEFFICIENT, acousticDivergenceCoefficientForDt, acousticDivergenceRms, applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
 import { addHeldSuarezWavePerturbation, buildHeldSuarezReference } from '../physics/heldSuarez.js';
+import { buildModelTopSpongeRates, MODEL_TOP_SPONGE } from '../physics/modelTopSponge.js';
 import { buildRotationGeometry, reconstructCellHorizontalWind, rotateLocalCoriolis, setAnalyticCellWind } from '../physics/rotation.js';
 import { diagnoseState } from '../solver/diagnostics.js';
+import { heviColumnStep } from '../solver/hevi.js';
 import { RotatingDryCoreCpu } from '../solver/rotatingDryCoreCpu.js';
 import { createHydrostaticState, w3DIndex } from '../solver/state.js';
 
@@ -67,6 +69,20 @@ test('V2 horizontal acoustic filter does not convert vertical motion into horizo
   applyAcousticDivergenceDamping(h,v,ref,s,.1);
   let maxU=0;for(const u of s.uEdge)maxU=Math.max(maxU,Math.abs(u));
   assert(maxU===0,`vertical motion leaked into horizontal acoustic filter: max|u|=${maxU}`);
+});
+
+test('V2 implicit HEVI top absorber applies the configured Rayleigh profile before new-time fluxes',()=>{
+  const v=buildStretchedVerticalGrid(48,40000,1.4),ref=buildHeldSuarezReference(v),rates=buildModelTopSpongeRates(v),i=v.nz-1,dt=1;
+  const free={rho:Float64Array.from(ref.rhoCenter),rhoTheta:Float64Array.from(ref.rhoThetaCenter),w:new Float64Array(v.nz+1)};
+  const damp={rho:Float64Array.from(ref.rhoCenter),rhoTheta:Float64Array.from(ref.rhoThetaCenter),w:new Float64Array(v.nz+1)};
+  free.w[i]=1;damp.w[i]=1;
+  heviColumnStep(v,ref,free,dt,.1);
+  heviColumnStep(v,ref,damp,dt,.1,rates);
+  const rate=rates[i]!,expected=free.w[i]!/(1+rate*dt);
+  assert(MODEL_TOP_SPONGE.maxRate===.2,`unexpected top absorber peak rate=${MODEL_TOP_SPONGE.maxRate}`);
+  assert(rate>.15,`upper interface Rayleigh rate unexpectedly weak: ${rate}`);
+  assert(Math.abs(damp.w[i]!-expected)<1e-12,`implicit Rayleigh mismatch: got=${damp.w[i]}, expected=${expected}`);
+  assert(Math.abs(damp.w[i]!)<Math.abs(free.w[i]!),`implicit top absorber did not reduce upper w: free=${free.w[i]}, damp=${damp.w[i]}`);
 });
 
 test('V2 rotating core keeps resting hydrostatic atmosphere at rest',()=>{
