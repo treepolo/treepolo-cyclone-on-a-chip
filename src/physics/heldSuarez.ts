@@ -11,11 +11,16 @@ export function heldSuarezTeq(lat:number,p:number):number{
   const sigma=Math.max(1e-6,p/DRY_AIR.pRef),sn=Math.sin(lat),cs=Math.cos(lat);
   return Math.max(HELD_SUAREZ.Tmin,(HELD_SUAREZ.T0-HELD_SUAREZ.deltaTy*sn*sn-HELD_SUAREZ.deltaThetaZ*Math.log(sigma)*cs*cs)*Math.pow(sigma,DRY_AIR.kappa));
 }
-function kThermal(lat:number,sigma:number):number{const sfc=Math.max(0,(sigma-HELD_SUAREZ.sigmaB)/(1-HELD_SUAREZ.sigmaB));return HELD_SUAREZ.ka+(HELD_SUAREZ.ks-HELD_SUAREZ.ka)*sfc*Math.pow(Math.cos(lat),4)}
-function kDrag(sigma:number):number{return HELD_SUAREZ.kf*Math.max(0,(sigma-HELD_SUAREZ.sigmaB)/(1-HELD_SUAREZ.sigmaB))}
+export function heldSuarezThermalRate(lat:number,sigma:number):number{
+  const sfc=Math.max(0,(sigma-HELD_SUAREZ.sigmaB)/(1-HELD_SUAREZ.sigmaB));
+  return HELD_SUAREZ.ka+(HELD_SUAREZ.ks-HELD_SUAREZ.ka)*sfc*Math.pow(Math.cos(lat),4);
+}
+export function heldSuarezDragRate(sigma:number):number{
+  return HELD_SUAREZ.kf*Math.max(0,(sigma-HELD_SUAREZ.sigmaB)/(1-HELD_SUAREZ.sigmaB));
+}
 export function applyHeldSuarezForcing(h:CubedSphereGrid,v:VerticalGrid,s:DryState,dt:number):void{
-  for(let c=0;c<h.cellCount;c++){const lat=Math.asin(h.cellCenters[c*3+2]!);for(let k=0;k<v.nz;k++){const q=cell3DIndex(c,k,v.nz),rho=s.rhoD[q]!,x=s.rhoThetaM[q]!,p=pressureFromRhoTheta(x),theta=x/rho,sigma=p/DRY_AIR.pRef,thetaEq=thetaFromTP(heldSuarezTeq(lat,p),p),rate=kThermal(lat,sigma),thetaNew=thetaEq+(theta-thetaEq)*Math.exp(-rate*dt);s.rhoThetaM[q]=rho*thetaNew;}}
-  for(let e=0;e<h.edgeCount;e++){const ge=h.edges[e]!;for(let k=0;k<v.nz;k++){const l=cell3DIndex(ge.leftCell,k,v.nz),r=cell3DIndex(ge.rightCell,k,v.nz),sigma=.5*(pressureFromRhoTheta(s.rhoThetaM[l]!)+pressureFromRhoTheta(s.rhoThetaM[r]!))/DRY_AIR.pRef,rate=kDrag(sigma);if(rate>0){const q=edge3DIndex(e,k,v.nz);s.uEdge[q]=s.uEdge[q]!*Math.exp(-rate*dt);}}}
+  for(let c=0;c<h.cellCount;c++){const lat=Math.asin(h.cellCenters[c*3+2]!);for(let k=0;k<v.nz;k++){const q=cell3DIndex(c,k,v.nz),rho=s.rhoD[q]!,x=s.rhoThetaM[q]!,p=pressureFromRhoTheta(x),theta=x/rho,sigma=p/DRY_AIR.pRef,thetaEq=thetaFromTP(heldSuarezTeq(lat,p),p),rate=heldSuarezThermalRate(lat,sigma),thetaNew=thetaEq+(theta-thetaEq)*Math.exp(-rate*dt);s.rhoThetaM[q]=rho*thetaNew;}}
+  for(let e=0;e<h.edgeCount;e++){const ge=h.edges[e]!;for(let k=0;k<v.nz;k++){const l=cell3DIndex(ge.leftCell,k,v.nz),r=cell3DIndex(ge.rightCell,k,v.nz),sigma=.5*(pressureFromRhoTheta(s.rhoThetaM[l]!)+pressureFromRhoTheta(s.rhoThetaM[r]!))/DRY_AIR.pRef,rate=heldSuarezDragRate(sigma);if(rate>0){const q=edge3DIndex(e,k,v.nz);s.uEdge[q]=s.uEdge[q]!*Math.exp(-rate*dt);}}}
 }
 function meanTeq(p:number):number{const sigma=Math.max(1e-6,p/DRY_AIR.pRef);return Math.max(HELD_SUAREZ.Tmin,(HELD_SUAREZ.T0-HELD_SUAREZ.deltaTy/3-HELD_SUAREZ.deltaThetaZ*Math.log(sigma)*2/3)*Math.pow(sigma,DRY_AIR.kappa))}
 function dpdz(p:number):number{return-EARTH.gravity*p/(DRY_AIR.rd*meanTeq(p))}
