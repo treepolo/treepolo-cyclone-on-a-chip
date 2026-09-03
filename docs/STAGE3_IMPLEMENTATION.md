@@ -1,6 +1,6 @@
 # Stage 3 — 最小三維物理核心
 
-狀態：**CPU Float64 reference core 已完成並通過 Stage 3 的第一批 V0/V1 回歸；WebGPU compute core 已實作並具備 runtime validation/smoke test，但目前開發執行環境沒有可用 WebGPU adapter，因此真實 GPU 編譯與數值結果仍需在實際瀏覽器裝置驗收。**
+狀態：**CPU Float64 reference core 已完成並通過第一批 V0/V1 回歸；WebGPU compute core 已在真實 Windows + Chrome 裝置成功編譯並通過 one-step hydrostatic smoke。Stage 3 現在只剩 multi-step GPU hydrostatic-rest / CPU-vs-GPU 數值一致性驗證，通過後正式封關。**
 
 ## 1. 本階段範圍
 
@@ -61,7 +61,7 @@ Dry Stage 3：
 
 CPU 與 WGSL prototype 都採 per-column implicit tridiagonal solve：
 
-- pressure perturbation / base-state `rhoTheta` acoustic coupling 隱式處理；
+- pressure perturbation / base-state `rhoTheta` acoustic coupling隱式處理；
 - rigid lower/model-top `w=0` for Stage 3 tests；
 - buoyancy 作為 slow term，在 implicit acoustic solve 之外顯式加入；
 - CPU tridiagonal 使用 Thomas algorithm；GPU Stage 3 prototype 為 one invocation per column、`Nz<=128` 的 correctness-first Thomas implementation，未做效能最佳化。
@@ -82,7 +82,9 @@ CPU 與 WGSL prototype 都採 per-column implicit tridiagonal solve：
 8. state upload / readback；
 9. WebGPU validation error scope 與 hydrostatic smoke-test entry。
 
-目前執行環境沒有 WebGPU adapter，因此此處只能確認 TypeScript build；WGSL 會在實際瀏覽器啟動時建立所有 compute pipelines，若 validation 失敗會直接顯示，不會默認假裝 GPU core 可用。
+第一版真機測試發現 compute stage 使用 10 個 storage buffers，超過 WebGPU baseline 的 8。之後已將垂直 reference fields 與 flux buffers 重新打包，使 Stage 3 所有 compute pipeline 的最高需求降為 **8 storage buffers/stage**；第二次真機測試成功建立所有 pipelines 並執行 hydrostatic smoke。
+
+Real-device result：Windows + Chrome，one-step hydrostatic smoke `max |w| = 6.843e-6 m/s`，無 NaN、負密度或負壓力錯誤。詳細紀錄見 `STAGE3_GPU_SMOKE_20260903.md`。
 
 ### 2.9 3D Debug Viewer
 
@@ -91,6 +93,7 @@ CPU 與 WGSL prototype 都採 per-column implicit tridiagonal solve：
 - 可 reset、單步、連續跑、插入 constant-pressure warm thermal bubble。
 - 顯示 dry-mass drift、max `|w|`、min density、min pressure、simulation time。
 - thermal bubble 只改 thermodynamic initial condition，不直接指定 upward velocity。
+- 所有使用者介面依 `UI_SPEC.md` 同時顯示繁體中文與英文。
 
 ## 3. CPU Float64 validation results
 
@@ -106,9 +109,26 @@ CPU 與 WGSL prototype 都採 per-column implicit tridiagonal solve：
 | global isothermal hydrostatic rest | PASS；20 s mass drift = `0`，max `|w| = 1.23e-13 m/s` |
 | constant-pressure +3 K thermal bubble | PASS；15 s mass drift = `2.03e-16`，max `|w| = 3.83e-2 m/s` |
 
-這些測試目前主要驗證 Stage 3 的 reference-state、conservation、acoustic/buoyancy coupling 與三維資料流。它們還不能證明 production weather fidelity。
+這些測試主要驗證 Stage 3 的 reference-state、conservation、acoustic/buoyancy coupling 與三維資料流，還不能證明 production weather fidelity。
 
-## 4. 執行
+## 4. 真機 WebGPU 驗收 / Real-device WebGPU validation
+
+目前已通過：
+
+- WebGPU adapter / device 建立。
+- 所有 Stage 3 WGSL compute pipeline 編譯。
+- Stage 3 storage-buffer baseline compatibility：最高需求 8。
+- one-step hydrostatic state GPU integration + readback。
+- density / pressure / NaN smoke validation。
+- one-step hydrostatic residual：`max |w| = 6.843e-6 m/s`。
+
+尚需補：
+
+- multi-step hydrostatic-rest，觀察 `f32` residual 是否累積。
+- GPU dry-mass drift。
+- CPU Float64 vs GPU Float32 state comparison over the same short integration。
+
+## 5. 執行
 
 ```bash
 npm install
@@ -120,18 +140,14 @@ npm run serve
 
 `http://127.0.0.1:5173`
 
-啟動頁面會嘗試：
+## 6. Stage 3 尚未宣稱完成的 production 項目
 
-1. 建立所有 WebGPU compute pipelines；
-2. 對 hydrostatic state 跑一次 GPU smoke step；
-3. readback 並檢查 density / pressure / NaN；
-4. 成功則顯示 `compute smoke OK`，失敗則在 log 顯示 validation/error。
+在進 Stage 4 前必須完成：
 
-## 5. Stage 3 尚未宣稱完成的 production 項目
+- multi-step real-GPU numerical agreement / conservation tolerance。
 
-下列工作刻意不冒充已驗收：
+可在後續 refinement 持續優化、但不阻擋 Stage 4 的項目：
 
-- 真實 GPU 上的 WGSL numerical agreement / conservation tolerance；
 - GPU HEVI 效能與更平行的 tridiagonal algorithm；
 - RK3 outer integrator 完整 production 化；目前 CPU/GPU debug step 是 Stage 3 split operator；
 - horizontal momentum nonlinear advection 的 production high-order discretization；
@@ -139,11 +155,9 @@ npm run serve
 - model-top sponge；
 - SLEVE terrain geometry。
 
-其中前三項會在進入 Stage 4 前先用實際桌機／手機 WebGPU smoke/benchmark 壓實；後三項分別屬 dry-core refinement / terrain 階段。
+## 7. Stage 4 入口
 
-## 6. Stage 4 入口
-
-在實際 WebGPU 裝置完成 Stage 3 GPU smoke 後，Stage 4 才加入：
+在 multi-step GPU hydrostatic-rest / CPU-vs-GPU comparison 通過後，Stage 4 才加入：
 
 - planet rotation / Coriolis；
 - geostrophic/inertial tests；
