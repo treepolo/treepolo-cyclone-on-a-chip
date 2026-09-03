@@ -6,7 +6,7 @@ import { GpuAcousticDivergenceDamping } from './acousticDivergenceDampingGpu.js'
 import { GpuModelTopSponge } from './modelTopSpongeGpu.js';
 import { GpuRotatingDryCore } from './rotatingDryCoreGpu.js';
 
-/** Stage 4 GPU integrator: rotating core + acoustic-divergence filter + top sponge. */
+/** Stage 4 GPU integrator: rotating core + per-timestep acoustic-divergence filter + top sponge. */
 export class GpuStage4Integrator{
   readonly device:any;
   private constructor(
@@ -22,18 +22,33 @@ export class GpuStage4Integrator{
       return new GpuStage4Integrator(core,divergence,sponge);
     }catch(e){try{await core.device.popErrorScope?.();}catch{}core.destroy();throw e;}
   }
-  step(dt:number,heldSuarez=true):void{this.core.step(dt,heldSuarez);this.divergence.apply();this.sponge.apply(dt);}
+  private prepare(dt:number):void{
+    // GpuRotatingDryCore keeps these encoder helpers private to its implementation;
+    // Stage 4 intentionally composes them here so the long-run and agreement gates
+    // use the exact same per-timestep operator ordering without extra queue submits.
+    (this.core as any).prepare(dt);
+    this.divergence.prepare();
+    this.sponge.prepare(dt);
+  }
+  private encodeOne(enc:any,heldSuarez:boolean):void{
+    (this.core as any).encodeOne(enc,heldSuarez);
+    this.divergence.encode(enc);
+    this.sponge.encode(enc);
+  }
+  step(dt:number,heldSuarez=true):void{
+    this.prepare(dt);const enc=this.device.createCommandEncoder({label:'stage4 full timestep'});this.encodeOne(enc,heldSuarez);this.device.queue.submit([enc.finish()]);
+  }
   /**
-   * `stabilizerStride` controls only how often the slow JS-side stabilizer passes
-   * are submitted. Core dynamics still advances every dt. The long-run Stage 4
-   * gate uses stride=10 (100 s at dt=10 s), far shorter than the horizontal
-   * acoustic crossing time of this very coarse global grid.
+   * Batch many complete Stage 4 timesteps into one command buffer. Every timestep
+   * receives the same operator sequence as `step`: rotating dry core -> horizontal
+   * divergence damping -> model-top sponge. This is a correctness requirement, not
+   * merely a performance choice.
    */
-  stepBatch(dt:number,count:number,heldSuarez=true,stabilizerStride=1):void{
+  stepBatch(dt:number,count:number,heldSuarez=true):void{
     if(!Number.isInteger(count)||count<1)throw new Error('batch count must be positive integer');
-    if(!Number.isInteger(stabilizerStride)||stabilizerStride<1)throw new Error('stabilizerStride must be positive integer');
-    let left=count;
-    while(left>0){const n=Math.min(stabilizerStride,left);this.core.stepBatch(dt,n,heldSuarez);this.divergence.apply();this.sponge.apply(dt*n);left-=n;}
+    this.prepare(dt);const enc=this.device.createCommandEncoder({label:`stage4 full batch ${count}`});
+    for(let i=0;i<count;i++)this.encodeOne(enc,heldSuarez);
+    this.device.queue.submit([enc.finish()]);
   }
   downloadState(time=0):Promise<DryState>{return this.core.downloadState(time);}
   destroy():void{this.divergence.destroy();this.sponge.destroy();this.core.destroy();}
