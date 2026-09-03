@@ -25,17 +25,10 @@ export interface Stage4Rk3SplitOptions extends Stage4SlowOptions {
   topAbsorber?:boolean;
 }
 
-function copyStateInto(dst:DryState,src:DryState):void{
+function copyStateInto(dst:DryState,src:DryState):void {
   dst.rhoD.set(src.rhoD);dst.rhoThetaM.set(src.rhoThetaM);dst.uEdge.set(src.uEdge);dst.wInterface.set(src.wInterface);dst.time=src.time;
 }
 
-/**
- * Frozen full predictor RHS used inside one RK acoustic loop.
- * Slow transport/rotation/forcing is evaluated once. Predictor pressure and
- * well-balanced vertical pressure+buoyancy are then added as the zero-delta
- * part of the acoustic correction equations. Changes away from the predictor
- * are handled by linearized fast operators during each small step.
- */
 export function computeStage4FrozenRhs(
   h:CubedSphereGrid,
   v:VerticalGrid,
@@ -49,8 +42,6 @@ export function computeStage4FrozenRhs(
   for(let q=0;q<pressure.length;q++){
     const p=pressureFromRhoTheta(predictor.rhoThetaM[q]!);pressure[q]=p;dpdRhoTheta[q]=DRY_AIR.gamma*p/Math.max(predictor.rhoThetaM[q]!,1e-12);
   }
-  // Predictor horizontal pressure acceleration: the full current Stage-4 C-grid
-  // pressure gradient. Hydrostatic reference pressure has no horizontal gradient.
   for(let e=0;e<h.edgeCount;e++){
     const ge=h.edges[e]!,dist=Math.max(ge.centerDistanceAngle*EARTH.radius,1);
     for(let k=0;k<nz;k++){
@@ -58,7 +49,6 @@ export function computeStage4FrozenRhs(
       u[q]=u[q]!-(pressure[r]!-pressure[l]!)/(rhoAvg*dist);
     }
   }
-  // Predictor well-balanced vertical pressure + buoyancy acceleration.
   const pr=new Float64Array(nz),px=new Float64Array(nz),pw=new Float64Array(nz+1);
   for(let c=0;c<h.cellCount;c++){
     for(let k=0;k<nz;k++){const q=cell3DIndex(c,k,nz);pr[k]=predictor.rhoD[q]!;px[k]=predictor.rhoThetaM[q]!;}
@@ -69,13 +59,6 @@ export function computeStage4FrozenRhs(
   return{rhoD:slow.rhoD,rhoThetaM:slow.rhoThetaM,uEdge:u,wInterface:w,pressure,dpdRhoTheta};
 }
 
-/**
- * One predictor-relative acoustic small step for the global height-coordinate
- * Stage-4 state. Horizontal acoustics use a forward-backward C-grid update:
- * pressure changes edge-normal velocity first, then the updated velocity
- * perturbation enters centered linearized mass/thermodynamic fluxes. Vertical
- * acoustic/gravity coupling is solved implicitly column by column.
- */
 export function advanceStage4AcousticSmallStep(
   h:CubedSphereGrid,
   v:VerticalGrid,
@@ -89,8 +72,6 @@ export function advanceStage4AcousticSmallStep(
 ):void {
   if(!(dt>0))throw new Error('Stage4 acoustic dt must be positive');
   const nz=v.nz,R=EARTH.radius;
-  // 1) Forward horizontal momentum perturbation using predictor-frozen RHS and
-  // the first derivative of -(1/rho) grad(p) about the RK predictor.
   for(let e=0;e<h.edgeCount;e++){
     const ge=h.edges[e]!,dist=Math.max(ge.centerDistanceAngle*R,1);
     for(let k=0;k<nz;k++){
@@ -102,9 +83,6 @@ export function advanceStage4AcousticSmallStep(
     }
   }
 
-  // 2) Backward scalar part of the horizontal acoustic pair.  Centered
-  // predictor-linearized flux perturbations are used; nonlinear/upwind fluxes
-  // are already represented in the frozen large-step RHS.
   const hRhoCorr=new Float64Array(acoustic.rhoD.length),hXCorr=new Float64Array(acoustic.rhoThetaM.length);
   for(let e=0;e<h.edgeCount;e++){
     const ge=h.edges[e]!,edgeLength=ge.angularLength*R;
@@ -118,7 +96,6 @@ export function advanceStage4AcousticSmallStep(
     const q=cell3DIndex(c,k,nz),vol=h.cellAreaUnit[c]!*R*R*v.dz[k]!;hRhoCorr[q]=hRhoCorr[q]!/vol;hXCorr[q]=hXCorr[q]!/vol;
   }
 
-  // 3) Vertically implicit predictor-relative acoustic/gravity correction.
   const pcol:AcousticColumnState={rho:new Float64Array(nz),rhoTheta:new Float64Array(nz),w:new Float64Array(nz+1)};
   const acol:AcousticColumnState={rho:new Float64Array(nz),rhoTheta:new Float64Array(nz),w:new Float64Array(nz+1)};
   const rcol:AcousticColumnTendency={rho:new Float64Array(nz),rhoTheta:new Float64Array(nz),w:new Float64Array(nz+1)};
@@ -142,9 +119,9 @@ export class Stage4Rk3SplitCpu {
   readonly rotation:RotationGeometry;
   readonly rayleighRates:Float64Array;
   constructor(public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere,public readonly acousticRatio=4){
-    this.rotation=buildRotationGeometry(h);this.rayleighRates=buildModelTopSpongeRates(v);buildRk3SplitSchedule(acousticRatio);
+    this.rotation=buildRotationGeometry(h);this.rayleighRates=Float64Array.from(buildModelTopSpongeRates(v));buildRk3SplitSchedule(acousticRatio);
   }
-  step(state:DryState,dt:number,options:Stage4Rk3SplitOptions={}):void{
+  step(state:DryState,dt:number,options:Stage4Rk3SplitOptions={}):void {
     if(!(dt>0))throw new Error('Stage4 RK3 dt must be positive');
     const base=cloneState(state),schedule=buildRk3SplitSchedule(this.acousticRatio);let predictor=cloneState(base);
     for(const stage of schedule){
