@@ -8,12 +8,13 @@ import { applyModelTopSponge } from '../physics/modelTopSponge.js';
 import { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
 import { RotationGeometry, addCellWindDeltaToEdges, applyTraditionalCoriolis, buildRotationGeometry, reconstructCellHorizontalWind } from '../physics/rotation.js';
 import { DryCoreCpu, StepDiagnostics, TransportSnapshot } from './dryCoreCpu.js';
+import { STAGE4_HEVI_OFFCENTERING } from './stage4Config.js';
 import { DryState, cell3DIndex, edge3DIndex, w3DIndex } from './state.js';
 
 export interface RotatingStepOptions{heldSuarez?:boolean;momentumTransport?:boolean;coriolis?:boolean;topSponge?:boolean;divergenceDamping?:boolean}
 export class RotatingDryCoreCpu{
   readonly dry:DryCoreCpu;readonly rotation:RotationGeometry;
-  constructor(public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere){this.dry=new DryCoreCpu(h,v,ref);this.dry.captureTransport=true;this.rotation=buildRotationGeometry(h)}
+  constructor(public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere){this.dry=new DryCoreCpu(h,v,ref,STAGE4_HEVI_OFFCENTERING);this.dry.captureTransport=true;this.rotation=buildRotationGeometry(h)}
   step(s:DryState,dt:number,opt:RotatingStepOptions={}):StepDiagnostics{
     const cor=opt.coriolis!==false,mom=opt.momentumTransport!==false,hs=opt.heldSuarez!==false,sponge=opt.topSponge!==false,divDamp=opt.divergenceDamping!==false;
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
