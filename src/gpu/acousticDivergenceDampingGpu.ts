@@ -57,7 +57,9 @@ export class GpuAcousticDivergenceDamping{
   private readonly adjustGroup:GPUAny;
   constructor(public readonly gpu:GpuRotatingDryCore){
     this.device=gpu.device;const U=(globalThis as any).GPUBufferUsage,storage=U.STORAGE|U.COPY_DST|U.COPY_SRC;
-    this.params=this.device.createBuffer({label:'acoustic divergence params',size:32,usage:U.UNIFORM|U.COPY_DST});
+    // The ADJUST Params struct contains a vec3<f32>, which is 16-byte aligned in WGSL.
+    // Its minimum uniform-binding size is therefore 48 bytes (not 32).
+    this.params=this.device.createBuffer({label:'acoustic divergence params',size:48,usage:U.UNIFORM|U.COPY_DST});
     const vm=new Float32Array(gpu.v.nz*2);
     for(let k=0;k<gpu.v.nz;k++){
       const rho=Math.max(gpu.ref.rhoCenter[k]!,1e-12),dz=gpu.v.dz[k]!;
@@ -77,7 +79,7 @@ export class GpuAcousticDivergenceDamping{
   }
   apply(coefficient=ACOUSTIC_DIVERGENCE_DAMPING):void{
     if(!(coefficient>=0&&coefficient<=0.25))throw new Error('acoustic divergence coefficient must be in [0,0.25]');
-    const ab=new ArrayBuffer(32),u=new Uint32Array(ab),f=new Float32Array(ab);u[0]=this.gpu.v.nz;u[1]=this.gpu.h.edgeCount;u[2]=this.gpu.h.cellCount;f[4]=coefficient;this.device.queue.writeBuffer(this.params,0,ab);
+    const ab=new ArrayBuffer(48),u=new Uint32Array(ab),f=new Float32Array(ab);u[0]=this.gpu.v.nz;u[1]=this.gpu.h.edgeCount;u[2]=this.gpu.h.cellCount;f[4]=coefficient;this.device.queue.writeBuffer(this.params,0,ab);
     const enc=this.device.createCommandEncoder({label:'acoustic divergence damping'});
     let p=enc.beginComputePass();p.setPipeline(this.divergencePipeline);p.setBindGroup(0,this.divergenceGroup);p.dispatchWorkgroups(Math.ceil(this.gpu.h.cellCount*this.gpu.v.nz/128));p.end();
     p=enc.beginComputePass();p.setPipeline(this.adjustPipeline);p.setBindGroup(0,this.adjustGroup);p.dispatchWorkgroups(Math.ceil(this.gpu.h.edgeCount*this.gpu.v.nz/128));p.end();
