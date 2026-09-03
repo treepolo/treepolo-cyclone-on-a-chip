@@ -95,9 +95,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     let dzc=lz(u)-lz(l);
     let ql=c*nz+l; let qu=c*nz+u;
     let rho0i=0.5*(lrho(l)+lrho(u));
-    let rhoMean=max(0.5*(rho[ql]+rho[qu]),1e-8);
-    let rhoi=max(0.5*(rho0i+rhoMean),1e-8);
-    let buoyancy=-params.gravity*(rhoMean-rho0i)/rhoMean;
+    let rhoi=max(0.5*(rho0i+0.5*(rho[ql]+rho[qu])),1e-8);
     let Al=params.gamma*lp(l)/lx(l);
     let Au=params.gamma*lp(u)/lx(u);
     let base=params.dt*params.dt/(rhoi*dzc);
@@ -107,7 +105,7 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     lo[ii]=-facNew*Al*xim/ldz(l);
     di[ii]=1.0+facNew*(Au*xi/ldz(u)+Al*xi/ldz(l));
     up[ii]=-facNew*Au*xip/ldz(u);
-    rhs[ii]=oldW[i]-params.dt*(pPrime[u]-pPrime[l])/(rhoi*dzc)+params.dt*buoyancy+facOld*(Au*Lold[u]-Al*Lold[l]);
+    rhs[ii]=oldW[i]-params.dt*(pPrime[u]-pPrime[l])/(rhoi*dzc)+facOld*(Au*Lold[u]-Al*Lold[l]);
   }
   if(n>0u){
     lo[0u]=0.0; up[n-1u]=0.0;
@@ -135,6 +133,21 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     let Rnew=(irho(k+1u)*w[c*(nz+1u)+k+1u]-irho(k)*w[c*(nz+1u)+k])/dz;
     rho[q]=rho[q]-params.dt*(oldWeight*Rold+theta*Rnew);
   }
+}`;
+
+const BUOYANCY_SHADER = COMMON + /* wgsl */`
+@group(0) @binding(1) var<storage,read> layerRef:array<f32>;
+@group(0) @binding(2) var<storage,read> rho:array<f32>;
+@group(0) @binding(3) var<storage,read_write> w:array<f32>;
+fn lrho(k:u32)->f32{return layerRef[k*5u+3u];}
+@compute @workgroup_size(128)
+fn main(@builtin(global_invocation_id) gid:vec3<u32>){
+  let q=gid.x; let count=params.cellCount*(params.nz-1u); if(q>=count){return;}
+  let c=q/(params.nz-1u); let i=1u+(q-c*(params.nz-1u));
+  let l=c*params.nz+i-1u; let u=c*params.nz+i; let wi=c*(params.nz+1u)+i;
+  let rr=0.5*(rho[l]+rho[u]);
+  let r0=0.5*(lrho(i-1u)+lrho(i));
+  w[wi]=w[wi]-params.dt*params.gravity*(rr-r0)/max(rr,1e-8);
 }`;
 
 const HFLUX_SHADER = COMMON + /* wgsl */`
@@ -284,6 +297,7 @@ export class GpuDryCorePrototype {
       ['pressure',PRESSURE_SHADER,['params','rhoTheta','pressure']],
       ['hvel',HVEL_SHADER,['params','edgeCells','edgeMetric','rho','pressure','u']],
       ['hevi',HEVI_SHADER,['params','layerRef','interfaceRef','rho','rhoTheta','w','heviRayleigh']],
+      ['buoyancy',BUOYANCY_SHADER,['params','layerRef','rho','w']],
       ['hflux',HFLUX_SHADER,['params','edgeCells','edgeMetric','layerRef','rho','rhoTheta','u','hFlux']],
       ['vflux',VFLUX_SHADER,['params','cellArea','layerRef','rho','rhoTheta','w','vFlux']],
       ['divergence',DIVERGENCE_SHADER,['params','cellArea','layerRef','cellEdges','cellSigns','hFlux','vFlux','rho','rhoTheta']],
@@ -302,6 +316,7 @@ export class GpuDryCorePrototype {
     this.dispatch(pass,'pressure',this.h.cellCount*this.v.nz);
     this.dispatch(pass,'hvel',this.h.edgeCount*this.v.nz);
     this.dispatch(pass,'hevi',this.h.cellCount,1);
+    this.dispatch(pass,'buoyancy',this.h.cellCount*(this.v.nz-1));
     this.dispatch(pass,'hflux',this.h.edgeCount*this.v.nz);
     this.dispatch(pass,'vflux',this.h.cellCount*(this.v.nz+1));
     this.dispatch(pass,'divergence',this.h.cellCount*this.v.nz);
