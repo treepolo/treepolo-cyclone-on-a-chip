@@ -7,7 +7,7 @@ import { applyHeldSuarezForcing } from '../physics/heldSuarez.js';
 import { buildModelTopSpongeRates } from '../physics/modelTopSponge.js';
 import { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
 import { RotationGeometry, addCellWindDeltaToEdges, applyTraditionalCoriolis, buildRotationGeometry, reconstructCellHorizontalWind } from '../physics/rotation.js';
-import { advectVerticalVelocity } from '../physics/verticalMomentumAdvection.js';
+import { computeAdvectedVerticalVelocity } from '../physics/verticalMomentumAdvection.js';
 import { DryCoreCpu, StepDiagnostics, TransportSnapshot } from './dryCoreCpu.js';
 import { STAGE4_HEVI_OFFCENTERING } from './stage4Config.js';
 import { DryState, cell3DIndex, edge3DIndex, w3DIndex } from './state.js';
@@ -20,7 +20,12 @@ export class RotatingDryCoreCpu{
     const cor=opt.coriolis!==false,mom=opt.momentumTransport!==false,hs=opt.heldSuarez!==false,sponge=opt.topSponge!==false,divDamp=opt.divergenceDamping!==false;
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
     const d=this.dry.step(s,dt,sponge);
-    if(mom){if(!this.dry.lastTransport)throw new Error('missing transport snapshot');advectVerticalVelocity(this.h,this.v,s,dt);this.advectHorizontalMomentum(s,dt,this.dry.lastTransport)}
+    if(mom){
+      if(!this.dry.lastTransport)throw new Error('missing transport snapshot');
+      const wNew=computeAdvectedVerticalVelocity(this.h,this.v,s,dt);
+      this.advectHorizontalMomentum(s,dt,this.dry.lastTransport);
+      s.wInterface.set(wNew);
+    }
     if(hs)applyHeldSuarezForcing(this.h,this.v,s,dt);
     if(cor)applyTraditionalCoriolis(this.h,this.rotation,s,.5*dt);
     if(divDamp)applyAcousticDivergenceDamping(this.h,this.v,this.ref,s,acousticDivergenceCoefficientForDt(dt));
@@ -29,11 +34,6 @@ export class RotatingDryCoreCpu{
   private advectHorizontalMomentum(s:DryState,dt:number,t:TransportSnapshot):void{
     const{h,v}=this,nz=v.nz,R=EARTH.radius,windByK:Float64Array[]=Array.from({length:nz},(_,k)=>reconstructCellHorizontalWind(h,this.rotation,s,k)),hmx=new Float64Array(s.uEdge.length),hmy=new Float64Array(s.uEdge.length),hmz=new Float64Array(s.uEdge.length);
     for(let e=0;e<h.edgeCount;e++)for(let k=0;k<nz;k++){const q=edge3DIndex(e,k,nz),m=t.hMassFlux[q]!,src=m>=0?h.edges[e]!.leftCell:h.edges[e]!.rightCell,w=windByK[k]!;hmx[q]=m*w[src*3]!;hmy[q]=m*w[src*3+1]!;hmz[q]=m*w[src*3+2]!}
-    // Momentum must be carried by the FULL vertical mass flux rho*w. The scalar
-    // core's vMassFlux stores only the perturbation flux (rho-rho0)*w because
-    // the linear rho0*w part is already handled inside HEVI for mass/scalars;
-    // reusing that split scalar flux for momentum omitted the dominant vertical
-    // transport of horizontal momentum.
     const vmx=new Float64Array(s.wInterface.length),vmy=new Float64Array(s.wInterface.length),vmz=new Float64Array(s.wInterface.length);
     for(let c=0;c<h.cellCount;c++)for(let i=1;i<nz;i++){
       const q=w3DIndex(c,i,nz),vel=s.wInterface[q]!,src=vel>=0?i-1:i,cell=cell3DIndex(c,src,nz),m=s.rhoD[cell]!*vel*(h.cellAreaUnit[c]!*R*R),w=windByK[src]!;
