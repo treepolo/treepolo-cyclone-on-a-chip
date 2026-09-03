@@ -4,7 +4,7 @@
 
 目的：讀取實際瀏覽器的 WebGPU limits，對六 panel、三維 SoA field 做 repeated compute passes，量測 cell-updates/s、buffer limits 與基本 ping-pong data path。
 
-本次執行環境的 headless Chromium 無法初始化可用 GPU/EGL/Vulkan backend，因此沒有把 software fallback 或 CPU 數字冒充真實 GPU 效能。這個限制不改變架構決策：正式程式啟動時對使用者裝置做 capability probing + short throughput benchmark，再選 `N`、`Nz`、粒子數與 diagnostic cadence。
+本次執行環境的 headless Chromium 無法初始化可用 GPU/EGL/Vulkan backend，因此沒有把 software fallback 或 CPU 數字冒充真實 GPU 效能。這個限制不改變架構決策：正式程式啟動時對使用者裝置做 capability probing + short throughput benchmark，再選 `N`、`Nz`、粒子數與 diagnostic cadence。可重跑頁面在 `prototypes/p1_webgpu.html`。
 
 ## P2 — cubed-sphere seam finite-volume transport
 
@@ -18,6 +18,8 @@ Float64 實測：
 | 24 | 3,456 | 6,912 | 553 | 0 | 1.86e-8 | 0.664 |
 | 48 | 13,824 | 27,648 | 1,128 | 0 | 5.87e-13 | 0.512 |
 
+`N=12,24` 可直接用 `python prototypes/stage2_reference.py` 重跑；`N=48` 使用 `--full`。
+
 結論：
 
 1. 六個 panel seam 可以用 shared-edge topology 做到機器精度的全球質量守恆。
@@ -28,14 +30,14 @@ Float64 實測：
 
 線性一維聲波柱：高度 20 km、80 層、聲速 340 m/s，pressure 在 cell center，vertical velocity 在 layer interface；上下 rigid wall。比較 staggered explicit forward-backward 與 Crank–Nicolson implicit column solve。
 
-Float64、300 steps 實測：
+以下數字以 Repo 內 `prototypes/stage2_reference.py` 的可重跑版本為準，Float64、300 steps：
 
 | acoustic CFL | explicit | explicit energy ratio | implicit energy ratio |
 |---:|---|---:|---:|
-| 0.25 | stable | 1.0093 | 1.00000000000003 |
-| 1 | stable but less accurate | 1.0505 | 1.00000000000003 |
-| 3 | blows up around 43 steps | >5e98 | 0.99999999999993 |
-| 10 | blows up around 24 steps | >5e96 | 1.00000000000006 |
+| 0.25 | stable | 1.00661 | 1.00000000000003 |
+| 1 | stable | 1.01109 | 1.00000000000003 |
+| 3 | blows up around 40 steps | >1e90 | 0.99999999999993 |
+| 10 | blows up around 23 steps | >1e93 | 1.00000000000005 |
 
 結論：細垂直層若全顯式處理聲波，整個全球模式的 timestep 會被最小 `dz/c_s` 綁死；per-column vertically implicit solve 可解除這個限制，而且各 column 可大量 GPU 平行。因此正式時間積分鎖定 HEVI / split-explicit family。
 
