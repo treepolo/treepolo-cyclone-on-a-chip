@@ -67,6 +67,7 @@ const MAX_NZ:u32=128u;
 @group(0) @binding(3) var<storage,read_write> rho:array<f32>;
 @group(0) @binding(4) var<storage,read_write> rhoTheta:array<f32>;
 @group(0) @binding(5) var<storage,read_write> w:array<f32>;
+@group(0) @binding(6) var<storage,read> heviRayleigh:array<f32>;
 fn lz(k:u32)->f32{return layerRef[k*5u];}
 fn ldz(k:u32)->f32{return layerRef[k*5u+1u];}
 fn lp(k:u32)->f32{return layerRef[k*5u+2u];}
@@ -119,7 +120,10 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     loop{if(jj<0){break;} let j=u32(jj); sol[j]=dp[j]-cp[j]*sol[j+1u]; jj=jj-1;}
   }
   w[c*(nz+1u)]=0.0; w[c*(nz+1u)+nz]=0.0;
-  for(var i:u32=1u;i<nz;i++){w[c*(nz+1u)+i]=sol[i-1u];}
+  for(var i:u32=1u;i<nz;i++){
+    let rate=max(0.0,heviRayleigh[i]);
+    w[c*(nz+1u)+i]=sol[i-1u]/(1.0+rate*params.dt);
+  }
   for(var k:u32=0u;k<nz;k++){
     let q=c*nz+k;
     let dz=ldz(k);
@@ -216,7 +220,16 @@ export class GpuDryCorePrototype {
   readonly status:GpuCoreStatus;
   private readonly paramsBuffer:GPUAny;
 
-  private constructor(device:GPUAny,adapter:GPUAny,public readonly h:CubedSphereGrid,public readonly v:VerticalGrid,public readonly ref:ReferenceAtmosphere,state:DryState,public readonly heviOffCentering=0){
+  private constructor(
+    device:GPUAny,
+    adapter:GPUAny,
+    public readonly h:CubedSphereGrid,
+    public readonly v:VerticalGrid,
+    public readonly ref:ReferenceAtmosphere,
+    state:DryState,
+    public readonly heviOffCentering=0,
+    heviRayleighRates?:ArrayLike<number>,
+  ){
     this.device=device;
     this.status={adapterInfo:adapter.info,limits:Object.fromEntries(Object.entries(adapter.limits).filter(([,x])=>typeof x==='number')) as Record<string,number>,requiredStorageBuffersPerStage:8};
     const U=(globalThis as any).GPUBufferUsage;
@@ -239,6 +252,8 @@ export class GpuDryCorePrototype {
     for(let i=0;i<=v.nz;i++){
       interfaceRef[i*2]=ref.rhoInterface[i]!; interfaceRef[i*2+1]=ref.rhoThetaInterface[i]!;
     }
+    const rayleigh=heviRayleighRates?Float32Array.from(heviRayleighRates):new Float32Array(v.nz+1);
+    if(rayleigh.length!==v.nz+1)throw new Error('GPU HEVI Rayleigh profile shape mismatch');
     this.buffers.edgeCells=makeBuffer(device,edgeCells,storage,'edgeCells');
     this.buffers.edgeMetric=makeBuffer(device,edgeMetric,storage,'edgeMetric');
     this.buffers.cellArea=makeBuffer(device,cellArea,storage,'cellArea');
@@ -246,6 +261,7 @@ export class GpuDryCorePrototype {
     this.buffers.cellSigns=makeBuffer(device,new Int32Array(h.cellEdgeSigns),storage,'cellSigns');
     this.buffers.layerRef=makeBuffer(device,layerRef,storage,'layerRef[z,dz,p0,rho0,rhoTheta0]');
     this.buffers.interfaceRef=makeBuffer(device,interfaceRef,storage,'interfaceRef[rho0,rhoTheta0]');
+    this.buffers.heviRayleigh=makeBuffer(device,rayleigh,storage,'HEVI implicit Rayleigh profile');
     this.buffers.rho=makeBuffer(device,f32(state.rhoD),storage,'rhoD');
     this.buffers.rhoTheta=makeBuffer(device,f32(state.rhoThetaM),storage,'rhoThetaM');
     this.buffers.u=makeBuffer(device,f32(state.uEdge),storage,'uEdge');
@@ -256,10 +272,11 @@ export class GpuDryCorePrototype {
     this.buildPipelines();
   }
 
-  static async create(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,state:DryState,heviOffCentering=0):Promise<GpuDryCorePrototype>{
+  static async create(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,state:DryState,heviOffCentering=0,heviRayleighRates?:ArrayLike<number>):Promise<GpuDryCorePrototype>{
     const nav=(globalThis as any).navigator;
     if(!nav?.gpu) throw new Error('WebGPU unavailable');
     if(!(heviOffCentering>=0&&heviOffCentering<1))throw new Error('HEVI offCentering must be in [0,1)');
+    if(heviRayleighRates&&heviRayleighRates.length!==v.nz+1)throw new Error('GPU HEVI Rayleigh profile shape mismatch');
     const adapter=await nav.gpu.requestAdapter();
     if(!adapter) throw new Error('No WebGPU adapter');
     if(v.nz>128) throw new Error('Stage 3 GPU HEVI supports nz<=128');
@@ -268,7 +285,7 @@ export class GpuDryCorePrototype {
     if(supported<requiredStorageBuffersPerStage) throw new Error(`WebGPU adapter exposes maxStorageBuffersPerShaderStage=${supported}; Stage 3 requires ${requiredStorageBuffersPerStage}.`);
     const device=await adapter.requestDevice({requiredLimits:{maxStorageBuffersPerShaderStage:requiredStorageBuffersPerStage}});
     device.pushErrorScope?.('validation');
-    const core=new GpuDryCorePrototype(device,adapter,h,v,ref,state,heviOffCentering);
+    const core=new GpuDryCorePrototype(device,adapter,h,v,ref,state,heviOffCentering,heviRayleighRates);
     const err=await device.popErrorScope?.();
     if(err){core.destroy();throw new Error(`WebGPU validation: ${err.message||err}`);}
     return core;
@@ -279,7 +296,7 @@ export class GpuDryCorePrototype {
     const defs:[string,string,string[]][]=[
       ['pressure',PRESSURE_SHADER,['params','rhoTheta','pressure']],
       ['hvel',HVEL_SHADER,['params','edgeCells','edgeMetric','rho','pressure','u']],
-      ['hevi',HEVI_SHADER,['params','layerRef','interfaceRef','rho','rhoTheta','w']],
+      ['hevi',HEVI_SHADER,['params','layerRef','interfaceRef','rho','rhoTheta','w','heviRayleigh']],
       ['buoyancy',BUOYANCY_SHADER,['params','layerRef','rho','w']],
       ['hflux',HFLUX_SHADER,['params','edgeCells','edgeMetric','layerRef','rho','rhoTheta','u','hFlux']],
       ['vflux',VFLUX_SHADER,['params','cellArea','layerRef','rho','rhoTheta','w','vFlux']],
