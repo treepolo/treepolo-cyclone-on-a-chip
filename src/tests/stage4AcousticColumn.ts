@@ -29,10 +29,14 @@ test('Predictor-relative acoustic standing mode remains bounded with off-centeri
 
 test('Predictor-relative implicit Rayleigh damps full predictor plus perturbation w',()=>{
   const v=buildStretchedVerticalGrid(48,40000,1.4),ref=buildHeldSuarezReference(v),rates=buildModelTopSpongeRates(v),predictor:AcousticColumnState={rho:Float64Array.from(ref.rhoCenter),rhoTheta:Float64Array.from(ref.rhoThetaCenter),w:new Float64Array(v.nz+1)},i=v.nz-1,dt=1;
-  predictor.w[i]=1;const state=cloneColumn(predictor),rhs=zeroRhs(v.nz);
-  predictorRelativeVerticalAcousticStep(v,ref,predictor,state,rhs,dt,.1,rates);
-  const expected=1/(1+rates[i]!*dt);
-  assert(Math.abs(state.w[i]!-expected)<2e-12,`full-w Rayleigh mismatch got=${state.w[i]}, expected=${expected}`);
+  predictor.w[i]=1;
+  const free=cloneColumn(predictor),damped=cloneColumn(predictor),rhs=zeroRhs(v.nz);
+  predictorRelativeVerticalAcousticStep(v,ref,predictor,free,rhs,dt,.1);
+  predictorRelativeVerticalAcousticStep(v,ref,predictor,damped,rhs,dt,.1,rates);
+  const isolated=free.w[i]!/(1+rates[i]!*dt),relativeToIsolated=Math.abs(damped.w[i]!-isolated)/Math.max(Math.abs(isolated),1e-12);
+  assert(Math.abs(free.w[i]!-1)<2e-12,`undamped predictor w changed unexpectedly: ${free.w[i]}`);
+  assert(damped.w[i]!<free.w[i]!&&damped.w[i]!>0,`full predictor w was not damped: free=${free.w[i]}, damped=${damped.w[i]}`);
+  assert(relativeToIsolated<.01,`coupled Rayleigh response too far from isolated implicit limit: damped=${damped.w[i]}, isolated=${isolated}, rel=${relativeToIsolated}`);
 });
 
 test('Acoustic reference mass flux reconstructs density update when predictor w and frozen RHS are zero',()=>{
