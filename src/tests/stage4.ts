@@ -3,7 +3,7 @@ import { EARTH } from '../core/constants.js';
 import { dot3, Vec3 } from '../core/math.js';
 import { buildCubedSphere } from '../grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from '../grid/vertical.js';
-import { acousticDivergenceRms, applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
+import { ACOUSTIC_DIVERGENCE_REFERENCE_COEFFICIENT, acousticDivergenceCoefficientForDt, acousticDivergenceRms, applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
 import { addHeldSuarezWavePerturbation, buildHeldSuarezReference } from '../physics/heldSuarez.js';
 import { buildRotationGeometry, reconstructCellHorizontalWind, rotateLocalCoriolis, setAnalyticCellWind } from '../physics/rotation.js';
 import { diagnoseState } from '../solver/diagnostics.js';
@@ -45,6 +45,13 @@ test('V2 discrete spherical pressure gradient is geostrophically balanced',()=>{
     const f=2*EARTH.omega*z,uAnalytic=(2*A*Math.sin(lat)*Math.cos(lat)/R)/f,res=an-f*uAnalytic;num+=res*res;den+=an*an;
   }
   assert(Math.sqrt(num/den)<5e-3,`geostrophic RMS imbalance=${Math.sqrt(num/den)}`);
+});
+
+test('V2 divergence damping cadence is normalized in physical time',()=>{
+  const c100=acousticDivergenceCoefficientForDt(100),c10=acousticDivergenceCoefficientForDt(10);
+  assert(Math.abs(c100-ACOUSTIC_DIVERGENCE_REFERENCE_COEFFICIENT)<1e-14,`100 s coefficient=${c100}`);
+  assert(Math.abs(Math.pow(1-c10,10)-(1-ACOUSTIC_DIVERGENCE_REFERENCE_COEFFICIENT))<1e-12,`10 s cadence mismatch coefficient=${c10}`);
+  assert(c10>.01&&c10<.011,`10 s coefficient should be about 0.0105, got ${c10}`);
 });
 
 test('V2 horizontal acoustic divergence filter damps grid-scale divergent noise',()=>{
