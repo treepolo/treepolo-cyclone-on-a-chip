@@ -6,9 +6,8 @@
 
 - Stage 1：技術研究與核心選型 — 完成。
 - Stage 2：風險 prototype + 完整物理／數值／資料／驗證規格 — 完成。
-- Stage 3：最小三維 dry non-rotating core — CPU reference 7/7 tests 通過；真實 Windows + Chrome WebGPU pipeline/smoke gate 已通過。
-- Stage 3 multi-step GPU hydrostatic-rest + CPU-vs-GPU 驗證 harness 已實作，等待真機 1000-step 結果。
-- 下一步：multi-step GPU gate 通過後正式封關 Stage 3，再進 Stage 4 旋轉全球乾大氣。
+- Stage 3：最小三維 dry non-rotating core — **完成**。CPU Float64 7/7 tests、真機 WebGPU pipeline/smoke、1000-step hydrostatic-rest / conservation / CPU-vs-GPU agreement gate 全部通過。
+- 下一步：Stage 4 — 旋轉全球乾大氣。
 
 Stage 2 入口：`docs/STAGE2_COMPLETE_SPEC.md`  
 Stage 3 實作與結果：`docs/STAGE3_IMPLEMENTATION.md`  
@@ -23,11 +22,23 @@ npm test
 npm run serve
 ```
 
-開啟 `http://127.0.0.1:5173`。Debug Viewer 可以旋轉真正的 3D 大氣球殼、單步／連續積分並插入 constant-pressure thermal bubble；頁面同時會建立 WebGPU compute pipelines 並跑 hydrostatic smoke test。
-
-one-step smoke 通過後，按 `執行 1000 步驗證 / Run 1000-step validation` 執行 Stage 3 最後的真機 GPU gate。
+開啟 `http://127.0.0.1:5173`。Debug Viewer 可以旋轉真正的 3D 大氣球殼、單步／連續積分並插入 constant-pressure thermal bubble；頁面會建立 WebGPU compute pipelines、跑 hydrostatic smoke，並可手動重跑 1000-step GPU correctness gate。
 
 使用者介面依 `docs/UI_SPEC.md` 固定採繁體中文 + English 同時顯示，不使用語言切換作為主要介面模式。
+
+## Stage 3 final GPU result
+
+Windows + Chrome，`6 × 8 × 8 × 32` debug grid，`dt = 0.25 s`，1000 steps：
+
+- GPU dry-mass drift：`4.341e-7`。
+- GPU resting-atmosphere max `|w|`：`9.828e-4 m/s`。
+- `rhoD` CPU/GPU relative L2：`1.605e-6`。
+- `rhoThetaM` CPU/GPU relative L2：`8.172e-7`。
+- max `|Δu| = 0`。
+- max `|Δw| = 9.828e-4 m/s`。
+- 無 NaN、負密度或負壓力錯誤。
+
+所有數值均通過事前鎖定的 Stage 3 gate。`max |w|` 已接近目前 gate，因此後續長時間積分持續保留 hydrostatic/balance residual regression。
 
 ## Stage 2 prototypes
 
