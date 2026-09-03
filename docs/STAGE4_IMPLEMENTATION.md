@@ -1,6 +1,6 @@
 # Stage 4 — 旋轉全球乾大氣 / Rotating Global Dry Atmosphere
 
-狀態：**實作中，尚未封關。** Stage 3 CPU regressions 目前為 8 項；本次補齊三維動量輸送後，Stage 4 CPU regressions 預期為 11 項，需由使用者本機重新執行 `npm test` 驗證。WebGPU smoke、GPU/CPU agreement 與 30-day Held–Suarez gate 也必須重跑。
+狀態：**實作中，尚未封關。** Stage 3 CPU regressions 目前為 8 項；本次修正 HEVI/outer split mass flux 與 horizontal-momentum carrier 後，Stage 4 CPU regressions 預期為 12 項，需由使用者本機重新執行 `npm test` 驗證。WebGPU smoke、GPU/CPU agreement 與 30-day Held–Suarez gate 也必須重跑。
 
 ## 1. 本階段範圍
 
@@ -26,21 +26,59 @@ Stage 4 在 Stage 3 fully-compressible / nonhydrostatic 3-D dry core 上加入�
 
 Stage 4 reference path 使用 `f = 2 Ω sin(phi)`；Coriolis half-step 用解析旋轉矩陣，不以 forward Euler 人為改變 inertial-oscillation 振幅。
 
-## 3. 三維動量輸送
+## 3. 三維動量輸送與 split-flux consistency
 
-Physics spec 鎖定的連續動量方程含完整 `div(rho u⊗u)`，而 `w` 是真正 prognostic vertical velocity。檢查 long-run instability 時發現舊 Stage 4 實作只有 horizontal wind 的部分 transport，存在兩個結構缺口：
+Physics spec 鎖定的連續動量方程含完整 `div(rho u⊗u)`，而 `w` 是真正 prognostic vertical velocity。檢查 long-run instability 時曾發現舊 Stage 4 實作有兩個結構缺口：
 
 1. `w` 沒有 `u_h·grad_h(w)` 與 `w dw/dz` advection；
-2. horizontal momentum 的 vertical carrier 直接重用了 scalar core 的 `vMassFlux`，但該 scalar flux 因 HEVI reference-state splitting 只儲存 `(rho-rho0)w` perturbation flux，不能代表完整的 vertical momentum carrier。
+2. horizontal momentum 的 vertical carrier 直接重用了 scalar core 的 outer `vMassFlux`，但該 flux 因 HEVI reference-state splitting 只含 `(rho-rho0)w` perturbation 部分。
 
-本版修正：
+因此先補上：
 
-- `w` 新增 first-order donor-cell horizontal + vertical advective transport；
-- horizontal advection of `w` 以 w-interface 上左右 layer 的 edge-normal wind 平均為 advecting velocity；
-- vertical advection of `w` 依 `w` 符號選 lower/upper donor；
-- horizontal momentum 的 vertical transport 改以 full `rho*w*area` carrier 搬運 upwind horizontal cell wind；
-- CPU/GPU 都以同一個 pre-advection velocity state 計算 horizontal / vertical momentum tendencies，再提交新 `u` / `w`，避免 operator ordering 分岔；
-- GPU 新 `wAdvect` pass 使用 7 個 storage buffers，仍低於既有 8-buffer baseline。
+- `w` 的 first-order donor-cell horizontal + vertical advection；
+- CPU/GPU 以同一個 pre-advection velocity state 計算 horizontal / vertical momentum tendencies；
+- GPU `wAdvect` pass 維持在 8-storage-buffer baseline 以內。
+
+### 3.1 被否決的 instantaneous full-rho-w carrier
+
+第一個修正嘗試直接把 horizontal momentum 的 vertical carrier 改成某一瞬間的 `rho*w*area`。這在連續方程看似「更完整」，但與目前 dry core 的 reference-state split **不一致**：
+
+HEVI 對 density 使用 time-centered reference flux：
+
+`Fref = rho0 * [(1-theta) w_old + theta w_new]`
+
+之後 outer transport 再使用：
+
+`Fpert = (rho-rho0) w`
+
+真正造成一個完整 dry-core timestep density change 的有效垂直 mass flux是：
+
+`Ftotal = Fref + Fpert`
+
+instantaneous `rho*w` 並不等於這個離散 flux。上一版 momentum numerator 使用 instantaneous `rho*w`，但 `rhoOld` reconstruction 仍只認 outer perturbation flux，造成 momentum / density ratio 不一致。真機結果在 day 4.25 出現：
+
+- `max |u_edge| = 403.371 m/s`；
+- upper-midlatitude diagnostic jet 只有 `4.638 m/s`；
+- horizontal CFL 仍只有 `4.10e-3`；
+- global `max |w| = 10.626 m/s`，主要仍在 absorber 內。
+
+也就是少數高空低密度格點的水平速度被不一致的 conservative update 人為放大，而不是整個大尺度 jet 真實加速。
+
+### 3.2 目前修正：continuity-consistent Fref + Fpert carrier
+
+HEVI column solver 現在額外回報它**實際使用於 density update**的 interface reference mass flux：
+
+`Fref(i) = rho0(i) * [(1-theta) w_old(i) + theta w_new(i)]`
+
+CPU `TransportSnapshot.vMassFlux` 改為已積分 face area 的：
+
+`Ftotal = Fref + Fpert`
+
+GPU HEVI shader 同樣輸出 `heviRefMass` buffer；Stage 4 GPU 的 `vMom` 與 `rhoOld` 都使用：
+
+`vFlux.rho + heviRefMass`
+
+因此 horizontal momentum flux、`rhoOld` reconstruction 與最終 `rhoNew` 現在使用**完全相同的 split continuity mass carrier**。這保留 reference-state HEVI 的數值分裂，同時補上原本漏掉的 reference vertical transport of horizontal momentum；不再用 instantaneous `rho*w` 去近似一個不同的離散 continuity operator。
 
 目前仍是 correctness-grade first-order donor-cell transport；production high-order monotone reconstruction 尚未完成。
 
@@ -58,14 +96,14 @@ new-time acoustic coupling coefficient 為 `theta^2 dt^2`，old-time coupling �
 
 ### 5.1 被否決的 buoyancy-in-HEVI 實驗
 
-曾根據 upper-absorber 診斷，把 old-time density buoyancy 直接加入 linear HEVI acoustic RHS。CPU/GPU short agreement 雖 PASS，但真機 30-day gate 在 **day 0.25** 即出現：
+曾把 old-time density buoyancy 直接加入 linear HEVI acoustic RHS。CPU/GPU short agreement 雖 PASS，但真機 30-day gate 在 **day 0.25** 即出現：
 
 - global `max|w| = 43.78 m/s`；
 - below-absorber `max|w| = 43.07 m/s`；
 - peak location `30.20 km, -5.6°`；
 - vertical CFL `0.374`。
 
-相較前一版 day-2 `14.10 m/s`，這是明確惡化。因此該 coupling **已完整回退**；目前恢復已驗證過的配置：HEVI pressure/acoustic solve 後再做 explicit slow buoyancy forcing。若未來要重新把 buoyancy 納入 implicit gravity-wave solve，必須重新推導一致離散式，不能直接把 old-density buoyancy 塞入 acoustic RHS。
+該 coupling 已完整回退；目前恢復 HEVI pressure/acoustic solve 後再做 explicit slow buoyancy forcing。若未來要重新把 buoyancy 納入 implicit gravity-wave solve，必須重新推導一致離散式，不能直接把 old-density buoyancy 塞入 acoustic RHS。
 
 ## 6. Horizontal acoustic-divergence damping
 
@@ -105,7 +143,7 @@ filter strength 以物理時間正規化：歷史 reference 為 `100 s` 作用�
 
 ## 9. CPU regressions
 
-本版 Stage 4 預期 11 項：
+本版 Stage 4 預期 12 項：
 
 1. cubed-sphere solid-body wind reconstruction；
 2. inertial oscillation；
@@ -114,10 +152,11 @@ filter strength 以物理時間正規化：歷史 reference 為 `100 s` 作用�
 5. grid-scale horizontal divergent-noise damping；
 6. vertical motion 不得被 horizontal filter 轉成 horizontal wind；
 7. implicit HEVI top absorber profile / rate；
-8. locally uniform interior `w` 經 advection 不得被改變；
-9. vertical `w` donor-cell direction/value；
-10. rotating hydrostatic rest；
-11. one-day Held–Suarez sanity。
+8. `Fref + Fpert` transport snapshot 必須逐 cell 重建實際 density update；
+9. locally uniform interior `w` 經 advection 不得被改變；
+10. vertical `w` donor-cell direction/value；
+11. rotating hydrostatic rest；
+12. one-day Held–Suarez sanity。
 
 **本文件不宣稱本版已通過；需本機 `npm test` 實測。**
 
@@ -125,7 +164,7 @@ filter strength 以物理時間正規化：歷史 reference 為 `100 s` 作用�
 
 threshold 維持：GPU dry-mass drift `<=2e-6`；`rhoD` / `rhoThetaM` relative L2 `<=1e-4`；max `|Δu|<=0.05 m/s`；max `|Δw|<=0.02 m/s`；invalid state forbidden。
 
-本版 CPU/GPU momentum transport 都有實質改動，agreement 必須重跑。
+本版 CPU/GPU HEVI output buffer 與 momentum transport 都有實質改動，agreement 必須重跑。
 
 ## 11. Real-device Gate B — 30-day Held–Suarez development
 
@@ -133,7 +172,7 @@ threshold 維持：GPU dry-mass drift `<=2e-6`；`rhoD` / `rhoThetaM` relative L
 
 Gates 不放寬：`|mass drift|<=5e-5`、upper-midlatitude max westerly `>0.5 m/s`、tropical low-level zonal wind `<0`、max overturning `>1e9 kg/s`、NH/SH dominant overturning signs opposite、`max|w|<10 m/s` throughout、no invalid state。
 
-若完整三維 momentum transport 後仍只在 model top 快速失穩且 CFL 很低，下一個結構性工作將是 Stage 2 已鎖定但尚未完成的 **outer RK3 + split acoustic substeps**，而不是繼續提高 Rayleigh peak 或放寬 gate。
+若 continuity-consistent complete 3-D momentum transport 後仍只在 model top 快速失穩且 CFL 很低，下一個結構性工作將是 Stage 2 已鎖定但尚未完成的 **outer RK3 + split acoustic substeps**，而不是繼續提高 Rayleigh peak 或放寬 gate。
 
 ## 12. 封關條件
 
