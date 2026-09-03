@@ -61,13 +61,16 @@ export class GpuAcousticDivergenceDamping{
       {binding:0,resource:{buffer:this.params}},{binding:1,resource:{buffer:b.edgeCells}},{binding:2,resource:{buffer:b.edgeMetric}},{binding:3,resource:{buffer:this.divergence}},{binding:4,resource:{buffer:b.u}},
     ]});
   }
-  apply(coefficient=ACOUSTIC_DIVERGENCE_DAMPING):void{
+  prepare(coefficient=ACOUSTIC_DIVERGENCE_DAMPING):void{
     if(!(coefficient>=0&&coefficient<=0.25))throw new Error('acoustic divergence coefficient must be in [0,0.25]');
     const ab=new ArrayBuffer(48),u=new Uint32Array(ab),f=new Float32Array(ab);u[0]=this.gpu.v.nz;u[1]=this.gpu.h.edgeCount;u[2]=this.gpu.h.cellCount;f[4]=coefficient;this.device.queue.writeBuffer(this.params,0,ab);
-    const enc=this.device.createCommandEncoder({label:'horizontal acoustic divergence damping'});
+  }
+  encode(enc:GPUAny):void{
     let p=enc.beginComputePass();p.setPipeline(this.divergencePipeline);p.setBindGroup(0,this.divergenceGroup);p.dispatchWorkgroups(Math.ceil(this.gpu.h.cellCount*this.gpu.v.nz/128));p.end();
     p=enc.beginComputePass();p.setPipeline(this.adjustPipeline);p.setBindGroup(0,this.adjustGroup);p.dispatchWorkgroups(Math.ceil(this.gpu.h.edgeCount*this.gpu.v.nz/128));p.end();
-    this.device.queue.submit([enc.finish()]);
+  }
+  apply(coefficient=ACOUSTIC_DIVERGENCE_DAMPING):void{
+    this.prepare(coefficient);const enc=this.device.createCommandEncoder({label:'horizontal acoustic divergence damping'});this.encode(enc);this.device.queue.submit([enc.finish()]);
   }
   destroy():void{this.params.destroy?.();this.divergence.destroy?.();}
 }
