@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>晶片上的旋風 / Cyclone on a Chip — 階段 3 / Stage 3</title>
 <style>
-html,body{margin:0;height:100%;background:#05070a;color:#dbe5ef;font-family:ui-monospace,SFMono-Regular,Consolas,"Noto Sans TC","Microsoft JhengHei",monospace}body{display:grid;grid-template-columns:minmax(0,1fr) 360px}canvas{width:100%;height:100%;display:block}.panel{padding:14px;border-left:1px solid #26303b;overflow:auto;background:#0a0e13}.panel h1{font-size:16px;margin:0 0 10px}.panel h2{font-size:13px;margin:16px 0 6px}.row{display:flex;justify-content:space-between;gap:12px;font-size:12px;line-height:1.55}.row span:first-child{min-width:0}.row span:last-child{text-align:right}.muted{color:#8da0b3}.ok{color:#91d6a7}.bad{color:#ff9a9a}button,select,input{font:inherit;background:#101821;color:#dbe5ef;border:1px solid #334354;padding:5px 7px}.controls{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:#05070a;padding:8px;border:1px solid #1d2833;min-height:100px;overflow-wrap:anywhere}@media(max-width:760px){body{grid-template-columns:1fr;grid-template-rows:62vh 38vh}.panel{border-left:0;border-top:1px solid #26303b}}
+html,body{margin:0;height:100%;background:#05070a;color:#dbe5ef;font-family:ui-monospace,SFMono-Regular,Consolas,"Noto Sans TC","Microsoft JhengHei",monospace}body{display:grid;grid-template-columns:minmax(0,1fr) 380px}canvas{width:100%;height:100%;display:block}.panel{padding:14px;border-left:1px solid #26303b;overflow:auto;background:#0a0e13}.panel h1{font-size:16px;margin:0 0 10px}.panel h2{font-size:13px;margin:16px 0 6px}.row{display:flex;justify-content:space-between;gap:12px;font-size:12px;line-height:1.55}.row span:first-child{min-width:0}.row span:last-child{text-align:right}.muted{color:#8da0b3}.ok{color:#91d6a7}.bad{color:#ff9a9a}button,select,input{font:inherit;background:#101821;color:#dbe5ef;border:1px solid #334354;padding:5px 7px}button:disabled{opacity:.45;cursor:not-allowed}.controls{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:#05070a;padding:8px;border:1px solid #1d2833;min-height:100px;overflow-wrap:anywhere}.validation{border:1px solid #26303b;padding:9px;margin-top:8px;background:#070b10}.validation progress{width:100%;height:12px;margin:7px 0}.small{font-size:11px;line-height:1.4}@media(max-width:760px){body{grid-template-columns:1fr;grid-template-rows:62vh 38vh}.panel{border-left:0;border-top:1px solid #26303b}}
 </style>
 </head>
 <body>
@@ -24,6 +24,23 @@ html,body{margin:0;height:100%;background:#05070a;color:#dbe5ef;font-family:ui-m
 <div class="row"><span>最低 ρ / Min ρ</span><span id="rhomin">—</span></div>
 <div class="row"><span>最低 p / Min p</span><span id="pmin">—</span></div>
 <div class="row"><span>模擬時間 / Sim time</span><span id="time">0 s</span></div>
+
+<h2>GPU 多步驗證 / GPU Multi-step Validation</h2>
+<div class="validation">
+<div class="controls"><button id="gpuValidate" disabled>執行 1000 步驗證 / Run 1000-step validation</button></div>
+<div class="row"><span>驗證狀態 / Validation status</span><span id="gpuValidationStatus">等待 smoke / Waiting for smoke</span></div>
+<progress id="gpuValidationProgress" value="0" max="1000"></progress>
+<div id="gpuValidationProgressText" class="muted small">0 / 1,000 steps</div>
+<div class="row"><span>GPU 質量漂移 / GPU mass drift</span><span id="gpuLongMass">—</span></div>
+<div class="row"><span>GPU 最大 |w| / GPU max |w|</span><span id="gpuLongW">—</span></div>
+<div class="row"><span>ρ 相對 L2 / ρ relative L2</span><span id="gpuRhoL2">—</span></div>
+<div class="row"><span>ρθ 相對 L2 / ρθ relative L2</span><span id="gpuRhoThetaL2">—</span></div>
+<div class="row"><span>最大 |Δu| / Max |Δu|</span><span id="gpuUDiff">—</span></div>
+<div class="row"><span>最大 |Δw| / Max |Δw|</span><span id="gpuWDiff">—</span></div>
+<div class="row"><span>驗證耗時 / Validation elapsed</span><span id="gpuValidationElapsed">—</span></div>
+<div class="muted small" style="margin-top:7px">以完全靜止的靜力大氣同時跑 CPU Float64 與 GPU Float32，檢查 1、10、100、250、500、1000 步。 / Runs the same resting hydrostatic atmosphere on CPU Float64 and GPU Float32, checking steps 1, 10, 100, 250, 500, and 1000.</div>
+</div>
+
 <h2>檢視器 / Viewer</h2>
 <div class="muted">拖曳可旋轉；滾輪或雙指縮放。畫面中的點是取樣的三維大氣網格單元；徑向位移有視覺誇張，讓大氣厚度可見。 / Drag to rotate; wheel or pinch to zoom. Points are sampled 3D air cells; radial displacement is visually exaggerated so atmospheric thickness is visible.</div>
 <h2>紀錄 / Log</h2><div id="log" class="log"></div>
