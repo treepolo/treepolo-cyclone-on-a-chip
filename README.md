@@ -6,11 +6,13 @@
 
 - Stage 1：技術研究與核心選型 — 完成。
 - Stage 2：風險 prototype + 完整物理／數值／資料／驗證規格 — 完成。
-- Stage 3：最小三維 dry non-rotating core — CPU reference 7/7 tests 通過；WebGPU core 已實作，待真實裝置 smoke 驗收。
-- 下一步：先完成 Stage 3 真實 WebGPU 裝置驗收，再進 Stage 4 旋轉全球乾大氣。
+- Stage 3：最小三維 dry non-rotating core — CPU reference 7/7 tests 通過；真實 Windows + Chrome WebGPU pipeline/smoke gate 已通過。
+- Stage 3 剩餘 gate：multi-step GPU hydrostatic-rest + CPU-vs-GPU 短期數值一致性／守恆驗證。
+- 下一步：完成上述 multi-step GPU gate 後，進 Stage 4 旋轉全球乾大氣。
 
 Stage 2 入口：`docs/STAGE2_COMPLETE_SPEC.md`  
-Stage 3 實作與結果：`docs/STAGE3_IMPLEMENTATION.md`
+Stage 3 實作與結果：`docs/STAGE3_IMPLEMENTATION.md`  
+Stage 3 真機 GPU 紀錄：`docs/STAGE3_GPU_SMOKE_20260903.md`
 
 ## Stage 3 run
 
@@ -20,7 +22,9 @@ npm test
 npm run serve
 ```
 
-開啟 `http://127.0.0.1:5173`。Debug Viewer 可以旋轉真正的 3D 大氣球殼、單步／連續積分並插入 constant-pressure thermal bubble；頁面同時會嘗試建立 WebGPU compute pipelines 並跑 hydrostatic smoke test。
+開啟 `http://127.0.0.1:5173`。Debug Viewer 可以旋轉真正的 3D 大氣球殼、單步／連續積分並插入 constant-pressure thermal bubble；頁面同時會建立 WebGPU compute pipelines 並跑 hydrostatic smoke test。
+
+使用者介面依 `docs/UI_SPEC.md` 固定採繁體中文 + English 同時顯示，不使用語言切換作為主要介面模式。
 
 ## Stage 2 prototypes
 
