@@ -77,18 +77,56 @@ Acoustic filter 改為只計算：
 
 `u_edge <- u_edge + gamma_d * d_edge * (D_R - D_L)`
 
-理由與責任分工：
+責任分工：HEVI 負責 vertically propagating acoustic mode；model-top sponge 吸收 rigid-top 垂直波反射；horizontal divergence damping 只處理 horizontally propagating acoustic/divergent grid-scale mode。`w` 不再作為 horizontal filter 的直接輸入；不修改 mass、`rhoTheta`，不做 velocity clamp；`gamma_d = 0.1` 維持不變。
 
-- HEVI 負責 vertically propagating acoustic mode；
-- model-top sponge 吸收人工 rigid-top 的垂直波反射；
-- horizontal divergence damping 只處理 horizontally propagating acoustic/divergent grid-scale mode；
-- vertical velocity `w` 不再作為 horizontal filter 的直接輸入；
-- 不修改 mass、`rhoTheta`，不做 velocity clamp；
-- `gamma_d = 0.1` 與所有 long-run physical gates 維持不變。
+新增 regression：建立 `u=0`、`w!=0` 的狀態後執行 acoustic filter，要求 `u` 必須保持精確為 0，以防 vertical-to-horizontal aspect-ratio leakage 再次出現。GPU divergence pass 也移除 `w` 與 vertical metric storage buffers，使 filter 的 CPU/GPU 離散形式重新一一對應。
 
-新增 regression：建立 `u=0`、`w!=0` 的狀態後執行 acoustic filter，要求 `u` 必須保持精確為 0，以防 vertical-to-horizontal aspect-ratio leakage 再次出現。
+### 修正 C 真機結果：短期一致性重新 PASS
 
-GPU divergence pass 也移除 `w` 與 vertical metric storage buffers，使 filter 的 CPU/GPU 離散形式重新一一對應。
+500-step GPU/CPU agreement：
+
+- mass drift `9.172e-7`
+- `rhoD` relative L2 `1.716e-5`
+- `rhoThetaM` relative L2 `8.915e-6`
+- max `|Δu| = 1.169e-3 m/s`
+- max `|Δw| = 2.241e-3 m/s`
+
+因此 3-D filter 引入的 CPU/GPU 分岔已被消除。
+
+## Failure D：horizontal-only filter，N=4 × Nz=12 在 day 10.25 仍超過 `w` guard
+
+同一個 `dt=10 s`、top sponge、horizontal acoustic filter 下，極粗長期網格仍在 day 10.25 超過 `max |w| < 10 m/s` gate：
+
+- day 0.25: `0.0938 m/s`
+- day 1.00: `0.3886 m/s`
+- day 2.00: `1.714 m/s`
+- day 3.00: `4.863 m/s`
+- day 4.00: `5.956 m/s`
+- day 6.00: `6.985 m/s`
+- day 8.00: `6.549 m/s`
+- day 9.00: `6.570 m/s`
+- day 10.00: `9.301 m/s`
+- day 10.25: `11.587 m/s` → FAIL
+
+但大尺度方向仍合理：day 10.25 upper-midlatitude westerly `4.397 m/s`、tropical low-level zonal wind `-0.067 m/s`、overturning `4.417e10 kg/s`；mass drift `-1.844e-5` 仍在 `5e-5` gate 內。
+
+這表示目前剩餘問題更集中於長時間垂直快模態／解析度依賴，而非 GPU/CPU 分歧或大尺度 circulation 完全缺失。
+
+## 解析度敏感性實驗 / Resolution-sensitivity experiment
+
+早期 long-run grid `N=4 × Nz=12` 僅有 96 個水平 column、1,152 個 3-D cells，適合 correctness smoke，但太粗，不應作為唯一長時間穩定性證據。
+
+下一個 30-day development gate 在**不改變物理、damping coefficient、`dt=10 s` 或驗收門檻**的前提下提升為：
+
+- cubed-sphere `N=8`：384 horizontal columns；
+- `Nz=20`；
+- 30 km model top；
+- total 3-D cells `7,680`；
+- zonal diagnostics 由 12 bins 提升到 24 bins。
+
+舊 N=4 路徑仍由 CPU 1-day sanity / short agreement 作便宜回歸。這次只改解析度，用來判斷 `w` growth 是否主要由極粗網格造成。
+
+若 N=8 × 20 仍出現相同的長期 `w` 成長，下一個 solver-level 修改才是 vertical HEVI time off-centering。WRF/ARW 的 `epssm` 類方法用 slight forward-centering 專門阻尼 vertically propagating acoustic modes；不會以提高 top sponge 或放寬 `w` gate 取代。
 
 ## Gate 不變 / Gates are not relaxed
 
@@ -102,4 +140,4 @@ GPU divergence pass 也移除 `w` 與 vertical metric storage buffers，使 filt
 - no invalid / NaN / non-positive density or pressure
 - development-run numerical stability guard `max |w| < 10 m/s`
 
-修正後仍必須依序重跑 CPU regressions、GPU/CPU agreement，再重跑同一個 30-day gate。結果出來以前 Stage 4 仍未封關。
+Stage 4 在新的 N=8 × 20、30-day gate 通過以前仍不封關。
