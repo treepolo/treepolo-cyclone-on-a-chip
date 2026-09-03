@@ -2,7 +2,7 @@
 
 日期 / Date: 2026-09-04
 
-## 真機定位結果 A：30 km × 20 層
+## 真機定位結果 A：30 km × 20 / Real-device localization A
 
 在 `N=8 × Nz=20`, `H_top=30 km`, `dt=10 s`, HEVI `epsilon=0.10`, time-normalized horizontal divergence damping 與既有 top sponge 下，30-day Held–Suarez gate 於 day 14.75 失敗：
 
@@ -30,7 +30,7 @@
 - `27.31 km`
 - `30.00 km` model top
 
-原 sponge 從 `0.75 H_top = 22.5 km` 開始；`22.46 km` 尚未進入 sponge，`30 km` 為剛性 `w=0` 邊界，所以真正有非零 damping 且仍是 interior `w` DOF 的主要 interface 只有約 `24.80` 與 `27.31 km`。
+原 sponge 從 `0.75 H_top = 22.5 km` 開始；`22.46 km` 尚未進入 sponge，`30 km` 為剛性 `w=0` 邊界，所以真正有非零 damping 且仍是 interior `w` DOF 的主要 interface 只有約 `24.80` 與 `27.31 km`。這不足以構成良好解析的 absorbing layer。
 
 ## 與既有數值規格的落差
 
@@ -40,62 +40,102 @@
 - `Nz = 48–72`;
 - model-top 上方約 `20–25%` depth 為 sponge layer。
 
-因此長期 gate 先提升為 `N=8 × Nz=48`, `H_top=40 km`，其餘設定和 gates 不變；30–40 km 的上方 25% 吸收層約有 7 個 active interior interfaces，並新增 invariant：active absorber interfaces 必須 `>=6`。
+先前 long-run gate 的 `30 km × 20` 僅為早期低成本 development grid，現在已證明不足以作為上界穩定性驗收網格。
 
-## 真機定位結果 B：40 km × 48 層仍更快於 model top 失穩
+## 修正 A：回到 40 km × 48 層
 
-提高垂直域與 absorber 解析度後，30-day gate 反而在 day 2 失敗：
+長期 Stage 4 gate 改為：
+
+- horizontal cubed-sphere `N=8` 不變；
+- `Nz: 20 -> 48`;
+- `H_top: 30 km -> 40 km`;
+- stretch `1.4` 不變；
+- absorber start fraction `0.75` 不變，因此上界吸收區為約 `30–40 km`；
+- `dt=10 s` 不變；
+- HEVI `epsilon=0.10` 不變；
+- time-normalized horizontal divergence damping 不變；
+- all physical and numerical pass/fail gates unchanged。
+
+在 `Nz=48, H_top=40 km, stretch=1.4` 下，上方 25% 區域有約 7 個 active interior interfaces。驗證程式新增 invariant：active absorber interior interfaces 必須 `>= 6`，否則 long-run gate 拒絕啟動。
+
+## 真機定位結果 B：40 km × 48 + 舊 post-step sponge
+
+提高垂直域與層數後，舊 post-step sponge 反而在 day 2 更清楚地暴露上界問題：
 
 - global `max |w| = 18.9506 m/s`;
-- max-|w| location = `38.47 km`, latitude `-82.1 deg`;
-- max `|w|` below absorber = `1.8200 m/s`;
-- max `|w|` inside absorber = `18.9506 m/s`;
-- max edge wind = `6.878 m/s`;
-- horizontal divergence RMS = `1.909e-7 s^-1`;
-- max horizontal CFL = `6.18e-5`;
-- max vertical CFL = `0.128`;
-- dry-mass drift = `-4.355e-6`.
+- location `z=38.47 km`, latitude `-82.1 deg`;
+- below-sponge `max |w| = 1.8200 m/s`;
+- sponge `max |w| = 18.9506 m/s`;
+- max edge wind `6.878 m/s`;
+- horizontal divergence RMS `1.909e-7 s^-1`;
+- horizontal CFL `6.18e-5`;
+- vertical CFL `1.278e-1`;
+- mass drift `-4.355e-6`.
 
-這個結果非常關鍵：對流層／中層仍相對平穩，失穩幾乎完全侷限在 artificial model top 附近；也不是 advective CFL 問題。單純增加 sponge 層數沒有解決反射，表示瓶頸是 sponge formulation 本身，而不是只缺解析度。
+這證明較高解析度本身不是解法；真正問題集中在 rigid top 附近的波吸收，而不是對流層或 CFL。
 
-## 根因：舊 absorber 是過弱的 post-step w damping
+## 修正 B：把 Rayleigh absorber 移入 HEVI acoustic solve
 
-舊 Stage 4 treatment 在完整 timestep 結束後才對 `w` 做：
+舊路徑是在完整 timestep 後才對 `w` 做弱的 post-step damping，頂層 rate 約 `1/600 s^-1`。Stage 4 已改成在 HEVI 垂直 acoustic tridiagonal solve 之後、形成 new-time vertical mass/thermodynamic flux 之前套用 implicit Rayleigh：
 
-`w <- w * exp(-tau(z) dt)`
+`w_new = w_tilde / (1 + rate(z) * dt)`
 
-且 peak rate 只有：
+配置：
 
-`tau_max = 1/600 s^-1 ≈ 0.00167 s^-1`。
+- start `0.75 H_top = 30 km`;
+- `sin^2` ramp；
+- peak rate `0.2 s^-1`；
+- old post-step production sponge removed；
+- Stage 3 defaults to no Rayleigh profile。
 
-對 30–40 km 只有約 10 km 厚度的上界 buffer，這對快速垂直聲學／重力波反射過弱；而且它在 HEVI acoustic solve、new-time mass/thermodynamic flux 計算都完成之後才作用，並沒有真正進入垂直快模態求解。
+## 真機定位結果 C：HEVI implicit absorber，但 buoyancy 仍 post-HEVI
 
-WRF 技術文件與 Klemp et al. (2008) 對 nonhydrostatic split-explicit dynamics 推薦的是 implicit vertical-velocity Rayleigh absorber：在 vertically implicit acoustic solve 得到未阻尼 `w_tilde` 後、更新其餘垂直聲學變數之前，使用：
+新的 implicit HEVI absorber 通過 CPU/GPU agreement，但 30-day gate 仍在 day 2 失敗：
 
-`w_new = w_tilde / (1 + tau(z) dt)`
+- global `max |w| = 14.0981 m/s`;
+- location `z=38.47 km`, latitude `82.1 deg`;
+- below-absorber `max |w| = 1.8202 m/s`;
+- absorber `max |w| = 14.0981 m/s`;
+- max edge wind `15.793 m/s`;
+- horizontal divergence RMS `2.794e-7 s^-1`;
+- horizontal CFL `1.418e-4`;
+- vertical CFL `9.511e-2`;
+- mass drift `-2.588e-6`.
 
-其中 `tau(z)` 使用平滑的 sin² profile，典型 peak `gamma_r = 0.2 s^-1`。這種做法直接作用於 vertically propagating fast mode，且不需要 reference-state horizontal wind/temperature relaxation。
+相較舊 post-step sponge，day-2 peak 從 `18.95` 降到 `14.10 m/s`，證明 implicit absorber 有效但不完整。爆點仍固定在 `38.47 km`，而 absorber 以下仍只有 `1.82 m/s`，所以主要問題仍是上層垂直動量路徑。
 
-## 修正：HEVI 內生 implicit Rayleigh absorber
+程式檢查發現 operator split 為：
 
-Stage 4 已改為：
+`HEVI pressure/acoustic + Rayleigh -> explicit buoyancy -> vertical transport`
 
-- `N=8 × Nz=48`, `H_top=40 km` 保持；
-- absorber 仍為 upper 25% (`30–40 km`)；
-- `tau(z)` 使用原本 sin² ramp；
-- peak rate 改為 `0.2 s^-1`；
-- Rayleigh adjustment 直接放進 CPU 與 GPU HEVI vertical acoustic solve；
-- damped new-time `w` 隨即用於 HEVI 的 new-time `rho` / `rhoTheta` vertical flux；
-- 移除 Stage 4 production path 的 separate post-step `w` sponge，避免雙重阻尼；
-- Stage 3 保持無 top absorber，原 HEVI benchmarks 不變；
-- `dt=10 s`, HEVI `epsilon=0.10`, time-normalized horizontal divergence damping 與所有 gates 不變。
+也就是 HEVI absorber 先吸收一次後，獨立 buoyancy pass 又能直接把垂直加速度加回 `w`，這筆新垂直動量不再經過 Rayleigh absorber。
 
-新增 CPU regression，直接比較同一個 HEVI column solve 在 absorber 開／關時的上層 interface `w`，要求 damped result 精確符合 `w_tilde/(1+tau dt)`，並鎖定 peak rate `0.2 s^-1`。
+## 修正 C：pressure + buoyancy 共用 HEVI vertical-momentum RHS
+
+Stage 3/4 dry core 現改為先由當下 interface density anomaly 計算 explicit buoyancy acceleration：
+
+`b_i = -g (rho_i - rho0_i) / rho_i`
+
+然後將它與 perturbation pressure-gradient 一起放進 HEVI vertical-momentum RHS：
+
+`RHS_i = w_old - dt * grad(p')/rho + dt * b_i + acoustic_old_time_terms`
+
+tridiagonal solve 完成後，再套用同一個 implicit Rayleigh profile，最後才以 damped `w_new` 形成 new-time `rho` / `rhoTheta` vertical flux。
+
+因此新的單一垂直動量路徑為：
+
+`pressure + buoyancy -> HEVI acoustic solve -> implicit Rayleigh absorber -> vertical mass/thermodynamic flux`
+
+獨立 CPU buoyancy update 與 GPU `buoyancy` compute pipeline 已移除。這不是新增第二層 damping，而是消除會繞過 absorber 的 operator split。
+
+新增 regression：給上層 interface 一個明確 vertical acceleration，比較 free HEVI 與 Rayleigh HEVI，要求 forcing 產生的 `w` 也必須滿足同一個 `1/(1+rate*dt)` 衰減，防止未來重新出現 buoyancy bypass。
 
 ## 下一個判讀 / Next interpretation
 
-下一輪先跑 CPU tests，再跑 GPU/CPU agreement。若 agreement PASS，才進 30-day gate。
+下一輪必須先重新通過 Stage 3 regressions、Stage 4 CPU regressions、WebGPU smoke 與 GPU/CPU short-term agreement，因為 CPU/GPU vertical momentum operator 都已改動。
 
-若 implicit HEVI absorber 後 top-region `w` 被控制、但 30 km 以下仍在長時間發展中失穩，下一步轉向規格已預留的 scale-selective hyperdiffusion/filter 與 outer RK3/split-explicit acoustic integration。
+若 30-day gate 中 `30–40 km` 的 `max |w|` 因此大幅降低，表示 buoyancy bypass 是上界能量注入的重要來源。
 
-若 top-region 仍快速增長，則要檢查目前 explicit buoyancy substep 與 HEVI absorber 的 operator splitting，因為 buoyancy 現在是在 HEVI 之後施加，可能需要把 slow vertical forcing 納入 damped vertical momentum update，而不是再加強 post-step damping。
+若仍然只在 absorber 內快速增長，下一步要檢查 Rayleigh damping 是否需真正進入 tridiagonal matrix coupling／上界 pressure treatment，而不是繼續提高 peak rate。
+
+若上層穩定後才在 `30 km` 以下長時間失穩，則離開 upper-boundary 問題，進入原數值規格預留的 scale-selective hyperdiffusion/filter 與 outer RK3 / split-explicit acoustic integration。
