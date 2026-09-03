@@ -40,13 +40,15 @@ export class GpuModelTopSponge{
     this.pipeline=this.device.createComputePipeline({label:'model-top sponge',layout:'auto',compute:{module:this.device.createShaderModule({label:'model-top sponge shader',code:SHADER}),entryPoint:'main'}});
     this.group=this.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:this.params}},{binding:1,resource:{buffer:this.rates}},{binding:2,resource:{buffer:gpu.core.buffers.w}}]});
   }
-  apply(dt:number):void{
+  prepare(dt:number):void{
     const ab=new ArrayBuffer(16),u=new Uint32Array(ab),f=new Float32Array(ab);
-    u[0]=this.gpu.v.nz;u[1]=this.gpu.h.cellCount;f[2]=dt;
-    this.device.queue.writeBuffer(this.params,0,ab);
-    const enc=this.device.createCommandEncoder({label:'model-top sponge apply'}),pass=enc.beginComputePass();
-    pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.group);pass.dispatchWorkgroups(Math.ceil(this.gpu.h.cellCount*(this.gpu.v.nz+1)/128));pass.end();
-    this.device.queue.submit([enc.finish()]);
+    u[0]=this.gpu.v.nz;u[1]=this.gpu.h.cellCount;f[2]=dt;this.device.queue.writeBuffer(this.params,0,ab);
+  }
+  encode(enc:GPUAny):void{
+    const pass=enc.beginComputePass();pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.group);pass.dispatchWorkgroups(Math.ceil(this.gpu.h.cellCount*(this.gpu.v.nz+1)/128));pass.end();
+  }
+  apply(dt:number):void{
+    this.prepare(dt);const enc=this.device.createCommandEncoder({label:'model-top sponge apply'});this.encode(enc);this.device.queue.submit([enc.finish()]);
   }
   destroy():void{this.params.destroy?.();this.rates.destroy?.();}
 }
