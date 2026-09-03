@@ -34,7 +34,7 @@ test('Stage4 slow RHS is pure and does not mutate predictor state',()=>{
 
 test('Stage4 slow scalar advection conserves global dry mass',()=>{
   const h=buildCubedSphere(4),v=buildStretchedVerticalGrid(12,20000,1.3),ref=buildHeldSuarezReference(v),s=createHydrostaticState(h,v,ref);
-  for(let q=0;q<s.rhoD.length;q++){const f=1+2e-3*Math.sin((q+1)*.173);s.rhoD[q]*=f;s.rhoThetaM[q]*=f;}
+  for(let q=0;q<s.rhoD.length;q++){const f=1+2e-3*Math.sin((q+1)*.173);s.rhoD[q]=s.rhoD[q]!*f;s.rhoThetaM[q]=s.rhoThetaM[q]!*f;}
   for(let q=0;q<s.uEdge.length;q++)s.uEdge[q]=4*Math.sin((q+1)*.113);
   for(let c=0;c<h.cellCount;c++)for(let i=1;i<v.nz;i++)s.wInterface[w3DIndex(c,i,v.nz)]=.2*Math.sin((c+1)*.31+i*.47);
   const t=computeStage4SlowTendencies(h,v,ref,s,{heldSuarez:false,momentumTransport:false,coriolis:false});
