@@ -9,6 +9,7 @@ import { buildModelTopSpongeRates, MODEL_TOP_SPONGE } from '../physics/modelTopS
 import { buildRotationGeometry, reconstructCellHorizontalWind, rotateLocalCoriolis, setAnalyticCellWind } from '../physics/rotation.js';
 import { advectVerticalVelocity } from '../physics/verticalMomentumAdvection.js';
 import { diagnoseState } from '../solver/diagnostics.js';
+import { DryCoreCpu } from '../solver/dryCoreCpu.js';
 import { heviColumnStep } from '../solver/hevi.js';
 import { RotatingDryCoreCpu } from '../solver/rotatingDryCoreCpu.js';
 import { createHydrostaticState, w3DIndex } from '../solver/state.js';
@@ -84,6 +85,22 @@ test('V2 implicit HEVI top absorber applies the configured Rayleigh profile befo
   assert(rate>.15,`upper interface Rayleigh rate unexpectedly weak: ${rate}`);
   assert(Math.abs(damp.w[i]!-expected)<1e-12,`implicit Rayleigh mismatch: got=${damp.w[i]}, expected=${expected}`);
   assert(Math.abs(damp.w[i]!)<Math.abs(free.w[i]!),`implicit top absorber did not reduce upper w: free=${free.w[i]}, damp=${damp.w[i]}`);
+});
+
+test('V2 split HEVI plus outer vertical mass flux reconstructs the actual density update',()=>{
+  const h=buildCubedSphere(2),v=buildStretchedVerticalGrid(12,12000,1.1),ref=buildHeldSuarezReference(v),s=createHydrostaticState(h,v,ref),core=new DryCoreCpu(h,v,ref,.1),dt=.25;
+  for(let c=0;c<h.cellCount;c++)for(let i=1;i<v.nz;i++)s.wInterface[w3DIndex(c,i,v.nz)]=.2*Math.sin(Math.PI*v.zInterface[i]!/v.top);
+  const before=s.rhoD.slice();core.captureTransport=true;core.step(s,dt);const t=core.lastTransport;assert(t,'missing transport snapshot');
+  let maxRel=0,maxFlux=0;
+  for(const f of t.vMassFlux)maxFlux=Math.max(maxFlux,Math.abs(f));
+  for(let c=0;c<h.cellCount;c++)for(let k=0;k<v.nz;k++){
+    const q=c*v.nz+k,vol=h.cellAreaUnit[c]!*EARTH.radius*EARTH.radius*v.dz[k]!;let mt=0;
+    for(let slot=0;slot<4;slot++){const e=h.cellEdges[c*4+slot]!,sgn=h.cellEdgeSigns[c*4+slot]!;mt-=sgn*t.hMassFlux[e*v.nz+k]!;}
+    const vb=c*(v.nz+1)+k,vt=vb+1;mt+=t.vMassFlux[vb]!-t.vMassFlux[vt]!;
+    const predicted=before[q]!+dt*mt/vol;maxRel=Math.max(maxRel,Math.abs(predicted-s.rhoD[q]!)/Math.max(Math.abs(s.rhoD[q]!),1e-12));
+  }
+  assert(maxFlux>0,'transport snapshot failed to capture HEVI reference mass flux');
+  assert(maxRel<2e-13,`split-flux continuity mismatch: max relative error=${maxRel}`);
 });
 
 test('V2 vertical-velocity advection preserves a locally uniform w field',()=>{
