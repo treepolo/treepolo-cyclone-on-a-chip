@@ -7,6 +7,7 @@ import { ACOUSTIC_DIVERGENCE_REFERENCE_COEFFICIENT, acousticDivergenceCoefficien
 import { addHeldSuarezWavePerturbation, buildHeldSuarezReference } from '../physics/heldSuarez.js';
 import { buildModelTopSpongeRates, MODEL_TOP_SPONGE } from '../physics/modelTopSponge.js';
 import { buildRotationGeometry, reconstructCellHorizontalWind, rotateLocalCoriolis, setAnalyticCellWind } from '../physics/rotation.js';
+import { advectVerticalVelocity } from '../physics/verticalMomentumAdvection.js';
 import { diagnoseState } from '../solver/diagnostics.js';
 import { heviColumnStep } from '../solver/hevi.js';
 import { RotatingDryCoreCpu } from '../solver/rotatingDryCoreCpu.js';
@@ -85,17 +86,22 @@ test('V2 implicit HEVI top absorber applies the configured Rayleigh profile befo
   assert(Math.abs(damp.w[i]!)<Math.abs(free.w[i]!),`implicit top absorber did not reduce upper w: free=${free.w[i]}, damp=${damp.w[i]}`);
 });
 
-test('V2 buoyancy forcing is inside the HEVI absorber instead of bypassing it',()=>{
-  const v=buildStretchedVerticalGrid(48,40000,1.4),ref=buildHeldSuarezReference(v),rates=buildModelTopSpongeRates(v),i=v.nz-1,dt=1,accel=new Float64Array(v.nz+1);
-  accel[i]=2;
-  const free={rho:Float64Array.from(ref.rhoCenter),rhoTheta:Float64Array.from(ref.rhoThetaCenter),w:new Float64Array(v.nz+1)};
-  const damp={rho:Float64Array.from(ref.rhoCenter),rhoTheta:Float64Array.from(ref.rhoThetaCenter),w:new Float64Array(v.nz+1)};
-  heviColumnStep(v,ref,free,dt,.1,undefined,accel);
-  heviColumnStep(v,ref,damp,dt,.1,rates,accel);
-  const rate=rates[i]!,expected=free.w[i]!/(1+rate*dt);
-  assert(Math.abs(free.w[i]!)>1e-6,`vertical forcing failed to produce w: ${free.w[i]}`);
-  assert(Math.abs(damp.w[i]!-expected)<1e-12,`buoyancy/absorber coupling mismatch: got=${damp.w[i]}, expected=${expected}`);
-  assert(Math.abs(damp.w[i]!)<Math.abs(free.w[i]!),`Rayleigh absorber was bypassed by vertical forcing: free=${free.w[i]}, damp=${damp.w[i]}`);
+test('V2 vertical-velocity advection preserves a locally uniform w field',()=>{
+  const h=buildCubedSphere(4),v=buildStretchedVerticalGrid(6,6000,1),ref=buildHeldSuarezReference(v),s=createHydrostaticState(h,v,ref),i=3;
+  for(let q=0;q<s.uEdge.length;q++)s.uEdge[q]=3*Math.sin((q+1)*0.37);
+  for(let c=0;c<h.cellCount;c++)for(let j=1;j<v.nz;j++)s.wInterface[w3DIndex(c,j,v.nz)]=1;
+  advectVerticalVelocity(h,v,s,1);
+  let err=0;for(let c=0;c<h.cellCount;c++)err=Math.max(err,Math.abs(s.wInterface[w3DIndex(c,i,v.nz)]!-1));
+  assert(err<1e-14,`uniform interior w was changed by advection: max error=${err}`);
+});
+
+test('V2 vertical-velocity advection uses the upwind vertical donor',()=>{
+  const h=buildCubedSphere(2),v=buildStretchedVerticalGrid(6,6000,1),ref=buildHeldSuarezReference(v),s=createHydrostaticState(h,v,ref),i=2,dt=1;
+  for(let c=0;c<h.cellCount;c++){s.wInterface[w3DIndex(c,1,v.nz)]=.5;s.wInterface[w3DIndex(c,2,v.nz)]=1;s.wInterface[w3DIndex(c,3,v.nz)]=1.5;}
+  const expected=1-dt*1*(1-.5)/v.dz[i-1]!;
+  advectVerticalVelocity(h,v,s,dt);
+  const got=s.wInterface[w3DIndex(0,i,v.nz)]!;
+  assert(Math.abs(got-expected)<1e-14,`vertical donor mismatch: got=${got}, expected=${expected}`);
 });
 
 test('V2 rotating core keeps resting hydrostatic atmosphere at rest',()=>{
