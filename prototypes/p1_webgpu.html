@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>P1 WebGPU benchmark</title><button id="run">Run P1</button><pre id="out">ready</pre><script type="module">
+const out=document.querySelector('#out');const U=GPUBufferUsage;
+async function run(){
+ if(!navigator.gpu){out.textContent='WebGPU unavailable';return}
+ const adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});if(!adapter){out.textContent='No adapter';return}
+ const device=await adapter.requestDevice();const L=device.limits;const limits={maxBufferSize:Number(L.maxBufferSize),maxStorageBufferBindingSize:Number(L.maxStorageBufferBindingSize),maxComputeInvocationsPerWorkgroup:Number(L.maxComputeInvocationsPerWorkgroup),maxComputeWorkgroupStorageSize:Number(L.maxComputeWorkgroupStorageSize)};
+ const n=limits.maxStorageBufferBindingSize>=64*1024*1024?96:64,nz=32,cells=6*n*n*nz,bytes=cells*4;if(bytes>limits.maxStorageBufferBindingSize){out.textContent=JSON.stringify({limits,error:'field exceeds storage binding'},null,2);return}
+ const a=device.createBuffer({size:bytes,usage:U.STORAGE|U.COPY_DST}),b=device.createBuffer({size:bytes,usage:U.STORAGE|U.COPY_DST});device.queue.writeBuffer(a,0,new Float32Array(cells));
+ const mod=device.createShaderModule({code:`@group(0) @binding(0)var<storage,read>s:array<f32>;@group(0)@binding(1)var<storage,read_write>d:array<f32>;@compute @workgroup_size(256)fn main(@builtin(global_invocation_id)g:vec3<u32>){let i=g.x;if(i>=${cells}u){return;}let im=select(i,i-1u,i>0u);let ip=min(i+1u,${cells-1}u);d[i]=0.5*s[i]+0.25*(s[im]+s[ip]);}`});
+ const pipe=device.createComputePipeline({layout:'auto',compute:{module:mod,entryPoint:'main'}});const bind=(x,y)=>device.createBindGroup({layout:pipe.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:x}},{binding:1,resource:{buffer:y}}]});const ab=bind(a,b),ba=bind(b,a),iters=100,enc=device.createCommandEncoder();
+ for(let k=0;k<iters;k++){const p=enc.beginComputePass();p.setPipeline(pipe);p.setBindGroup(0,k%2?ba:ab);p.dispatchWorkgroups(Math.ceil(cells/256));p.end()}
+ const t=performance.now();device.queue.submit([enc.finish()]);await device.queue.onSubmittedWorkDone();const ms=performance.now()-t;out.textContent=JSON.stringify({limits,n,nz,cells,iterations:iters,milliseconds:ms,cellUpdatesPerSecond:cells*iters/(ms/1000)},null,2)
+}
+document.querySelector('#run').onclick=()=>run().catch(e=>out.textContent=e.stack||String(e));
+</script>
