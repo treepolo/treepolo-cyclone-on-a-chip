@@ -2,24 +2,30 @@ import { EARTH } from '../core/constants.js';
 import { CubedSphereGrid } from '../grid/cubedSphere.js';
 import { VerticalGrid } from '../grid/vertical.js';
 import { ReferenceAtmosphere } from './referenceAtmosphere.js';
-import { DryState, edge3DIndex, w3DIndex } from '../solver/state.js';
+import { DryState, edge3DIndex } from '../solver/state.js';
 
 /**
- * Dimensionless grid-scale acoustic-divergence filter coefficient.
+ * Dimensionless grid-scale horizontal acoustic-divergence filter coefficient.
  * 0.1 is the Stage 4 correctness value; it is fixed before the long-run rerun.
  */
 export const ACOUSTIC_DIVERGENCE_DAMPING = 0.1;
 
 /**
- * Computes the base-state-mass-weighted 3-D velocity divergence
- *   div_h(u) + (1/rho0) d(rho0 w)/dz
- * on cell centres.  The horizontal part uses exactly the canonical
- * cubed-sphere shared edges used by the finite-volume transport.
+ * Computes horizontal velocity divergence on cell centres:
+ *   div_h(u)
+ * using exactly the canonical cubed-sphere shared edges used by the
+ * finite-volume transport.
+ *
+ * Important: vertical divergence is intentionally excluded here.  HEVI owns
+ * the vertically propagating acoustic mode.  Feeding d(rho0*w)/dz into a
+ * horizontal Laplacian filter on a global grid multiplies tiny Float32 w
+ * differences by the enormous horizontal/vertical aspect ratio and can turn
+ * round-off into spurious horizontal wind.
  */
 export function computeAcousticDivergence(
   h:CubedSphereGrid,
   v:VerticalGrid,
-  ref:ReferenceAtmosphere,
+  _ref:ReferenceAtmosphere,
   s:DryState,
   out:Float64Array=new Float64Array(h.cellCount*v.nz),
 ):Float64Array {
@@ -33,10 +39,7 @@ export function computeAcousticDivergence(
         const e=h.cellEdges[c*4+slot]!,sign=h.cellEdgeSigns[c*4+slot]!,ge=h.edges[e]!;
         horizontalFlux+=sign*s.uEdge[edge3DIndex(e,k,v.nz)]!*ge.angularLength*R;
       }
-      const wb=s.wInterface[w3DIndex(c,k,v.nz)]!,wt=s.wInterface[w3DIndex(c,k+1,v.nz)]!;
-      const rho0=Math.max(ref.rhoCenter[k]!,1e-12);
-      const vertical=(ref.rhoInterface[k+1]!*wt-ref.rhoInterface[k]!*wb)/(rho0*v.dz[k]!);
-      out[c*v.nz+k]=horizontalFlux/area+vertical;
+      out[c*v.nz+k]=horizontalFlux/area;
     }
   }
   return out;
@@ -52,13 +55,13 @@ export function acousticDivergenceRms(h:CubedSphereGrid,v:VerticalGrid,ref:Refer
 
 /**
  * Horizontal acoustic filter:
- *   u <- u + gamma * L^2 grad(div)
+ *   u <- u + gamma * L^2 grad(div_h u)
  * represented on each canonical edge as
  *   du = gamma * d_edge * (D_R - D_L).
  *
- * A Fourier mode therefore receives Laplacian damping of its divergent
- * component.  No mass or thermodynamic state is altered and no velocity
- * clipping is used.
+ * A horizontal Fourier mode therefore receives Laplacian damping of its
+ * divergent component.  No mass, thermodynamic state, vertical velocity, or
+ * rotational component is directly clipped or Rayleigh-damped.
  */
 export function applyAcousticDivergenceDamping(
   h:CubedSphereGrid,
