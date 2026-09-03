@@ -38,17 +38,28 @@ test('V1 HEVI acoustic column stable at large acoustic CFL',()=>{
   assert([...rho,...x,...w].every(Number.isFinite),'HEVI finite'); assert(Math.max(...Array.from(w,Math.abs))<100,'HEVI bounded');
 });
 
-
-test('V1 acoustic standing-wave phase/amplitude with HEVI',()=>{
+test('V1 acoustic standing-wave phase/amplitude with centered HEVI',()=>{
   const v=buildStretchedVerticalGrid(80,20000,1e-6), nz=v.nz, rho0=1, p0=100000, theta=p0/(DRY_AIR.rd*rho0), x0=rho0*theta;
   const fill=(n:number,value:number)=>{const a=new Float64Array(n);a.fill(value);return a;};
   const ref={T0:p0/(DRY_AIR.rd*rho0),pCenter:fill(nz,p0),rhoCenter:fill(nz,rho0),thetaCenter:fill(nz,theta),rhoThetaCenter:fill(nz,x0),pInterface:fill(nz+1,p0),rhoInterface:fill(nz+1,rho0),thetaInterface:fill(nz+1,theta),rhoThetaInterface:fill(nz+1,x0)};
   const rho=fill(nz,rho0),x=fill(nz,x0),w=new Float64Array(nz+1),w0=new Float64Array(nz+1),H=v.top,A=0.1;
   for(let i=0;i<=nz;i++){w[i]=A*Math.sin(Math.PI*v.zInterface[i]!/H);w0[i]=w[i]!;}
   const dz=H/nz,c=Math.sqrt(DRY_AIR.gamma*p0/rho0),keff=2/dz*Math.sin(Math.PI/(2*nz)),omega=c*keff,dt=5*dz/c,omegaCN=2/dt*Math.atan(omega*dt/2),period=2*Math.PI/omegaCN,steps=Math.round(period/dt);
-  for(let i=0;i<steps;i++)heviColumnStep(v,ref,{rho,rhoTheta:x,w},dt);
+  for(let i=0;i<steps;i++)heviColumnStep(v,ref,{rho,rhoTheta:x,w},dt,0);
   let num=0,den=0;for(let i=0;i<=nz;i++){num+=(w[i]!-w0[i]!)**2;den+=w0[i]!**2;}
   const relL2=Math.sqrt(num/den); assert(relL2<1e-3,`acoustic phase/amplitude relL2=${relL2}`);
+});
+
+test('V1 HEVI off-centering selectively damps vertical acoustic energy',()=>{
+  const v=buildStretchedVerticalGrid(80,20000,1e-6),nz=v.nz,rho0=1,p0=100000,theta=p0/(DRY_AIR.rd*rho0),x0=rho0*theta,H=v.top,c=Math.sqrt(DRY_AIR.gamma*p0/rho0),dt=8*(H/nz)/c;
+  const fill=(n:number,value:number)=>{const a=new Float64Array(n);a.fill(value);return a;};
+  const ref={T0:p0/(DRY_AIR.rd*rho0),pCenter:fill(nz,p0),rhoCenter:fill(nz,rho0),thetaCenter:fill(nz,theta),rhoThetaCenter:fill(nz,x0),pInterface:fill(nz+1,p0),rhoInterface:fill(nz+1,rho0),thetaInterface:fill(nz+1,theta),rhoThetaInterface:fill(nz+1,x0)};
+  const make=()=>{const rho=fill(nz,rho0),rhoTheta=fill(nz,x0),w=new Float64Array(nz+1);for(let i=0;i<=nz;i++)w[i]=0.01*Math.sin(Math.PI*v.zInterface[i]!/H);return{rho,rhoTheta,w}};
+  const centered=make(),damped=make();
+  const energy=(s:{rhoTheta:Float64Array;w:Float64Array})=>{let e=0;for(const wi of s.w)e+=wi*wi;for(let k=0;k<nz;k++){const pp=pressureFromRhoTheta(s.rhoTheta[k]!)-p0;e+=(pp/(rho0*c))**2}return e;};
+  const e0=energy(centered);for(let i=0;i<100;i++){heviColumnStep(v,ref,centered,dt,0);heviColumnStep(v,ref,damped,dt,.1)}const ec=energy(centered),ed=energy(damped);
+  assert(ec/e0>.9&&ec/e0<1.1,`centered HEVI acoustic energy changed unexpectedly: ratio=${ec/e0}`);
+  assert(ed<.8*ec,`off-centered HEVI did not damp acoustic energy enough: damped/centered=${ed/ec}`);
 });
 
 test('V1 stratified gravity-wave response is bounded and conservative',()=>{
