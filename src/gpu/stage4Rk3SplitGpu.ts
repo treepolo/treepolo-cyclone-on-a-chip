@@ -113,7 +113,7 @@ const HVEL=COMMON+/* wgsl */`
 @group(0)@binding(7)var<storage,read_write>acousticU:array<f32>;
 @compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id)gid:vec3<u32>){
-  let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let l=cc.x*P.nz+k;let r=cc.y*P.nz+k;let pl=pressure(predCell[l].y);let pr=pressure(predCell[r].y);let dpl=P.gamma*pl/max(predCell[l].y,1e-12);let dpr=P.gamma*pr/max(predCell[r].y,1e-12);let dl=acousticCell[l]-predCell[l];let dr=acousticCell[r]-predCell[r];let ravg=max(.5*(predCell[l].x+predCell[r].x),1e-12);let dRavg=.5*(dl.x+dr.x);let dist=max(edgeMetric[e].y,1.0);let dDp=dpr*dr.y-dpl*dl.y;let lin=-dDp/(ravg*dist)+(pr-pl)*dRavg/(ravg*ravg*dist);acousticU[q]=acousticU[q]+P.dt*(frozenU[q]+lin);
+  let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let l=cc.x*P.nz+k;let r=cc.y*P.nz+k;let pl=pressure(predCell[l].y);let pr=pressure(predCell[r].y);let dpl=P.gamma*pl/max(predCell[l].y,1e-12);let dpr=P.gamma*pr/max(predCell[r].y,1e-12);let dl=acousticCell[l]-predCell[l];let dr=acousticCell[r]-predCell[r];let ravg=max(.5*(predCell[l].x+predCell[r].x),1e-12);let dRavg=.5*(dl.x+dr.x);let dist=max(edgeMetric[e].y,1.0);let dDp=dpr*dr.y-dpl*dl.y;let lin=-dDp/(ravg*dist)+(pr-pl)*dRavg/(ravg*ravg*dist);let duOld=acousticU[q]-predU[q];acousticU[q]=predU[q]+duOld+P.dt*(frozenU[q]+lin);
 }
 `;
 
