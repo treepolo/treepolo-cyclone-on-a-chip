@@ -11,8 +11,14 @@ import { cloneState, createHydrostaticState, w3DIndex } from '../solver/state.js
 export interface AcousticGpuAgreementResult{
   rhoRelativeL2:number;
   rhoThetaRelativeL2:number;
+  /** Informational CPU-f64 versus GPU-f32 Fref difference. */
   referenceMassFluxRelativeL2:number;
+  /** Informational CPU-f64 versus GPU-f32 Fref difference. */
   referenceRhoThetaFluxRelativeL2:number;
+  /** Tight identity check: GPU refFlux versus Fref recomputed from GPU time levels. */
+  referenceMassFluxSelfRelativeL2:number;
+  /** Tight identity check: GPU refFlux versus Fref-X recomputed from GPU time levels. */
+  referenceRhoThetaFluxSelfRelativeL2:number;
   maxDeltaW:number;
   cpuMaxW:number;
   gpuMaxW:number;
@@ -39,6 +45,31 @@ function cpuVerticalStep(h:ReturnType<typeof buildCubedSphere>,v:ReturnType<type
   return{out,frozen,refMass,refX};
 }
 
+/**
+ * Recompute the exact bookkeeping quantity that the WGSL kernel is supposed to
+ * write, using f32-rounded predictor/old/new time levels.  This separates an
+ * actual Fref-output bug from the expected CPU-f64 versus GPU-f32 solver error
+ * in w.  The raw CPU/GPU Fref comparison is still reported as a diagnostic.
+ */
+function recomputeGpuFref(
+  v:ReturnType<typeof buildStretchedVerticalGrid>,
+  ref:ReturnType<typeof buildHeldSuarezReference>,
+  predictor:ReturnType<typeof createHydrostaticState>,
+  initial:ReturnType<typeof cloneState>,
+  got:ReturnType<typeof cloneState>,
+  off:number,
+):{mass:Float64Array;x:Float64Array}{
+  const n=predictor.wInterface.length,mass=new Float64Array(n),x=new Float64Array(n);
+  const off32=Math.fround(off),theta=Math.fround(Math.fround(1+off32)*Math.fround(.5)),oldWeight=Math.fround(1-theta);
+  for(let c=0;c<predictor.wInterface.length/(v.nz+1);c++)for(let i=0;i<=v.nz;i++){
+    const q=w3DIndex(c,i,v.nz),pred=Math.fround(predictor.wInterface[q]!),old=Math.fround(initial.wInterface[q]!),nw=Math.fround(got.wInterface[q]!);
+    const dwOld=Math.fround(old-pred),dwNew=Math.fround(nw-pred),oldTerm=Math.fround(oldWeight*dwOld),newTerm=Math.fround(theta*dwNew),weighted=Math.fround(Math.fround(pred+oldTerm)+newTerm);
+    mass[q]=Math.fround(Math.fround(ref.rhoInterface[i]!)*weighted);
+    x[q]=Math.fround(Math.fround(ref.rhoThetaInterface[i]!)*weighted);
+  }
+  return{mass,x};
+}
+
 export async function runStage4AcousticGpuAgreement():Promise<AcousticGpuAgreementResult>{
   const t0=performance.now(),h=buildCubedSphere(2),v=buildStretchedVerticalGrid(48,40000,1.4),ref=buildHeldSuarezReference(v),dt=2.5,off=.1;
   const predictor=createHydrostaticState(h,v,ref);
@@ -62,11 +93,15 @@ export async function runStage4AcousticGpuAgreement():Promise<AcousticGpuAgreeme
     gpu.upload(predictor,acoustic,cpu.frozen);gpu.step(dt,off);
     const got=await gpu.downloadAcousticState(),rawFlux=await readF32(core.device,gpu.refFlux,h.cellCount*(v.nz+1)*2),gpuMass=new Float64Array(cpu.refMass.length),gpuX=new Float64Array(cpu.refX.length);
     for(let q=0;q<gpuMass.length;q++){gpuMass[q]=rawFlux[q*2]!;gpuX[q]=rawFlux[q*2+1]!;}
-    const rhoRelativeL2=relL2(got.rhoD,cpu.out.rhoD),rhoThetaRelativeL2=relL2(got.rhoThetaM,cpu.out.rhoThetaM),referenceMassFluxRelativeL2=relL2(gpuMass,cpu.refMass),referenceRhoThetaFluxRelativeL2=relL2(gpuX,cpu.refX),maxDeltaW=maxDiff(got.wInterface,cpu.out.wInterface),cpuMaxW=maxAbs(cpu.out.wInterface),gpuMaxW=maxAbs(got.wInterface);
+    const self=recomputeGpuFref(v,ref,predictor,acoustic,got,off);
+    const rhoRelativeL2=relL2(got.rhoD,cpu.out.rhoD),rhoThetaRelativeL2=relL2(got.rhoThetaM,cpu.out.rhoThetaM),referenceMassFluxRelativeL2=relL2(gpuMass,cpu.refMass),referenceRhoThetaFluxRelativeL2=relL2(gpuX,cpu.refX),referenceMassFluxSelfRelativeL2=relL2(gpuMass,self.mass),referenceRhoThetaFluxSelfRelativeL2=relL2(gpuX,self.x),maxDeltaW=maxDiff(got.wInterface,cpu.out.wInterface),cpuMaxW=maxAbs(cpu.out.wInterface),gpuMaxW=maxAbs(got.wInterface);
 
     // Independent hydrostatic zero case through the same compiled kernel.
     const rest=createHydrostaticState(h,v,ref),restCpu=cpuVerticalStep(h,v,ref,rest,cloneState(rest),dt,off);gpu.upload(rest,rest,restCpu.frozen);gpu.step(dt,off);const restGpu=await gpu.downloadAcousticState(),hydrostaticMaxW=maxAbs(restGpu.wInterface),hydrostaticRhoRelativeL2=relL2(restGpu.rhoD,restCpu.out.rhoD);
-    const pass=rhoRelativeL2<=8e-5&&rhoThetaRelativeL2<=8e-5&&referenceMassFluxRelativeL2<=8e-5&&referenceRhoThetaFluxRelativeL2<=8e-5&&maxDeltaW<=3e-4&&hydrostaticMaxW<=2e-5&&hydrostaticRhoRelativeL2<=8e-5;
-    return{rhoRelativeL2,rhoThetaRelativeL2,referenceMassFluxRelativeL2,referenceRhoThetaFluxRelativeL2,maxDeltaW,cpuMaxW,gpuMaxW,hydrostaticMaxW,hydrostaticRhoRelativeL2,elapsedMs:performance.now()-t0,pass};
+    // Raw CPU-f64/GPU-f32 Fref error is only a loose sanity guard because it is
+    // mathematically downstream of the allowed w solver error.  The tight
+    // bookkeeping gate is the GPU self-identity above.
+    const pass=rhoRelativeL2<=8e-5&&rhoThetaRelativeL2<=8e-5&&referenceMassFluxRelativeL2<=5e-3&&referenceRhoThetaFluxRelativeL2<=5e-3&&referenceMassFluxSelfRelativeL2<=5e-6&&referenceRhoThetaFluxSelfRelativeL2<=5e-6&&maxDeltaW<=3e-4&&hydrostaticMaxW<=2e-5&&hydrostaticRhoRelativeL2<=8e-5;
+    return{rhoRelativeL2,rhoThetaRelativeL2,referenceMassFluxRelativeL2,referenceRhoThetaFluxRelativeL2,referenceMassFluxSelfRelativeL2,referenceRhoThetaFluxSelfRelativeL2,maxDeltaW,cpuMaxW,gpuMaxW,hydrostaticMaxW,hydrostaticRhoRelativeL2,elapsedMs:performance.now()-t0,pass};
   }finally{gpu?.destroy();core.destroy();}
 }
