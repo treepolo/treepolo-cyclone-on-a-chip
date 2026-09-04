@@ -29,7 +29,7 @@ export async function runStage4Rk3GpuMultistepAgreement():Promise<Stage4Rk3GpuMu
   for(let n=0;n<steps;n++)cpu.step(cpuState,dt,opts);
   const gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,initial,4);let gpuState:ReturnType<typeof cloneState>;
   try{
-    gpu.device.pushErrorScope?.('validation');for(let n=0;n<steps;n++)gpu.step(dt,opts);const err=await gpu.device.popErrorScope?.();if(err)throw new Error(`multistep RK3 GPU validation: ${err.message||err}`);gpuState=await gpu.downloadState(steps*dt);
+    gpu.device.pushErrorScope?.('validation');gpu.stepBatch(dt,steps,opts);const err=await gpu.device.popErrorScope?.();if(err)throw new Error(`batched multistep RK3 GPU validation: ${err.message||err}`);gpuState=await gpu.downloadState(steps*dt);
   }finally{gpu.destroy();}
   const dc=diagnoseState(h,v,cpuState),dg=diagnoseState(h,v,gpuState),rhoRelativeL2=relL2(gpuState.rhoD,cpuState.rhoD),rhoThetaRelativeL2=relL2(gpuState.rhoThetaM,cpuState.rhoThetaM),maxDeltaU=maxDiff(gpuState.uEdge,cpuState.uEdge),maxDeltaW=maxDiff(gpuState.wInterface,cpuState.wInterface),gpuMassDrift=(dg.dryMass-d0.dryMass)/d0.dryMass,cpuMassDrift=(dc.dryMass-d0.dryMass)/d0.dryMass,cpuMaxU=maxAbs(cpuState.uEdge),gpuMaxU=maxAbs(gpuState.uEdge),cpuMaxW=maxAbs(cpuState.wInterface),gpuMaxW=maxAbs(gpuState.wInterface),finite=[rhoRelativeL2,rhoThetaRelativeL2,maxDeltaU,maxDeltaW,gpuMassDrift,cpuMassDrift,cpuMaxU,gpuMaxU,cpuMaxW,gpuMaxW].every(Number.isFinite);
   const pass=finite&&!dc.nan&&!dg.nan&&dc.minRho>0&&dg.minRho>0&&dc.minP>0&&dg.minP>0&&rhoRelativeL2<=2e-3&&rhoThetaRelativeL2<=2e-3&&maxDeltaU<=.12&&maxDeltaW<=.03&&Math.abs(gpuMassDrift)<=5e-5;
