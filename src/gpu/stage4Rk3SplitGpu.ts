@@ -108,12 +108,11 @@ const HVEL=COMMON+/* wgsl */`
 @group(0)@binding(2)var<storage,read>edgeMetric:array<vec2<f32>>;
 @group(0)@binding(3)var<storage,read>predCell:array<vec2<f32>>;
 @group(0)@binding(4)var<storage,read>acousticCell:array<vec2<f32>>;
-@group(0)@binding(5)var<storage,read>predU:array<f32>;
-@group(0)@binding(6)var<storage,read>frozenU:array<f32>;
-@group(0)@binding(7)var<storage,read_write>acousticU:array<f32>;
+@group(0)@binding(5)var<storage,read>frozenU:array<f32>;
+@group(0)@binding(6)var<storage,read_write>acousticU:array<f32>;
 @compute @workgroup_size(128)
 fn main(@builtin(global_invocation_id)gid:vec3<u32>){
-  let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let l=cc.x*P.nz+k;let r=cc.y*P.nz+k;let pl=pressure(predCell[l].y);let pr=pressure(predCell[r].y);let dpl=P.gamma*pl/max(predCell[l].y,1e-12);let dpr=P.gamma*pr/max(predCell[r].y,1e-12);let dl=acousticCell[l]-predCell[l];let dr=acousticCell[r]-predCell[r];let ravg=max(.5*(predCell[l].x+predCell[r].x),1e-12);let dRavg=.5*(dl.x+dr.x);let dist=max(edgeMetric[e].y,1.0);let dDp=dpr*dr.y-dpl*dl.y;let lin=-dDp/(ravg*dist)+(pr-pl)*dRavg/(ravg*ravg*dist);let duOld=acousticU[q]-predU[q];acousticU[q]=predU[q]+duOld+P.dt*(frozenU[q]+lin);
+  let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let l=cc.x*P.nz+k;let r=cc.y*P.nz+k;let pl=pressure(predCell[l].y);let pr=pressure(predCell[r].y);let dpl=P.gamma*pl/max(predCell[l].y,1e-12);let dpr=P.gamma*pr/max(predCell[r].y,1e-12);let dl=acousticCell[l]-predCell[l];let dr=acousticCell[r]-predCell[r];let ravg=max(.5*(predCell[l].x+predCell[r].x),1e-12);let dRavg=.5*(dl.x+dr.x);let dist=max(edgeMetric[e].y,1.0);let dDp=dpr*dr.y-dpl*dl.y;let lin=-dDp/(ravg*dist)+(pr-pl)*dRavg/(ravg*ravg*dist);acousticU[q]=acousticU[q]+P.dt*(frozenU[q]+lin);
 }
 `;
 
@@ -210,7 +209,7 @@ export class GpuStage4Rk3SplitReference{
     this.bind('addVref',ADD_VREF,[b.layerRef,b.interfaceRef,b.w,rb.frozenScalar]);
     this.bind('prepU',PREP_U,[b.edgeCells,b.edgeMetric,rb.predCell,s.uT,rb.frozenU]);
     this.bind('prepIface',PREP_IFACE,[b.layerRef,rb.predCell,b.w,rb.baseW,s.wT,b.heviRayleigh,rb.iface]);
-    this.bind('hvel',HVEL,[b.edgeCells,b.edgeMetric,rb.predCell,rb.acousticCell,b.u,rb.frozenU,rb.acousticU]);
+    this.bind('hvel',HVEL,[b.edgeCells,b.edgeMetric,rb.predCell,rb.acousticCell,rb.frozenU,rb.acousticU]);
     this.bind('hrefFlux',HREF_FLUX,[b.edgeMetric,b.layerRef,b.u,rb.acousticU,rb.hRefFlux]);
     this.bind('hrefDiv',HREF_DIV,[b.cellArea,b.layerRef,b.cellEdges,b.cellSigns,rb.hRefFlux,rb.hCorr]);
     this.bind('vertical',VERTICAL,[b.layerRef,b.interfaceRef,rb.predCell,rb.acousticCell,rb.frozenScalar,rb.hCorr,rb.iface,rb.refFlux]);
