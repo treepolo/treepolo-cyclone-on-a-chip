@@ -88,12 +88,16 @@ export class GpuStage4SlowTendencyReference{
   uploadPredictor(state:DryState):void{this.core.core.uploadState(state);}
   prepare():void{const ab=new ArrayBuffer(48),u=new Uint32Array(ab),f=new Float32Array(ab);u[0]=this.core.v.nz;u[1]=this.core.h.edgeCount;u[2]=this.core.h.cellCount;f[4]=EARTH.radius;f[5]=EARTH.omega;f[6]=DRY_AIR.rd;f[7]=DRY_AIR.gamma;f[8]=DRY_AIR.pRef;f[9]=DRY_AIR.kappa;this.device.queue.writeBuffer(this.params,0,ab);}
   private dispatch(p:GPUAny,name:string,count:number):void{p.setPipeline(this.pipelines[name]);p.setBindGroup(0,this.groups[name]);p.dispatchWorkgroups(Math.ceil(count/128));}
+  clear(enc:GPUAny):void{enc.clearBuffer(this.scalarT);enc.clearBuffer(this.uT);enc.clearBuffer(this.wT);enc.clearBuffer(this.dv);}
+  encodeIntoPass(p:GPUAny,heldSuarez=true,momentum=true,coriolis=true):void{
+    const h=this.core.h,v=this.core.v;
+    this.dispatch(p,'hpert',h.edgeCount*v.nz);this.dispatch(p,'vpert',h.cellCount*(v.nz+1));this.dispatch(p,'sdiv',h.cellCount*v.nz);
+    if(momentum||coriolis){this.dispatch(p,'cellwind',h.cellCount*v.nz);if(momentum){this.dispatch(p,'hadv',h.cellCount*v.nz);this.dispatch(p,'vadv',h.cellCount*v.nz);}if(coriolis)this.dispatch(p,'coriolis',h.cellCount*v.nz);this.dispatch(p,'project',h.edgeCount*v.nz);}
+    if(momentum)this.dispatch(p,'wtend',h.cellCount*(v.nz+1));
+    if(heldSuarez){this.dispatch(p,'thermal',h.cellCount*v.nz);this.dispatch(p,'drag',h.edgeCount*v.nz);}
+  }
   encode(enc:GPUAny,heldSuarez=true,momentum=true,coriolis=true):void{
-    const h=this.core.h,v=this.core.v;enc.clearBuffer(this.scalarT);enc.clearBuffer(this.uT);enc.clearBuffer(this.wT);enc.clearBuffer(this.dv);
-    let p=enc.beginComputePass();this.dispatch(p,'hpert',h.edgeCount*v.nz);this.dispatch(p,'vpert',h.cellCount*(v.nz+1));this.dispatch(p,'sdiv',h.cellCount*v.nz);p.end();
-    if(momentum||coriolis){p=enc.beginComputePass();this.dispatch(p,'cellwind',h.cellCount*v.nz);if(momentum){this.dispatch(p,'hadv',h.cellCount*v.nz);this.dispatch(p,'vadv',h.cellCount*v.nz);}if(coriolis)this.dispatch(p,'coriolis',h.cellCount*v.nz);this.dispatch(p,'project',h.edgeCount*v.nz);p.end();}
-    if(momentum){p=enc.beginComputePass();this.dispatch(p,'wtend',h.cellCount*(v.nz+1));p.end();}
-    if(heldSuarez){p=enc.beginComputePass();this.dispatch(p,'thermal',h.cellCount*v.nz);this.dispatch(p,'drag',h.edgeCount*v.nz);p.end();}
+    this.clear(enc);const p=enc.beginComputePass();this.encodeIntoPass(p,heldSuarez,momentum,coriolis);p.end();
   }
   compute(heldSuarez=true,momentum=true,coriolis=true):void{this.prepare();const enc=this.device.createCommandEncoder({label:'Stage4 frozen slow tendency reference'});this.encode(enc,heldSuarez,momentum,coriolis);this.device.queue.submit([enc.finish()]);}
   private async read(buffer:GPUAny,count:number):Promise<Float32Array>{const U=(globalThis as any).GPUBufferUsage,M=(globalThis as any).GPUMapMode,bytes=count*4,stage=this.device.createBuffer({size:Math.max(4,bytes),usage:U.COPY_DST|U.MAP_READ}),enc=this.device.createCommandEncoder();enc.copyBufferToBuffer(buffer,0,stage,0,bytes);this.device.queue.submit([enc.finish()]);await stage.mapAsync(M.READ);const out=new Float32Array(stage.getMappedRange().slice(0));stage.unmap();stage.destroy();return out;}
