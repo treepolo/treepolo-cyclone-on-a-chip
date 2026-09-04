@@ -2,6 +2,7 @@ import { runStage4AcousticGpuAgreement } from './validation/stage4AcousticGpuAgr
 import { runStage4SlowGpuAgreement } from './validation/stage4SlowGpuAgreement.js';
 import { runStage4Rk3GpuAgreement } from './validation/stage4Rk3GpuAgreement.js';
 import { runStage4Rk3GpuMultistepAgreement } from './validation/stage4Rk3GpuMultistepAgreement.js';
+import { runStage4Rk3GpuStageDiagnostic } from './validation/stage4Rk3GpuStageDiagnostic.js';
 
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const run=$<HTMLButtonElement>('run'),overall=$<HTMLElement>('overall'),log=$<HTMLPreElement>('log');
@@ -27,7 +28,11 @@ run.onclick=()=>void(async()=>{
     const r=await runStage4Rk3GpuAgreement();
     set('rStatus',r.pass?'通過 / PASS':'失敗 / FAIL',r.pass?'ok':'bad');set('rRho',exp(r.rhoRelativeL2));set('rX',exp(r.rhoThetaRelativeL2));set('rU',`${exp(r.maxDeltaU)} m/s`);set('rW',`${exp(r.maxDeltaW)} m/s`);set('rMass',`CPU ${exp(r.cpuMassDrift)} / GPU ${exp(r.gpuMassDrift)}`);set('rCpuW',`${exp(r.cpuMaxW)} m/s`);set('rGpuW',`${exp(r.gpuMaxW)} m/s`);set('rRestRho',exp(r.restRhoRelativeL2));set('rRestX',exp(r.restRhoThetaRelativeL2));set('rRestU',`${exp(r.restGpuMaxU)} m/s`);set('rRestW',`${exp(r.restGpuMaxW)} m/s`);set('rRestMass',exp(r.restGpuMassDrift));set('rElapsed',`${(r.elapsedMs/1000).toFixed(2)} s`);
     log.textContent+=`[Full RK3] ${r.pass?'PASS':'FAIL'} rho=${r.rhoRelativeL2} X=${r.rhoThetaRelativeL2} maxDu=${r.maxDeltaU} maxDw=${r.maxDeltaW} massCPU=${r.cpuMassDrift} massGPU=${r.gpuMassDrift} cpuMaxW=${r.cpuMaxW} gpuMaxW=${r.gpuMaxW} restRho=${r.restRhoRelativeL2} restX=${r.restRhoThetaRelativeL2} restMaxU=${r.restGpuMaxU} restMaxW=${r.restGpuMaxW} restMass=${r.restGpuMassDrift}\n`;
-    if(!r.pass){set('overall','停止：完整單步 RK3 gate 失敗 / STOP: full one-step RK3 FAIL','bad');set('mStatus','未執行 / NOT RUN');return;}
+    if(!r.pass){
+      set('overall','單步失敗；執行 RK stage 診斷 / One-step FAIL; running RK-stage diagnostic','bad');set('mStatus','未執行 / NOT RUN');
+      try{const ds=await runStage4Rk3GpuStageDiagnostic();for(const d of ds)log.textContent+=`[Stage ${d.stage} @ ${d.targetFraction}] rho=${d.rhoRelativeL2} X=${d.rhoThetaRelativeL2} maxDu=${d.maxDeltaU} maxDw=${d.maxDeltaW}\n`;set('overall','停止：完整單步 RK3 失敗；stage 診斷已附於 Log / STOP: one-step RK3 FAIL; stage diagnostic appended','bad');}catch(de){log.textContent+=`[Stage diagnostic ERROR] ${String(de)}\n`;set('overall','停止：完整單步 RK3 失敗；stage 診斷亦錯誤 / STOP: one-step and stage diagnostic failed','bad');}
+      return;
+    }
 
     set('overall','單步通過；執行 40-step 累積 agreement / One-step PASS; running 40-step agreement','ok');
     const m=await runStage4Rk3GpuMultistepAgreement();
