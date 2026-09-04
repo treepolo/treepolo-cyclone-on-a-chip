@@ -66,13 +66,25 @@ climateBtn.onclick=()=>void(async()=>{
 })();
 
 (async()=>{
+  let gpu:GpuStage4Rk3SplitReference|undefined;
   try{
-    const h=buildCubedSphere(4),v=buildStretchedVerticalGrid(12,30000,1.4),ref=buildHeldSuarezReference(v),gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,createHydrostaticState(h,v,ref),4);
+    // Use the exact hydrostatic one-step configuration already verified by the
+    // full RK3 GPU/CPU gate.  The smoke test should not invent a separate,
+    // under-resolved mini-grid with different vertical geometry.
+    const h=buildCubedSphere(2),v=buildStretchedVerticalGrid(24,40000,1.35),ref=buildHeldSuarezReference(v);
+    gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,createHydrostaticState(h,v,ref),4);
+    gpu.device.pushErrorScope?.('validation');
     gpu.step(10,{heldSuarez:false,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true});
+    const scoped=await gpu.device.popErrorScope?.();
+    if(scoped)throw new Error(`RK3 smoke WebGPU validation: ${scoped.message||scoped}`);
     const s=await gpu.downloadState(10),d=diagnoseState(h,v,s);
-    if(d.nan||d.minRho<=0||d.minP<=0)throw new Error('invalid Stage 4 RK3 smoke state');
-    gpu.destroy();smoke=true;
+    if(d.nan||d.minRho<=0||d.minP<=0)throw new Error(`invalid Stage 4 RK3 smoke state: minRho=${d.minRho}, minP=${d.minP}, nan=${d.nan}`);
+    smoke=true;
     $('gpuStatus').textContent='RK3 split-explicit production GPU smoke 通過 / RK3 split-explicit production GPU smoke PASS';$('gpuStatus').className='ok';
     log(`Stage 4 RK3 production smoke PASS; max|w|=${d.maxAbsW.toExponential(3)} m/s.`);lock(false);
-  }catch(e){smoke=false;$('gpuStatus').textContent='失敗 / FAIL';$('gpuStatus').className='bad';agreeBtn.disabled=true;climateBtn.disabled=true;log(`Stage 4 RK3 production smoke failed: ${String(e)}`);}
+  }catch(e){
+    smoke=false;const message=String(e);
+    $('gpuStatus').textContent=`失敗 / FAIL — ${message.slice(0,220)}`;$('gpuStatus').className='bad';agreeBtn.disabled=true;climateBtn.disabled=true;
+    log(`Stage 4 RK3 production smoke failed: ${message}`);
+  }finally{gpu?.destroy();}
 })();
