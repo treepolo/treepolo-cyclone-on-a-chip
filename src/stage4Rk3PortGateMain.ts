@@ -11,7 +11,7 @@ const exp=(x:number)=>x.toExponential(3);
 
 run.onclick=()=>void(async()=>{
   run.disabled=true;log.textContent='';set('overall','執行中：聲學柱 / Running: acoustic column');
-  for(const id of ['aStatus','aRho','aX','aFrefRho','aFrefX','aFrefSelfRho','aFrefSelfX','aW','aRestW','sStatus','sRho','sX','sHF','sVF','sU','sW','sRest','rStatus','rRho','rX','rU','rW','rMass','rCpuW','rGpuW','rRestRho','rRestX','rRestU','rRestW','rRestMass','rElapsed','mStatus','mRho','mX','mU','mW','mMass','mCpuW','mGpuW','mElapsed'])set(id,'—');
+  for(const id of ['aStatus','aRho','aX','aFrefRho','aFrefX','aFrefSelfRho','aFrefSelfX','aW','aRestW','sStatus','sRho','sX','sHF','sVF','sHFSelf','sVFSelf','sRhoDivSelf','sXDivSelf','sThermal','sU','sW','sRest','rStatus','rRho','rX','rU','rW','rMass','rCpuW','rGpuW','rRestRho','rRestX','rRestU','rRestW','rRestMass','rElapsed','mStatus','mRho','mX','mU','mW','mMass','mCpuW','mGpuW','mElapsed'])set(id,'—');
   try{
     const a=await runStage4AcousticGpuAgreement();
     set('aStatus',a.pass?'通過 / PASS':'失敗 / FAIL',a.pass?'ok':'bad');set('aRho',exp(a.rhoRelativeL2));set('aX',exp(a.rhoThetaRelativeL2));set('aFrefRho',exp(a.referenceMassFluxRelativeL2));set('aFrefX',exp(a.referenceRhoThetaFluxRelativeL2));set('aFrefSelfRho',exp(a.referenceMassFluxSelfRelativeL2));set('aFrefSelfX',exp(a.referenceRhoThetaFluxSelfRelativeL2));set('aW',`${exp(a.maxDeltaW)} m/s`);set('aRestW',`${exp(a.hydrostaticMaxW)} m/s`);
@@ -20,8 +20,8 @@ run.onclick=()=>void(async()=>{
 
     set('overall','聲學柱通過；執行 slow RHS / Acoustic PASS; running slow RHS','ok');
     const s=await runStage4SlowGpuAgreement();
-    set('sStatus',s.pass?'通過 / PASS':'失敗 / FAIL',s.pass?'ok':'bad');set('sRho',exp(s.rhoRelativeL2));set('sX',exp(s.rhoThetaRelativeL2));set('sHF',exp(s.hFluxRelativeL2));set('sVF',exp(s.vFluxRelativeL2));set('sU',`${exp(s.maxDeltaU)} m/s²`);set('sW',`${exp(s.maxDeltaW)} m/s²`);set('sRest',exp(s.restMax));
-    log.textContent+=`[Slow RHS] ${s.pass?'PASS':'FAIL'} rho=${s.rhoRelativeL2} X=${s.rhoThetaRelativeL2} hF=${s.hFluxRelativeL2} vF=${s.vFluxRelativeL2} maxDu=${s.maxDeltaU} maxDw=${s.maxDeltaW} rest=${s.restMax}\n`;
+    set('sStatus',s.pass?'通過 / PASS':'失敗 / FAIL',s.pass?'ok':'bad');set('sRho',exp(s.rhoRelativeL2));set('sX',exp(s.rhoThetaRelativeL2));set('sHF',exp(s.hFluxRelativeL2));set('sVF',exp(s.vFluxRelativeL2));set('sHFSelf',exp(s.hFluxSelfRelativeL2));set('sVFSelf',exp(s.vFluxSelfRelativeL2));set('sRhoDivSelf',exp(s.rhoDivergenceSelfRelativeL2));set('sXDivSelf',exp(s.rhoThetaDivergenceSelfRelativeL2));set('sThermal',exp(s.thermalRelativeL2));set('sU',`${exp(s.maxDeltaU)} m/s²`);set('sW',`${exp(s.maxDeltaW)} m/s²`);set('sRest',exp(s.restMax));
+    log.textContent+=`[Slow RHS] ${s.pass?'PASS':'FAIL'} rawRho=${s.rhoRelativeL2} rawX=${s.rhoThetaRelativeL2} rawHF=${s.hFluxRelativeL2} rawVF=${s.vFluxRelativeL2} hFSelf=${s.hFluxSelfRelativeL2} vFSelf=${s.vFluxSelfRelativeL2} rhoDivSelf=${s.rhoDivergenceSelfRelativeL2} XDivSelf=${s.rhoThetaDivergenceSelfRelativeL2} thermal=${s.thermalRelativeL2} maxDu=${s.maxDeltaU} maxDw=${s.maxDeltaW} rest=${s.restMax}\n`;
     if(!s.pass){set('overall','停止：slow RHS gate 失敗 / STOP: slow RHS gate FAIL','bad');set('rStatus','未執行 / NOT RUN');set('mStatus','未執行 / NOT RUN');return;}
 
     set('overall','兩個子系統通過；執行完整單步 RK3 / Subsystems PASS; running full one-step RK3','ok');
