@@ -46,8 +46,10 @@ export class GpuAcousticDivergenceDamping{
   private readonly adjustPipeline:GPUAny;
   private readonly divergenceGroup:GPUAny;
   private readonly adjustGroup:GPUAny;
-  constructor(public readonly gpu:GpuRotatingDryCore){
+  readonly uBuffer:GPUAny;
+  constructor(public readonly gpu:GpuRotatingDryCore,uBuffer?:GPUAny){
     this.device=gpu.device;const U=(globalThis as any).GPUBufferUsage,storage=U.STORAGE|U.COPY_DST|U.COPY_SRC;
+    this.uBuffer=uBuffer??gpu.core.buffers.u;
     // ADJUST's vec3 tail gives the shared WGSL uniform struct a 48-byte minimum size.
     this.params=this.device.createBuffer({label:'acoustic divergence params',size:48,usage:U.UNIFORM|U.COPY_DST});
     this.divergence=this.device.createBuffer({label:'horizontal acoustic divergence',size:gpu.h.cellCount*gpu.v.nz*4,usage:storage});
@@ -55,10 +57,10 @@ export class GpuAcousticDivergenceDamping{
     this.adjustPipeline=this.device.createComputePipeline({label:'horizontal acoustic divergence adjust',layout:'auto',compute:{module:this.device.createShaderModule({label:'horizontal acoustic divergence adjust shader',code:ADJUST}),entryPoint:'main'}});
     const b=gpu.core.buffers;
     this.divergenceGroup=this.device.createBindGroup({layout:this.divergencePipeline.getBindGroupLayout(0),entries:[
-      {binding:0,resource:{buffer:this.params}},{binding:1,resource:{buffer:b.cellArea}},{binding:2,resource:{buffer:b.edgeMetric}},{binding:3,resource:{buffer:b.cellEdges}},{binding:4,resource:{buffer:b.cellSigns}},{binding:5,resource:{buffer:b.u}},{binding:6,resource:{buffer:this.divergence}},
+      {binding:0,resource:{buffer:this.params}},{binding:1,resource:{buffer:b.cellArea}},{binding:2,resource:{buffer:b.edgeMetric}},{binding:3,resource:{buffer:b.cellEdges}},{binding:4,resource:{buffer:b.cellSigns}},{binding:5,resource:{buffer:this.uBuffer}},{binding:6,resource:{buffer:this.divergence}},
     ]});
     this.adjustGroup=this.device.createBindGroup({layout:this.adjustPipeline.getBindGroupLayout(0),entries:[
-      {binding:0,resource:{buffer:this.params}},{binding:1,resource:{buffer:b.edgeCells}},{binding:2,resource:{buffer:b.edgeMetric}},{binding:3,resource:{buffer:this.divergence}},{binding:4,resource:{buffer:b.u}},
+      {binding:0,resource:{buffer:this.params}},{binding:1,resource:{buffer:b.edgeCells}},{binding:2,resource:{buffer:b.edgeMetric}},{binding:3,resource:{buffer:this.divergence}},{binding:4,resource:{buffer:this.uBuffer}},
     ]});
   }
   prepare(dt:number):void{
