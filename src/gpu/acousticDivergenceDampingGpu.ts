@@ -67,9 +67,12 @@ export class GpuAcousticDivergenceDamping{
     const coefficient=acousticDivergenceCoefficientForDt(dt);
     const ab=new ArrayBuffer(48),u=new Uint32Array(ab),f=new Float32Array(ab);u[0]=this.gpu.v.nz;u[1]=this.gpu.h.edgeCount;u[2]=this.gpu.h.cellCount;f[4]=coefficient;this.device.queue.writeBuffer(this.params,0,ab);
   }
+  encodeIntoPass(p:GPUAny):void{
+    p.setPipeline(this.divergencePipeline);p.setBindGroup(0,this.divergenceGroup);p.dispatchWorkgroups(Math.ceil(this.gpu.h.cellCount*this.gpu.v.nz/128));
+    p.setPipeline(this.adjustPipeline);p.setBindGroup(0,this.adjustGroup);p.dispatchWorkgroups(Math.ceil(this.gpu.h.edgeCount*this.gpu.v.nz/128));
+  }
   encode(enc:GPUAny):void{
-    let p=enc.beginComputePass();p.setPipeline(this.divergencePipeline);p.setBindGroup(0,this.divergenceGroup);p.dispatchWorkgroups(Math.ceil(this.gpu.h.cellCount*this.gpu.v.nz/128));p.end();
-    p=enc.beginComputePass();p.setPipeline(this.adjustPipeline);p.setBindGroup(0,this.adjustGroup);p.dispatchWorkgroups(Math.ceil(this.gpu.h.edgeCount*this.gpu.v.nz/128));p.end();
+    const p=enc.beginComputePass();this.encodeIntoPass(p);p.end();
   }
   apply(dt:number):void{
     this.prepare(dt);const enc=this.device.createCommandEncoder({label:'horizontal acoustic divergence damping'});this.encode(enc);this.device.queue.submit([enc.finish()]);
