@@ -29,22 +29,22 @@ test('Frozen split scalar RHS reconstructs the intended full discrete continuity
     const ge=h.edges[e]!,edgeLength=ge.angularLength*R;
     for(let k=0;k<nz;k++){
       const qe=edge3DIndex(e,k,nz),vel=s.uEdge[qe]!,l=cell3DIndex(ge.leftCell,k,nz),r=cell3DIndex(ge.rightCell,k,nz),up=vel>=0?l:r,A=edgeLength*v.dz[k]!,fm=s.rhoD[up]!*vel*A,fx=s.rhoThetaM[up]!*vel*A;
-      rho[l]-=fm;rho[r]+=fm;x[l]-=fx;x[r]+=fx;
+      rho[l]=rho[l]!-fm;rho[r]=rho[r]!+fm;x[l]=x[l]!-fx;x[r]=x[r]!+fx;
     }
   }
 
   // Vertical: the locked HEVI discretization uses interface reference values
-  // plus the upwind cell-centred perturbation.  Reconstruct that exact
-  // effective face carrier rather than substituting a different full-flux rule.
+  // plus the upwind cell-centred perturbation. Reconstruct that exact effective
+  // face carrier rather than substituting a different full-flux rule.
   for(let c=0;c<h.cellCount;c++){
     const area=h.cellAreaUnit[c]!*R*R;
     for(let i=1;i<nz;i++){
       const qi=w3DIndex(c,i,nz),vel=s.wInterface[qi]!,srcK=vel>=0?i-1:i,src=cell3DIndex(c,srcK,nz),faceRho=ref.rhoInterface[i]!+(s.rhoD[src]!-ref.rhoCenter[srcK]!),faceX=ref.rhoThetaInterface[i]!+(s.rhoThetaM[src]!-ref.rhoThetaCenter[srcK]!),fm=faceRho*vel*area,fx=faceX*vel*area,l=cell3DIndex(c,i-1,nz),u=cell3DIndex(c,i,nz);
-      rho[l]-=fm;rho[u]+=fm;x[l]-=fx;x[u]+=fx;
+      rho[l]=rho[l]!-fm;rho[u]=rho[u]!+fm;x[l]=x[l]!-fx;x[u]=x[u]!+fx;
     }
   }
   for(let c=0;c<h.cellCount;c++)for(let k=0;k<nz;k++){
-    const q=cell3DIndex(c,k,nz),vol=h.cellAreaUnit[c]!*R*R*v.dz[k]!;rho[q]/=vol;x[q]/=vol;
+    const q=cell3DIndex(c,k,nz),vol=h.cellAreaUnit[c]!*R*R*v.dz[k]!;rho[q]=rho[q]!/vol;x[q]=x[q]!/vol;
   }
 
   const er=relErr(frozen.rhoD,rho),ex=relErr(frozen.rhoThetaM,x);
