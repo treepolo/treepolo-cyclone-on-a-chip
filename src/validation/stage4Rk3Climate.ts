@@ -28,6 +28,15 @@ const ACOUSTIC_RATIO=4;
 // CPU/GPU agreement.  Do not silently increase this for the climate gate.
 const PRODUCTION_BATCH=40;
 
+async function yieldToBrowser():Promise<void>{
+  const scheduler=(globalThis as any).scheduler;
+  if(typeof scheduler?.yield==='function'){
+    await scheduler.yield();
+    return;
+  }
+  await new Promise<void>(resolve=>setTimeout(resolve,0));
+}
+
 interface ExtraDiagnostics{
   maxWBelowSponge:number;maxWInSponge:number;maxWAltitude:number;maxWLatitude:number;
   maxEdgeWind:number;divergenceRms:number;maxHorizontalCfl:number;maxVerticalCfl:number;
@@ -110,6 +119,7 @@ export async function runStage4Rk3Climate(days=30,onSample?:(s:ClimateDaySample)
         await gpu.device.queue.onSubmittedWorkDone();
         left-=n;completedOuterSteps+=n;
         onProgress?.({simulatedDay:completedOuterSteps*DT/86400,targetDays:days,completedOuterSteps,totalOuterSteps,batchSize:n,elapsedMs:performance.now()-t0});
+        await yieldToBrowser();
       }
       const day=segment/4,state=await gpu.downloadState(day*86400),d=diagnoseState(h,v,state),z=diagnoseZonalMeans(h,v,state,ZONAL_BINS),x=extra(h,v,state,DT),s:ClimateDaySample={day,massDrift:(d.dryMass-m0)/m0,maxW:d.maxAbsW,jet:z.maxUpperMidlatitudeWesterly,trade:z.meanTropicalLowLevelZonal,psi:z.maxAbsStreamfunction,nhPsi:z.nhDominantStreamfunction,shPsi:z.shDominantStreamfunction,invalid:d.nan||d.minRho<=0||d.minP<=0,...x};
       samples.push(s);onSample?.(s);finalZonal=z;
