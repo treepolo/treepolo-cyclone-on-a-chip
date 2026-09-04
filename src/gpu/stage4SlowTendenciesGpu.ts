@@ -43,8 +43,10 @@ struct CellGeom{east:vec4<f32>,north:vec4<f32>};@group(0)@binding(1)var<storage,
 @compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let g=cellGeom[c];let wind=cw[q].xyz;let ue=dot(wind,g.east.xyz);let vn=dot(wind,g.north.xyz);let f=2.0*P.omega*g.east.w;let d=dv[q].xyz+f*vn*g.east.xyz-f*ue*g.north.xyz;dv[q]=vec4<f32>(d,0.0);}
 `;
 const PROJECT=COMMON+/* wgsl */`
-@group(0)@binding(1)var<storage,read>edgeCells:array<vec2<u32>>;@group(0)@binding(2)var<storage,read>edgeGeom:array<vec4<f32>>;@group(0)@binding(3)var<storage,read>dv:array<vec4<f32>>;@group(0)@binding(4)var<storage,read_write>uT:array<f32>;
-@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let d=.5*(dv[cc.x*P.nz+k].xyz+dv[cc.y*P.nz+k].xyz);uT[q]=dot(d,edgeGeom[e].xyz);}
+struct CellGeom{east:vec4<f32>,north:vec4<f32>};
+@group(0)@binding(1)var<storage,read>edgeCells:array<vec2<u32>>;@group(0)@binding(2)var<storage,read>edgeGeom:array<vec4<f32>>;@group(0)@binding(3)var<storage,read>cellGeom:array<CellGeom>;@group(0)@binding(4)var<storage,read>dv:array<vec4<f32>>;@group(0)@binding(5)var<storage,read_write>uT:array<f32>;
+fn tang(c:u32,d:vec3<f32>)->vec3<f32>{let r=normalize(cross(cellGeom[c].east.xyz,cellGeom[c].north.xyz));return d-r*dot(d,r);}
+@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let d=.5*(tang(cc.x,dv[cc.x*P.nz+k].xyz)+tang(cc.y,dv[cc.y*P.nz+k].xyz));uT[q]=dot(d,edgeGeom[e].xyz);}
 `;
 const WTEND=COMMON+/* wgsl */`
 struct SlotMeta{edge:i32,neighbor:i32,sign:i32,_pad:i32};@group(0)@binding(1)var<storage,read>slotMeta:array<SlotMeta>;@group(0)@binding(2)var<storage,read>edgeMetric:array<vec2<f32>>;@group(0)@binding(3)var<storage,read>layerRef:array<f32>;@group(0)@binding(4)var<storage,read>cellArea:array<f32>;@group(0)@binding(5)var<storage,read>u:array<f32>;@group(0)@binding(6)var<storage,read>w:array<f32>;@group(0)@binding(7)var<storage,read_write>wT:array<f32>;
@@ -75,7 +77,7 @@ export class GpuStage4SlowTendencyReference{
       ['hadv',HADV,[core.core.buffers.cellEdges,core.core.buffers.cellSigns,core.core.buffers.edgeCells,core.core.buffers.edgeMetric,core.core.buffers.cellArea,core.core.buffers.u,this.cw,this.dv]],
       ['vadv',VADV,[core.core.buffers.layerRef,core.core.buffers.w,this.cw,this.dv]],
       ['coriolis',CORIOLIS,[core.buffers.cellGeom,this.cw,this.dv]],
-      ['project',PROJECT,[core.core.buffers.edgeCells,core.buffers.edgeGeom,this.dv,this.uT]],
+      ['project',PROJECT,[core.core.buffers.edgeCells,core.buffers.edgeGeom,core.buffers.cellGeom,this.dv,this.uT]],
       ['wtend',WTEND,[core.buffers.wAdvMeta,core.core.buffers.edgeMetric,core.core.buffers.layerRef,core.core.buffers.cellArea,core.core.buffers.u,core.core.buffers.w,this.wT]],
       ['thermal',THERMAL,[core.buffers.cellGeom,core.core.buffers.rho,core.core.buffers.rhoTheta,this.scalarT]],
       ['drag',DRAG,[core.core.buffers.edgeCells,core.core.buffers.rhoTheta,core.core.buffers.u,this.uT]],
