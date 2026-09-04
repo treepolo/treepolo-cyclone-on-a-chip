@@ -8,18 +8,24 @@ import { diagnoseState } from '../solver/diagnostics.js';
 import { diagnoseZonalMeans, ZonalMeanDiagnostics } from '../solver/stage4Diagnostics.js';
 import { createHydrostaticState, DryState } from '../solver/state.js';
 import { GpuStage4Rk3SplitReference } from '../gpu/stage4Rk3SplitGpu.js';
+import {
+  assertStage4Rk3CheckpointCompatible,
+  STAGE4_RK3_CHECKPOINT_SCHEMA_VERSION,
+  STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE,
+  type Stage4Rk3ClimateCheckpoint,
+} from '../persistence/stage4Rk3Checkpoint.js';
 import { ClimateDaySample } from './stage4Gpu.js';
 
 const HORIZONTAL_N=8;
 const VERTICAL_NZ=48;
 const TOP_METERS=40000;
+const VERTICAL_STRETCH=1.4;
 const ZONAL_BINS=24;
 const MIN_ACTIVE_SPONGE_INTERFACES=6;
 const DT=10;
+const ACOUSTIC_RATIO=4;
 // 40 outer steps is the largest batch that has already passed real-device
-// CPU/GPU agreement.  Do not silently increase this for the climate gate:
-// much larger command buffers can spend minutes synchronously encoding on the
-// browser main thread before the GPU receives any work.
+// CPU/GPU agreement.  Do not silently increase this for the climate gate.
 const PRODUCTION_BATCH=40;
 
 interface ExtraDiagnostics{
@@ -55,24 +61,52 @@ export interface Stage4Rk3ClimateProgress{
   batchSize:number;
   elapsedMs:number;
 }
+export interface Stage4Rk3ClimateRunOptions{
+  resume?:Stage4Rk3ClimateCheckpoint|null;
+  onCheckpoint?:(checkpoint:Stage4Rk3ClimateCheckpoint)=>void|Promise<void>;
+}
 export interface Stage4Rk3ClimateResult{passed:boolean;samples:ClimateDaySample[];failures:string[];elapsedMs:number;finalZonal?:ZonalMeanDiagnostics;}
-export async function runStage4Rk3Climate(days=30,onSample?:(s:ClimateDaySample)=>void,onProgress?:(p:Stage4Rk3ClimateProgress)=>void):Promise<Stage4Rk3ClimateResult>{
+
+function assertResumeState(cp:Stage4Rk3ClimateCheckpoint,h:CubedSphereGrid,v:VerticalGrid,days:number,stepsPerQuarter:number,totalOuterSteps:number):void{
+  assertStage4Rk3CheckpointCompatible(cp,STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE,days);
+  if(!Number.isInteger(cp.completedOuterSteps)||cp.completedOuterSteps<0||cp.completedOuterSteps>totalOuterSteps)throw new Error(`checkpoint completed step invalid: ${cp.completedOuterSteps}`);
+  if(cp.completedOuterSteps%stepsPerQuarter!==0)throw new Error(`checkpoint is not on a quarter-day boundary: step ${cp.completedOuterSteps}`);
+  const expectedSamples=cp.completedOuterSteps/stepsPerQuarter;
+  if(cp.samples.length!==expectedSamples)throw new Error(`checkpoint sample count mismatch: ${cp.samples.length}; expected ${expectedSamples}`);
+  const expectedTime=cp.completedOuterSteps*DT;
+  if(Math.abs(cp.state.time-expectedTime)>1e-6)throw new Error(`checkpoint state time mismatch: ${cp.state.time}; expected ${expectedTime}`);
+  const cells=h.cellCount*v.nz,edges=h.edgeCount*v.nz,w=h.cellCount*(v.nz+1);
+  if(cp.state.rhoD.length!==cells||cp.state.rhoThetaM.length!==cells||cp.state.uEdge.length!==edges||cp.state.wInterface.length!==w)throw new Error('checkpoint prognostic array dimensions do not match the production grid');
+  if(!(cp.initialDryMass>0)||!Number.isFinite(cp.initialDryMass))throw new Error('checkpoint initial dry mass invalid');
+  if(expectedSamples>0){
+    const last=cp.samples[expectedSamples-1]!;
+    const expectedDay=expectedTime/86400;
+    if(Math.abs(last.day-expectedDay)>1e-10)throw new Error(`checkpoint last sample day mismatch: ${last.day}; expected ${expectedDay}`);
+  }
+}
+
+export async function runStage4Rk3Climate(days=30,onSample?:(s:ClimateDaySample)=>void,onProgress?:(p:Stage4Rk3ClimateProgress)=>void,runOptions:Stage4Rk3ClimateRunOptions={}):Promise<Stage4Rk3ClimateResult>{
   if(!Number.isInteger(days)||days<1)throw new Error('RK3 climate days must be a positive integer');
-  const h=buildCubedSphere(HORIZONTAL_N),v=buildStretchedVerticalGrid(VERTICAL_NZ,TOP_METERS,1.4),rates=buildModelTopSpongeRates(v),active=Array.from(rates.slice(1,-1)).filter(x=>x>0).length;
+  const h=buildCubedSphere(HORIZONTAL_N),v=buildStretchedVerticalGrid(VERTICAL_NZ,TOP_METERS,VERTICAL_STRETCH),rates=buildModelTopSpongeRates(v),active=Array.from(rates.slice(1,-1)).filter(x=>x>0).length;
   if(active<MIN_ACTIVE_SPONGE_INTERFACES)throw new Error(`RK3 climate sponge under-resolved: ${active} active interfaces; require >=${MIN_ACTIVE_SPONGE_INTERFACES}`);
+  const stepsPerQuarter=Math.round(21600/DT),stepsPerDay=Math.round(86400/DT),totalOuterSteps=days*stepsPerDay;
   const ref=buildHeldSuarezReference(v),seed=createHydrostaticState(h,v,ref);addHeldSuarezWavePerturbation(h,v,ref,seed,.05);
-  const gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,seed,4),initial=await gpu.downloadState(0),m0=diagnoseState(h,v,initial).dryMass,stepsPerQuarter=Math.round(21600/DT),stepsPerDay=Math.round(86400/DT),totalOuterSteps=days*stepsPerDay,samples:ClimateDaySample[]=[],failures:string[]=[],t0=performance.now(),opts={heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true} as const;
-  let finalZonal:ZonalMeanDiagnostics|undefined,completedOuterSteps=0;
+  const resume=runOptions.resume??null;
+  if(resume)assertResumeState(resume,h,v,days,stepsPerQuarter,totalOuterSteps);
+  const startState=resume?.state??seed;
+  const gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,startState,ACOUSTIC_RATIO);
+  const samples:ClimateDaySample[]=resume?resume.samples.map(s=>({...s})):[];
+  const failures:string[]=[],t0=performance.now(),opts={heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true} as const;
+  let finalZonal:ZonalMeanDiagnostics|undefined,completedOuterSteps=resume?.completedOuterSteps??0;
+  const m0=resume?.initialDryMass??diagnoseState(h,v,await gpu.downloadState(0)).dryMass;
   try{
-    for(let segment=1;segment<=days*4;segment++){
+    onProgress?.({simulatedDay:completedOuterSteps*DT/86400,targetDays:days,completedOuterSteps,totalOuterSteps,batchSize:0,elapsedMs:0});
+    const firstSegment=completedOuterSteps/stepsPerQuarter+1;
+    for(let segment=firstSegment;segment<=days*4;segment++){
       let left=stepsPerQuarter;
       while(left>0){
         const n=Math.min(PRODUCTION_BATCH,left);
         gpu.stepBatch(DT,n,opts);
-        // Waiting for submitted work already yields to the browser event loop.
-        // Do not add a timer-based yield here: background-tab timer throttling
-        // can delay setTimeout(0) for a minute or more and leave the GPU idle
-        // between otherwise healthy batches.
         await gpu.device.queue.onSubmittedWorkDone();
         left-=n;completedOuterSteps+=n;
         onProgress?.({simulatedDay:completedOuterSteps*DT/86400,targetDays:days,completedOuterSteps,totalOuterSteps,batchSize:n,elapsedMs:performance.now()-t0});
@@ -82,6 +116,18 @@ export async function runStage4Rk3Climate(days=30,onSample?:(s:ClimateDaySample)
       if(s.invalid){failures.push(`day ${day}: invalid state`);break;}
       if(Math.abs(s.massDrift)>5e-5){failures.push(`day ${day}: mass drift ${s.massDrift}`);break;}
       if(!(s.maxW<10)){failures.push(`day ${day}: vertical-velocity stability guard exceeded: ${s.maxW} at z=${(s.maxWAltitude/1000).toFixed(2)} km, lat=${s.maxWLatitude.toFixed(1)} deg; below=${s.maxWBelowSponge}, absorber=${s.maxWInSponge}, hCFL=${s.maxHorizontalCfl}, vCFL=${s.maxVerticalCfl}, divRMS=${s.divergenceRms}`);break;}
+      if(runOptions.onCheckpoint){
+        await runOptions.onCheckpoint({
+          schemaVersion:STAGE4_RK3_CHECKPOINT_SCHEMA_VERSION,
+          modelSignature:STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE,
+          savedAt:Date.now(),
+          targetDays:days,
+          completedOuterSteps,
+          initialDryMass:m0,
+          state,
+          samples:samples.map(sample=>({...sample})),
+        });
+      }
     }
     const f=samples[samples.length-1];
     if(!f)failures.push('no RK3 climate samples');
