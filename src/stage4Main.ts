@@ -8,20 +8,35 @@ import { runStage4Rk3GpuMultistepAgreement } from './validation/stage4Rk3GpuMult
 import { runStage4Rk3Climate } from './validation/stage4Rk3Climate.js';
 import type { Stage4Rk3ClimateProgress } from './validation/stage4Rk3Climate.js';
 import type { ClimateDaySample } from './validation/stage4Gpu.js';
+import {
+  assertStage4Rk3CheckpointCompatible,
+  clearStage4Rk3Checkpoint,
+  loadStage4Rk3Checkpoint,
+  saveStage4Rk3Checkpoint,
+  stage4Rk3StoragePersistenceStatus,
+  STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE,
+  type Stage4Rk3ClimateCheckpoint,
+} from './persistence/stage4Rk3Checkpoint.js';
 
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const logEl=$<HTMLDivElement>('log');
 const log=(x:string)=>{logEl.textContent=`${x}\n${logEl.textContent||''}`.slice(0,50000)};
-const agreeBtn=$<HTMLButtonElement>('agree'),climateBtn=$<HTMLButtonElement>('climate');
-let smoke=false;
-function lock(v:boolean){agreeBtn.disabled=v||!smoke;climateBtn.disabled=v||!smoke;}
+const agreeBtn=$<HTMLButtonElement>('agree'),climateBtn=$<HTMLButtonElement>('climate'),resumeBtn=$<HTMLButtonElement>('resume'),clearCheckpointBtn=$<HTMLButtonElement>('clearCheckpoint');
+let smoke=false,busy=false,checkpointStorageReady=false,checkpointExists=false,checkpoint:Stage4Rk3ClimateCheckpoint|null=null;
+function lock(v:boolean){
+  busy=v;
+  agreeBtn.disabled=v||!smoke;
+  climateBtn.disabled=v||!smoke||!checkpointStorageReady||checkpointExists;
+  resumeBtn.disabled=v||!smoke||!checkpointStorageReady||checkpoint===null;
+  clearCheckpointBtn.disabled=v||!checkpointStorageReady||!checkpointExists;
+}
 function climateProgress(p:Stage4Rk3ClimateProgress){
   const pct=100*p.completedOuterSteps/p.totalOuterSteps;
   $('climateStatus').textContent=`執行中 ${pct.toFixed(1)}% / Running ${pct.toFixed(1)}%`;
   $('climateDay').textContent=`${p.simulatedDay.toFixed(3)} / ${p.targetDays} (GPU-complete)`;
   $('climateElapsed').textContent=`${(p.elapsedMs/1000).toFixed(1)} s`;
 }
-function climateSample(s:ClimateDaySample){
+function climateSample(s:ClimateDaySample,writeLog=true){
   $('climateDay').textContent=`${s.day.toFixed(s.day%1===0?0:2)} / 30`;
   $('climateMass').textContent=s.massDrift.toExponential(3);
   $('climateJet').textContent=`${s.jet.toFixed(3)} m/s`;
@@ -35,7 +50,45 @@ function climateSample(s:ClimateDaySample){
   $('climateDiv').textContent=`${s.divergenceRms.toExponential(3)} s⁻¹`;
   $('climateHCfl').textContent=s.maxHorizontalCfl.toExponential(3);
   $('climateVCfl').textContent=s.maxVerticalCfl.toExponential(3);
-  log(`RK3 Held–Suarez day ${s.day.toFixed(2)}: mass=${s.massDrift.toExponential(3)}, jet=${s.jet.toFixed(3)}, trade=${s.trade.toFixed(3)}, psi=${s.psi.toExponential(3)}, max|w|=${s.maxW.toExponential(3)} [below=${s.maxWBelowSponge.toExponential(3)}, absorber=${s.maxWInSponge.toExponential(3)}, z=${(s.maxWAltitude/1000).toFixed(2)}km, lat=${s.maxWLatitude.toFixed(1)}deg], max|u_edge|=${s.maxEdgeWind.toFixed(3)}, divRMS=${s.divergenceRms.toExponential(3)}, CFL(h/v)=${s.maxHorizontalCfl.toExponential(2)}/${s.maxVerticalCfl.toExponential(2)}.`);
+  if(writeLog)log(`RK3 Held–Suarez day ${s.day.toFixed(2)}: mass=${s.massDrift.toExponential(3)}, jet=${s.jet.toFixed(3)}, trade=${s.trade.toFixed(3)}, psi=${s.psi.toExponential(3)}, max|w|=${s.maxW.toExponential(3)} [below=${s.maxWBelowSponge.toExponential(3)}, absorber=${s.maxWInSponge.toExponential(3)}, z=${(s.maxWAltitude/1000).toFixed(2)}km, lat=${s.maxWLatitude.toFixed(1)}deg], max|u_edge|=${s.maxEdgeWind.toFixed(3)}, divRMS=${s.divergenceRms.toExponential(3)}, CFL(h/v)=${s.maxHorizontalCfl.toExponential(2)}/${s.maxVerticalCfl.toExponential(2)}.`);
+}
+function renderCheckpoint(cp:Stage4Rk3ClimateCheckpoint|null,error?:string){
+  checkpointExists=cp!==null;
+  checkpoint=null;
+  if(!cp){
+    $('checkpointStatus').textContent=error?`錯誤 / ERROR — ${error}`:'無 checkpoint / None';
+    $('checkpointStatus').className=error?'bad':'';
+    $('checkpointDay').textContent='—';$('checkpointSaved').textContent='—';
+    lock(busy);return;
+  }
+  const day=cp.completedOuterSteps*10/86400;
+  $('checkpointDay').textContent=day.toFixed(2);
+  $('checkpointSaved').textContent=new Date(cp.savedAt).toLocaleString();
+  try{
+    assertStage4Rk3CheckpointCompatible(cp,STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE,30);
+    checkpoint=cp;
+    $('checkpointStatus').textContent='可恢復 / RESUMABLE';$('checkpointStatus').className='ok';
+    const last=cp.samples[cp.samples.length-1];if(last)climateSample(last,false);
+  }catch(e){
+    $('checkpointStatus').textContent=`不相容 / INCOMPATIBLE — ${String(e)}`;$('checkpointStatus').className='bad';
+  }
+  lock(busy);
+}
+async function refreshCheckpoint():Promise<void>{
+  try{
+    const storageMode=await stage4Rk3StoragePersistenceStatus();
+    $('checkpointStorage').textContent=storageMode==='persistent'?'IndexedDB persistent':storageMode==='best-effort'?'IndexedDB best-effort':'IndexedDB status unknown';
+    const cp=await loadStage4Rk3Checkpoint();
+    checkpointStorageReady=true;renderCheckpoint(cp);
+  }catch(e){
+    checkpointStorageReady=false;checkpointExists=false;checkpoint=null;
+    $('checkpointStorage').textContent='不可用 / unavailable';
+    renderCheckpoint(null,String(e));
+  }
+}
+async function persistCheckpoint(cp:Stage4Rk3ClimateCheckpoint):Promise<void>{
+  await saveStage4Rk3Checkpoint(cp);
+  checkpointStorageReady=true;renderCheckpoint(cp);
 }
 
 agreeBtn.onclick=()=>void(async()=>{
@@ -54,17 +107,27 @@ agreeBtn.onclick=()=>void(async()=>{
   }catch(e){$('agreeStatus').textContent='錯誤 / ERROR';$('agreeStatus').className='bad';log(`RK3 agreement error: ${String(e)}`);}finally{lock(false);}
 })();
 
-climateBtn.onclick=()=>void(async()=>{
-  lock(true);$('climateStatus').textContent='執行中 0.0% / Running 0.0%';$('climateStatus').className='';$('climateDay').textContent='0.000 / 30 (GPU-complete)';$('climateElapsed').textContent='0.0 s';
-  log('30 日 production gate：使用真機已驗證的 40-step GPU batch；每批完成後等待 GPU queue 並回報實際完成進度。數值核心仍為 3-stage RK3 predictor restart + predictor-relative split-explicit acoustic substeps (1×dt/3, 2×dt/4, 4×dt/4) + vertically implicit acoustic/gravity solve + Held–Suarez + complete 3-D momentum + Coriolis + implicit top absorber + acoustic divergence damping；outer dt=10 s。 / 30-day production gate uses the verified 40-step GPU batch and reports GPU-completed progress after every batch.');
+async function runClimate(resume:Stage4Rk3ClimateCheckpoint|null):Promise<void>{
+  lock(true);
+  const startDay=resume?resume.completedOuterSteps*10/86400:0;
+  $('climateStatus').textContent=`執行中 ${(startDay/30*100).toFixed(1)}% / Running ${(startDay/30*100).toFixed(1)}%`;$('climateStatus').className='';$('climateDay').textContent=`${startDay.toFixed(3)} / 30 (GPU-complete)`;$('climateElapsed').textContent='0.0 s';
+  log(resume?`從 persistent checkpoint day ${startDay.toFixed(2)} 恢復 30 日 production gate。 / Resuming 30-day production gate from persistent checkpoint.`:'從頭開始 30 日 production gate；每 0.25 simulated day 原子寫入完整 IndexedDB checkpoint。 / Starting fresh 30-day production gate with a full IndexedDB checkpoint every quarter day.');
   try{
-    const r=await runStage4Rk3Climate(30,climateSample,climateProgress);
+    const r=await runStage4Rk3Climate(30,s=>climateSample(s,true),climateProgress,{resume,onCheckpoint:persistCheckpoint});
     $('climateElapsed').textContent=`${(r.elapsedMs/1000).toFixed(2)} s`;
     $('climateStatus').textContent=r.passed?'通過 / PASS':'失敗 / FAIL';$('climateStatus').className=r.passed?'ok':'bad';
     log(r.passed?'30 日 RK3 Held–Suarez production gate 通過。 / 30-day RK3 Held–Suarez production gate PASS.':`30-day RK3 Held–Suarez gate FAIL:\n${r.failures.join('\n')}`);
-  }catch(e){$('climateStatus').textContent='錯誤 / ERROR';$('climateStatus').className='bad';log(`RK3 Held–Suarez climate error: ${String(e)}`);}finally{lock(false);}
+  }catch(e){$('climateStatus').textContent='錯誤 / ERROR';$('climateStatus').className='bad';log(`RK3 Held–Suarez climate/checkpoint error: ${String(e)}`);}finally{await refreshCheckpoint();lock(false);}
+}
+climateBtn.onclick=()=>void runClimate(null);
+resumeBtn.onclick=()=>{const cp=checkpoint;if(cp)void runClimate(cp);};
+clearCheckpointBtn.onclick=()=>void(async()=>{
+  if(!confirm('確定清除目前 Stage 4 persistent checkpoint？清除後無法恢復。 / Delete the current Stage 4 checkpoint?'))return;
+  lock(true);
+  try{await clearStage4Rk3Checkpoint();log('Stage 4 persistent checkpoint cleared.');}catch(e){log(`checkpoint clear error: ${String(e)}`);}finally{await refreshCheckpoint();lock(false);}
 })();
 
+void refreshCheckpoint();
 (async()=>{
   let gpu:GpuStage4Rk3SplitReference|undefined;
   try{
@@ -81,7 +144,7 @@ climateBtn.onclick=()=>void(async()=>{
     log(`Stage 4 RK3 production smoke PASS; max|w|=${d.maxAbsW.toExponential(3)} m/s.`);lock(false);
   }catch(e){
     smoke=false;const message=String(e);
-    $('gpuStatus').textContent=`失敗 / FAIL — ${message.slice(0,220)}`;$('gpuStatus').className='bad';agreeBtn.disabled=true;climateBtn.disabled=true;
-    log(`Stage 4 RK3 production smoke failed: ${message}`);
+    $('gpuStatus').textContent=`失敗 / FAIL — ${message.slice(0,220)}`;$('gpuStatus').className='bad';
+    log(`Stage 4 RK3 production smoke failed: ${message}`);lock(false);
   }finally{gpu?.destroy();}
 })();
