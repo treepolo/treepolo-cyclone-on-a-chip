@@ -146,7 +146,24 @@ export class GpuStage4Rk3SplitReference{
   private one(enc:GPUAny,name:string,count:number,stage:number,size=128):void{const p=enc.beginComputePass();this.dispatch(p,name,count,stage,size);p.end();}
   private prepareBatch(dt:number,top:boolean):void{const schedule=buildRk3SplitSchedule(this.acousticRatio);for(let i=0;i<3;i++)this.writeParams(i,dt*schedule[i]!.acousticDtFraction,top);this.slow.prepare();this.divergenceStage1.prepare(dt*schedule[0]!.acousticDtFraction);this.divergence.prepare(dt*schedule[1]!.acousticDtFraction);}
   private encodeSnapshotBase(enc:GPUAny):void{const h=this.core.h,v=this.core.v,b=this.core.core.buffers;this.one(enc,'packBase',h.cellCount*v.nz,0);enc.copyBufferToBuffer(b.u,0,this.buffers.baseU,0,h.edgeCount*v.nz*4);enc.copyBufferToBuffer(b.w,0,this.buffers.baseW,0,h.cellCount*(v.nz+1)*4);}
-  private encodeStage(enc:GPUAny,stageIndex:number,steps:number,held:boolean,momentum:boolean,coriolis:boolean,divergenceDamping:boolean):void{const h=this.core.h,v=this.core.v,b=this.core.core.buffers;this.slow.encode(enc,held,momentum,coriolis);this.one(enc,'prepCell',h.cellCount*v.nz,stageIndex);this.one(enc,'addHref',h.cellCount*v.nz,stageIndex);this.one(enc,'addVref',h.cellCount*v.nz,stageIndex);this.one(enc,'prepU',h.edgeCount*v.nz,stageIndex);this.one(enc,'prepIface',h.cellCount*(v.nz+1),stageIndex);enc.copyBufferToBuffer(this.buffers.baseU,0,this.buffers.acousticU,0,h.edgeCount*v.nz*4);const div=stageIndex===0?this.divergenceStage1:this.divergence;for(let n=0;n<steps;n++){this.one(enc,'hvel',h.edgeCount*v.nz,stageIndex);this.one(enc,'hrefFlux',h.edgeCount*v.nz,stageIndex);this.one(enc,'hrefDiv',h.cellCount*v.nz,stageIndex);this.one(enc,'vertical',h.cellCount,stageIndex,1);if(divergenceDamping)div.encode(enc);}this.one(enc,'unpackCell',h.cellCount*v.nz,stageIndex);this.one(enc,'unpackW',h.cellCount*(v.nz+1),stageIndex);enc.copyBufferToBuffer(this.buffers.acousticU,0,b.u,0,h.edgeCount*v.nz*4);}
+  private encodeStage(enc:GPUAny,stageIndex:number,steps:number,held:boolean,momentum:boolean,coriolis:boolean,divergenceDamping:boolean):void{
+    const h=this.core.h,v=this.core.v,b=this.core.core.buffers;
+    // Pass coalescing only: clear/copy boundaries and dispatch order remain identical to the verified implementation.
+    this.slow.clear(enc);
+    let p=enc.beginComputePass();
+    this.slow.encodeIntoPass(p,held,momentum,coriolis);
+    this.dispatch(p,'prepCell',h.cellCount*v.nz,stageIndex);this.dispatch(p,'addHref',h.cellCount*v.nz,stageIndex);this.dispatch(p,'addVref',h.cellCount*v.nz,stageIndex);this.dispatch(p,'prepU',h.edgeCount*v.nz,stageIndex);this.dispatch(p,'prepIface',h.cellCount*(v.nz+1),stageIndex);
+    p.end();
+    enc.copyBufferToBuffer(this.buffers.baseU,0,this.buffers.acousticU,0,h.edgeCount*v.nz*4);
+    const div=stageIndex===0?this.divergenceStage1:this.divergence;
+    p=enc.beginComputePass();
+    for(let n=0;n<steps;n++){
+      this.dispatch(p,'hvel',h.edgeCount*v.nz,stageIndex);this.dispatch(p,'hrefFlux',h.edgeCount*v.nz,stageIndex);this.dispatch(p,'hrefDiv',h.cellCount*v.nz,stageIndex);this.dispatch(p,'vertical',h.cellCount,stageIndex,1);if(divergenceDamping)div.encodeIntoPass(p);
+    }
+    this.dispatch(p,'unpackCell',h.cellCount*v.nz,stageIndex);this.dispatch(p,'unpackW',h.cellCount*(v.nz+1),stageIndex);
+    p.end();
+    enc.copyBufferToBuffer(this.buffers.acousticU,0,b.u,0,h.edgeCount*v.nz*4);
+  }
   private encodeOne(enc:GPUAny,options:Stage4Rk3SplitOptions):void{const schedule=buildRk3SplitSchedule(this.acousticRatio),held=options.heldSuarez!==false,momentum=options.momentumTransport!==false,coriolis=options.coriolis!==false,divergence=options.divergenceDamping!==false;this.encodeSnapshotBase(enc);for(let i=0;i<schedule.length;i++)this.encodeStage(enc,i,schedule[i]!.acousticSteps,held,momentum,coriolis,divergence);}
   step(dt:number,options:Stage4Rk3SplitOptions={}):void{if(!(dt>0))throw new Error('Stage4 GPU RK3 dt must be positive');const top=options.topAbsorber!==false;this.prepareBatch(dt,top);const enc=this.device.createCommandEncoder({label:'Stage4 RK3 split outer step'});this.encodeOne(enc,options);this.device.queue.submit([enc.finish()]);}
   stepBatch(dt:number,count:number,options:Stage4Rk3SplitOptions={}):void{if(!(dt>0))throw new Error('Stage4 GPU RK3 dt must be positive');if(!Number.isInteger(count)||count<1)throw new Error('Stage4 GPU RK3 batch count must be positive integer');const top=options.topAbsorber!==false;this.prepareBatch(dt,top);const enc=this.device.createCommandEncoder({label:`Stage4 RK3 split batch ${count}`});for(let i=0;i<count;i++)this.encodeOne(enc,options);this.device.queue.submit([enc.finish()]);}
