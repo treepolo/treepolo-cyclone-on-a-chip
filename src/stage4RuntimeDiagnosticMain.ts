@@ -7,7 +7,7 @@ import { GpuStage4Rk3SplitReference } from './gpu/stage4Rk3SplitGpu.js';
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const runBtn=$<HTMLButtonElement>('run');
 const logEl=$<HTMLPreElement>('log');
-const KEY='cyclone-stage4-runtime-diag-v2';
+const KEY='cyclone-stage4-runtime-diag-v3';
 const DT=10,BATCH=40,TARGET_DAYS=3,WAIT_TIMEOUT_MS=15000;
 const opts={heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true} as const;
 
@@ -34,6 +34,15 @@ async function waitForGpu(queue:any,timeoutMs:number):Promise<'done'|'timeout'>{
       new Promise<'timeout'>(resolve=>{timer=window.setTimeout(()=>resolve('timeout'),timeoutMs);}),
     ]);
   }finally{if(timer!==undefined)window.clearTimeout(timer);}
+}
+
+async function yieldToBrowser():Promise<void>{
+  const scheduler=(globalThis as any).scheduler;
+  if(typeof scheduler?.yield==='function'){
+    await scheduler.yield();
+    return;
+  }
+  await new Promise<void>(resolve=>setTimeout(resolve,0));
 }
 
 runBtn.onclick=()=>void(async()=>{
@@ -73,6 +82,7 @@ runBtn.onclick=()=>void(async()=>{
       const day=completed*DT/86400;
       mark({phase:'GPU complete',batch,completed,day,encodeMs,waitMs,wallMs:performance.now()-t0});
       addTiming({batch,day,encodeMs,waitMs,wallMs:performance.now()-t0});
+      await yieldToBrowser();
     }
     if(unexpectedLoss)return;
     mark({phase:'COMPLETE',completed,day:completed*DT/86400,wallMs:performance.now()-t0});
