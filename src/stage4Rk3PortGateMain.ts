@@ -11,11 +11,11 @@ const exp=(x:number)=>x.toExponential(3);
 
 run.onclick=()=>void(async()=>{
   run.disabled=true;log.textContent='';set('overall','執行中：聲學柱 / Running: acoustic column');
-  for(const id of ['aStatus','aRho','aX','aFrefRho','aFrefX','aW','aRestW','sStatus','sRho','sX','sHF','sVF','sU','sW','sRest','rStatus','rRho','rX','rU','rW','rMass','rCpuW','rGpuW','rRestRho','rRestX','rRestU','rRestW','rRestMass','rElapsed','mStatus','mRho','mX','mU','mW','mMass','mCpuW','mGpuW','mElapsed'])set(id,'—');
+  for(const id of ['aStatus','aRho','aX','aFrefRho','aFrefX','aFrefSelfRho','aFrefSelfX','aW','aRestW','sStatus','sRho','sX','sHF','sVF','sU','sW','sRest','rStatus','rRho','rX','rU','rW','rMass','rCpuW','rGpuW','rRestRho','rRestX','rRestU','rRestW','rRestMass','rElapsed','mStatus','mRho','mX','mU','mW','mMass','mCpuW','mGpuW','mElapsed'])set(id,'—');
   try{
     const a=await runStage4AcousticGpuAgreement();
-    set('aStatus',a.pass?'通過 / PASS':'失敗 / FAIL',a.pass?'ok':'bad');set('aRho',exp(a.rhoRelativeL2));set('aX',exp(a.rhoThetaRelativeL2));set('aFrefRho',exp(a.referenceMassFluxRelativeL2));set('aFrefX',exp(a.referenceRhoThetaFluxRelativeL2));set('aW',`${exp(a.maxDeltaW)} m/s`);set('aRestW',`${exp(a.hydrostaticMaxW)} m/s`);
-    log.textContent+=`[Acoustic] ${a.pass?'PASS':'FAIL'} rho=${a.rhoRelativeL2} X=${a.rhoThetaRelativeL2} FrefRho=${a.referenceMassFluxRelativeL2} FrefX=${a.referenceRhoThetaFluxRelativeL2} maxDw=${a.maxDeltaW} restW=${a.hydrostaticMaxW}\n`;
+    set('aStatus',a.pass?'通過 / PASS':'失敗 / FAIL',a.pass?'ok':'bad');set('aRho',exp(a.rhoRelativeL2));set('aX',exp(a.rhoThetaRelativeL2));set('aFrefRho',exp(a.referenceMassFluxRelativeL2));set('aFrefX',exp(a.referenceRhoThetaFluxRelativeL2));set('aFrefSelfRho',exp(a.referenceMassFluxSelfRelativeL2));set('aFrefSelfX',exp(a.referenceRhoThetaFluxSelfRelativeL2));set('aW',`${exp(a.maxDeltaW)} m/s`);set('aRestW',`${exp(a.hydrostaticMaxW)} m/s`);
+    log.textContent+=`[Acoustic] ${a.pass?'PASS':'FAIL'} rho=${a.rhoRelativeL2} X=${a.rhoThetaRelativeL2} FrefRawRho=${a.referenceMassFluxRelativeL2} FrefRawX=${a.referenceRhoThetaFluxRelativeL2} FrefSelfRho=${a.referenceMassFluxSelfRelativeL2} FrefSelfX=${a.referenceRhoThetaFluxSelfRelativeL2} maxDw=${a.maxDeltaW} restW=${a.hydrostaticMaxW}\n`;
     if(!a.pass){set('overall','停止：聲學柱 gate 失敗 / STOP: acoustic gate FAIL','bad');set('sStatus','未執行 / NOT RUN');set('rStatus','未執行 / NOT RUN');set('mStatus','未執行 / NOT RUN');return;}
 
     set('overall','聲學柱通過；執行 slow RHS / Acoustic PASS; running slow RHS','ok');
