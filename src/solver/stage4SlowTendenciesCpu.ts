@@ -31,8 +31,10 @@ export interface Stage4SlowTendencies {
  *
  * Prognostic horizontal wind is velocity, not rho*u. Its slow transport is
  * therefore evaluated directly in material form -u_h.grad_h(u)-w du/dz using
- * donor-cell upstream differences. This is independent of the scalar split and
- * exactly preserves a horizontal velocity field that is uniform in space.
+ * donor-cell upstream differences. Horizontal vector derivatives are formed in
+ * global Cartesian components and then projected to each target cell's tangent
+ * plane before edge projection, giving the discrete covariant acceleration on
+ * the sphere rather than retaining basis-rotation radial components.
  */
 export function computeStage4SlowTendencies(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,s:DryState,options:Stage4SlowOptions={},rotation?:RotationGeometry):Stage4SlowTendencies {
   const momentum=options.momentumTransport!==false,coriolis=options.coriolis!==false,heldSuarez=options.heldSuarez!==false,nz=v.nz,R=EARTH.radius,g=rotation??buildRotationGeometry(h);
@@ -84,9 +86,15 @@ export function computeStage4SlowTendencies(h:CubedSphereGrid,v:VerticalGrid,ref
         dv[o]=dv[o]!+f*vn*ex-f*ue*nx;dv[o+1]=dv[o+1]!+f*vn*ey-f*ue*ny;dv[o+2]=dv[o+2]!+f*vn*ez-f*ue*nzv;
       }}
     }
+    // Covariant/tangent projection at each source cell before averaging to the
+    // staggered edge.  The global-vector derivative may contain a radial piece
+    // solely because the tangent basis rotates across the sphere; that piece is
+    // not a physical horizontal acceleration.
     for(let e=0;e<h.edgeCount;e++){
       const ge=h.edges[e]!,l=ge.leftCell,r=ge.rightCell,n=ge.normal;for(let k=0;k<nz;k++){
-        const dv=cellVT[k]!,lx=l*3,rx=r*3,q=edge3DIndex(e,k,nz),ax=.5*(dv[lx]!+dv[rx]!),ay=.5*(dv[lx+1]!+dv[rx+1]!),az=.5*(dv[lx+2]!+dv[rx+2]!);uT[q]=uT[q]!+ax*n[0]+ay*n[1]+az*n[2];
+        const dv=cellVT[k]!,lo=l*3,ro=r*3,lrx=g.radial[lo]!,lry=g.radial[lo+1]!,lrz=g.radial[lo+2]!,rrx=g.radial[ro]!,rry=g.radial[ro+1]!,rrz=g.radial[ro+2]!,ldot=dv[lo]!*lrx+dv[lo+1]!*lry+dv[lo+2]!*lrz,rdot=dv[ro]!*rrx+dv[ro+1]!*rry+dv[ro+2]!*rrz;
+        const lx=dv[lo]!-ldot*lrx,ly=dv[lo+1]!-ldot*lry,lz=dv[lo+2]!-ldot*lrz,rx=dv[ro]!-rdot*rrx,ry=dv[ro+1]!-rdot*rry,rz=dv[ro+2]!-rdot*rrz;
+        uT[edge3DIndex(e,k,nz)]=uT[edge3DIndex(e,k,nz)]!+.5*((lx+rx)*n[0]+(ly+ry)*n[1]+(lz+rz)*n[2]);
       }
     }
   }
