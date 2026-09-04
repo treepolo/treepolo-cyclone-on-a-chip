@@ -68,10 +68,7 @@ climateBtn.onclick=()=>void(async()=>{
 (async()=>{
   let gpu:GpuStage4Rk3SplitReference|undefined;
   try{
-    // Use the exact hydrostatic one-step configuration already verified by the
-    // full RK3 GPU/CPU gate.  The smoke test should not invent a separate,
-    // under-resolved mini-grid with different vertical geometry.
-    const h=buildCubedSphere(2),v=buildStretchedVerticalGrid(24,40000,1.35),ref=buildHeldSuarezReference(v);
+    const h=buildCubedSphere(4),v=buildStretchedVerticalGrid(12,30000,1.4),ref=buildHeldSuarezReference(v);
     gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,createHydrostaticState(h,v,ref),4);
     gpu.device.pushErrorScope?.('validation');
     gpu.step(10,{heldSuarez:false,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true});
