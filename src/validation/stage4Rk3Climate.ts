@@ -16,7 +16,11 @@ const TOP_METERS=40000;
 const ZONAL_BINS=24;
 const MIN_ACTIVE_SPONGE_INTERFACES=6;
 const DT=10;
-const PRODUCTION_BATCH=200;
+// 40 outer steps is the largest batch that has already passed real-device
+// CPU/GPU agreement.  Do not silently increase this for the climate gate:
+// much larger command buffers can spend minutes synchronously encoding on the
+// browser main thread before the GPU receives any work.
+const PRODUCTION_BATCH=40;
 
 interface ExtraDiagnostics{
   maxWBelowSponge:number;maxWInSponge:number;maxWAltitude:number;maxWLatitude:number;
@@ -43,19 +47,36 @@ function extra(h:CubedSphereGrid,v:VerticalGrid,s:DryState,dt:number):ExtraDiagn
   return{maxWBelowSponge,maxWInSponge,maxWAltitude,maxWLatitude,maxEdgeWind,divergenceRms:acousticDivergenceRms(h,v,buildHeldSuarezReference(v),s),maxHorizontalCfl,maxVerticalCfl};
 }
 
+export interface Stage4Rk3ClimateProgress{
+  simulatedDay:number;
+  targetDays:number;
+  completedOuterSteps:number;
+  totalOuterSteps:number;
+  batchSize:number;
+  elapsedMs:number;
+}
 export interface Stage4Rk3ClimateResult{passed:boolean;samples:ClimateDaySample[];failures:string[];elapsedMs:number;finalZonal?:ZonalMeanDiagnostics;}
-export async function runStage4Rk3Climate(days=30,onSample?:(s:ClimateDaySample)=>void):Promise<Stage4Rk3ClimateResult>{
+export async function runStage4Rk3Climate(days=30,onSample?:(s:ClimateDaySample)=>void,onProgress?:(p:Stage4Rk3ClimateProgress)=>void):Promise<Stage4Rk3ClimateResult>{
   if(!Number.isInteger(days)||days<1)throw new Error('RK3 climate days must be a positive integer');
   const h=buildCubedSphere(HORIZONTAL_N),v=buildStretchedVerticalGrid(VERTICAL_NZ,TOP_METERS,1.4),rates=buildModelTopSpongeRates(v),active=Array.from(rates.slice(1,-1)).filter(x=>x>0).length;
   if(active<MIN_ACTIVE_SPONGE_INTERFACES)throw new Error(`RK3 climate sponge under-resolved: ${active} active interfaces; require >=${MIN_ACTIVE_SPONGE_INTERFACES}`);
   const ref=buildHeldSuarezReference(v),seed=createHydrostaticState(h,v,ref);addHeldSuarezWavePerturbation(h,v,ref,seed,.05);
-  const gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,seed,4),initial=await gpu.downloadState(0),m0=diagnoseState(h,v,initial).dryMass,stepsPerQuarter=Math.round(21600/DT),samples:ClimateDaySample[]=[],failures:string[]=[],t0=performance.now(),opts={heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true} as const;
-  let finalZonal:ZonalMeanDiagnostics|undefined;
+  const gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,seed,4),initial=await gpu.downloadState(0),m0=diagnoseState(h,v,initial).dryMass,stepsPerQuarter=Math.round(21600/DT),stepsPerDay=Math.round(86400/DT),totalOuterSteps=days*stepsPerDay,samples:ClimateDaySample[]=[],failures:string[]=[],t0=performance.now(),opts={heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true} as const;
+  let finalZonal:ZonalMeanDiagnostics|undefined,completedOuterSteps=0;
   try{
     for(let segment=1;segment<=days*4;segment++){
-      let left=stepsPerQuarter,batches=0;
-      while(left>0){const n=Math.min(PRODUCTION_BATCH,left);gpu.stepBatch(DT,n,opts);left-=n;batches++;if(batches%2===0)await new Promise<void>(r=>setTimeout(r,0));}
-      await gpu.device.queue.onSubmittedWorkDone();
+      let left=stepsPerQuarter;
+      while(left>0){
+        const n=Math.min(PRODUCTION_BATCH,left);
+        gpu.stepBatch(DT,n,opts);
+        // Wait for this proven-size batch to actually finish before reporting
+        // progress.  This prevents the UI from showing queued work as simulated
+        // time and also avoids building an unbounded GPU queue.
+        await gpu.device.queue.onSubmittedWorkDone();
+        left-=n;completedOuterSteps+=n;
+        onProgress?.({simulatedDay:completedOuterSteps*DT/86400,targetDays:days,completedOuterSteps,totalOuterSteps,batchSize:n,elapsedMs:performance.now()-t0});
+        await new Promise<void>(r=>setTimeout(r,0));
+      }
       const day=segment/4,state=await gpu.downloadState(day*86400),d=diagnoseState(h,v,state),z=diagnoseZonalMeans(h,v,state,ZONAL_BINS),x=extra(h,v,state,DT),s:ClimateDaySample={day,massDrift:(d.dryMass-m0)/m0,maxW:d.maxAbsW,jet:z.maxUpperMidlatitudeWesterly,trade:z.meanTropicalLowLevelZonal,psi:z.maxAbsStreamfunction,nhPsi:z.nhDominantStreamfunction,shPsi:z.shDominantStreamfunction,invalid:d.nan||d.minRho<=0||d.minP<=0,...x};
       samples.push(s);onSample?.(s);finalZonal=z;
       if(s.invalid){failures.push(`day ${day}: invalid state`);break;}
