@@ -6,6 +6,7 @@ import { diagnoseState } from './solver/diagnostics.js';
 import { GpuStage4Rk3SplitReference } from './gpu/stage4Rk3SplitGpu.js';
 import { runStage4Rk3GpuMultistepAgreement } from './validation/stage4Rk3GpuMultistepAgreement.js';
 import { runStage4Rk3Climate } from './validation/stage4Rk3Climate.js';
+import type { Stage4Rk3ClimateProgress } from './validation/stage4Rk3Climate.js';
 import type { ClimateDaySample } from './validation/stage4Gpu.js';
 
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
@@ -14,6 +15,12 @@ const log=(x:string)=>{logEl.textContent=`${x}\n${logEl.textContent||''}`.slice(
 const agreeBtn=$<HTMLButtonElement>('agree'),climateBtn=$<HTMLButtonElement>('climate');
 let smoke=false;
 function lock(v:boolean){agreeBtn.disabled=v||!smoke;climateBtn.disabled=v||!smoke;}
+function climateProgress(p:Stage4Rk3ClimateProgress){
+  const pct=100*p.completedOuterSteps/p.totalOuterSteps;
+  $('climateStatus').textContent=`執行中 ${pct.toFixed(1)}% / Running ${pct.toFixed(1)}%`;
+  $('climateDay').textContent=`${p.simulatedDay.toFixed(3)} / ${p.targetDays} (GPU-complete)`;
+  $('climateElapsed').textContent=`${(p.elapsedMs/1000).toFixed(1)} s`;
+}
 function climateSample(s:ClimateDaySample){
   $('climateDay').textContent=`${s.day.toFixed(s.day%1===0?0:2)} / 30`;
   $('climateMass').textContent=s.massDrift.toExponential(3);
@@ -48,10 +55,10 @@ agreeBtn.onclick=()=>void(async()=>{
 })();
 
 climateBtn.onclick=()=>void(async()=>{
-  lock(true);$('climateStatus').textContent='執行中 / Running';$('climateStatus').className='';
-  log('30 日 production gate：3-stage RK3 predictor restart + predictor-relative split-explicit acoustic substeps (1×dt/3, 2×dt/4, 4×dt/4) + vertically implicit acoustic/gravity solve + Held–Suarez + complete 3-D momentum + Coriolis + implicit top absorber + acoustic divergence damping；outer dt=10 s。 / 30-day production gate uses the verified RK3 split-explicit integrator.');
+  lock(true);$('climateStatus').textContent='執行中 0.0% / Running 0.0%';$('climateStatus').className='';$('climateDay').textContent='0.000 / 30 (GPU-complete)';$('climateElapsed').textContent='0.0 s';
+  log('30 日 production gate：使用真機已驗證的 40-step GPU batch；每批完成後等待 GPU queue 並回報實際完成進度。數值核心仍為 3-stage RK3 predictor restart + predictor-relative split-explicit acoustic substeps (1×dt/3, 2×dt/4, 4×dt/4) + vertically implicit acoustic/gravity solve + Held–Suarez + complete 3-D momentum + Coriolis + implicit top absorber + acoustic divergence damping；outer dt=10 s。 / 30-day production gate uses the verified 40-step GPU batch and reports GPU-completed progress after every batch.');
   try{
-    const r=await runStage4Rk3Climate(30,climateSample);
+    const r=await runStage4Rk3Climate(30,climateSample,climateProgress);
     $('climateElapsed').textContent=`${(r.elapsedMs/1000).toFixed(2)} s`;
     $('climateStatus').textContent=r.passed?'通過 / PASS':'失敗 / FAIL';$('climateStatus').className=r.passed?'ok':'bad';
     log(r.passed?'30 日 RK3 Held–Suarez production gate 通過。 / 30-day RK3 Held–Suarez production gate PASS.':`30-day RK3 Held–Suarez gate FAIL:\n${r.failures.join('\n')}`);
