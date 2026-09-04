@@ -69,13 +69,13 @@ export async function runStage4Rk3Climate(days=30,onSample?:(s:ClimateDaySample)
       while(left>0){
         const n=Math.min(PRODUCTION_BATCH,left);
         gpu.stepBatch(DT,n,opts);
-        // Wait for this proven-size batch to actually finish before reporting
-        // progress.  This prevents the UI from showing queued work as simulated
-        // time and also avoids building an unbounded GPU queue.
+        // Waiting for submitted work already yields to the browser event loop.
+        // Do not add a timer-based yield here: background-tab timer throttling
+        // can delay setTimeout(0) for a minute or more and leave the GPU idle
+        // between otherwise healthy batches.
         await gpu.device.queue.onSubmittedWorkDone();
         left-=n;completedOuterSteps+=n;
         onProgress?.({simulatedDay:completedOuterSteps*DT/86400,targetDays:days,completedOuterSteps,totalOuterSteps,batchSize:n,elapsedMs:performance.now()-t0});
-        await new Promise<void>(r=>setTimeout(r,0));
       }
       const day=segment/4,state=await gpu.downloadState(day*86400),d=diagnoseState(h,v,state),z=diagnoseZonalMeans(h,v,state,ZONAL_BINS),x=extra(h,v,state,DT),s:ClimateDaySample={day,massDrift:(d.dryMass-m0)/m0,maxW:d.maxAbsW,jet:z.maxUpperMidlatitudeWesterly,trade:z.meanTropicalLowLevelZonal,psi:z.maxAbsStreamfunction,nhPsi:z.nhDominantStreamfunction,shPsi:z.shDominantStreamfunction,invalid:d.nan||d.minRho<=0||d.minP<=0,...x};
       samples.push(s);onSample?.(s);finalZonal=z;
