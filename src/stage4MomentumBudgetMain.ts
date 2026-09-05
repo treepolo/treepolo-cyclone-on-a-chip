@@ -29,11 +29,19 @@ const DT=10,STEPS_PER_QUARTER=Math.round(21600/DT),BATCH=40;
 type Point={day:number;aam:AxialAngularMomentumDiagnostics;eddy:EddyDiagnostics};
 type InstantBreakdown={
   mass:number;
+  massPlanetary:number;
+  massRelative:number;
   pressure:number;
+  pressureInterior:number;
+  pressureSeam:number;
+  pressureSplitClosure:number;
   momentum:number;
   coriolis:number;
+  planetaryCoriolisResidual:number;
+  relativeMomentumResidual:number;
   drag:number;
   inviscid:number;
+  pairClosure:number;
   withDrag:number;
   full:number;
   closure:number;
@@ -82,18 +90,48 @@ function instantaneousBreakdown(
   const coriolisT=computeStage4SlowTendencies(h,v,ref,state,{momentumTransport:false,coriolis:true,heldSuarez:false},rotation);
   const dragT=computeStage4SlowTendencies(h,v,ref,state,{momentumTransport:false,coriolis:false,heldSuarez:true},rotation);
   const fullT=computeStage4FrozenRhs(h,v,ref,state,{momentumTransport:true,coriolis:true,heldSuarez:true},rotation);
-  const mass=diagnoseAxialAngularMomentumTendency(h,v,state,pressureAndContinuity.rhoD,zeroU,rotation).totalTorque;
+
+  const massDiag=diagnoseAxialAngularMomentumTendency(h,v,state,pressureAndContinuity.rhoD,zeroU,rotation);
   const pressure=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,pressureAndContinuity.uEdge,rotation).totalTorque;
   const momentum=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,momentumT.uEdge,rotation).totalTorque;
   const coriolis=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,coriolisT.uEdge,rotation).totalTorque;
   const drag=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,dragT.uEdge,rotation).totalTorque;
   const full=diagnoseAxialAngularMomentumTendency(h,v,state,fullT.rhoD,fullT.uEdge,rotation).totalTorque;
-  const inviscid=mass+pressure+momentum+coriolis,withDrag=inviscid+drag;
-  return{mass,pressure,momentum,coriolis,drag,inviscid,withDrag,full,closure:full-withDrag};
+
+  // Pressure-gradient torque split by cubed-sphere panel topology. If the seam
+  // contribution dominates, the likely defect is panel coupling/metric
+  // compatibility; if the interior is comparable, the basic gradient/AAM
+  // pairing is already non-mimetic inside each panel.
+  const pressureInteriorU=new Float64Array(state.uEdge.length),pressureSeamU=new Float64Array(state.uEdge.length);
+  for(let e=0;e<h.edgeCount;e++){
+    const ge=h.edges[e]!,seam=h.cellPanel[ge.leftCell]!==h.cellPanel[ge.rightCell];
+    for(let k=0;k<v.nz;k++){
+      const q=e*v.nz+k;
+      if(seam)pressureSeamU[q]=pressureAndContinuity.uEdge[q]!;else pressureInteriorU[q]=pressureAndContinuity.uEdge[q]!;
+    }
+  }
+  const pressureInterior=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,pressureInteriorU,rotation).totalTorque;
+  const pressureSeam=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,pressureSeamU,rotation).totalTorque;
+  const pressureSplitClosure=pressure-pressureInterior-pressureSeam;
+
+  const mass=massDiag.massRedistributionTorque,massPlanetary=massDiag.planetaryMassRedistributionTorque,massRelative=massDiag.relativeMassRedistributionTorque;
+  const planetaryCoriolisResidual=massPlanetary+coriolis;
+  const relativeMomentumResidual=massRelative+momentum;
+  const inviscid=mass+pressure+momentum+coriolis;
+  const pairClosure=inviscid-(planetaryCoriolisResidual+relativeMomentumResidual+pressure);
+  const withDrag=inviscid+drag;
+  return{
+    mass,massPlanetary,massRelative,pressure,pressureInterior,pressureSeam,pressureSplitClosure,
+    momentum,coriolis,planetaryCoriolisResidual,relativeMomentumResidual,drag,inviscid,pairClosure,
+    withDrag,full,closure:full-withDrag,
+  };
 }
 function renderInstant(x:InstantBreakdown,lever:number):void{
   const show=(id:string,t:number)=>{$(id).textContent=`${fmtExp(t)} N m  (${signed(t/lever*86400)} m/s/day)`;};
-  show('instantMass',x.mass);show('instantPressure',x.pressure);show('instantMomentum',x.momentum);show('instantCoriolis',x.coriolis);show('instantDrag',x.drag);show('instantInviscid',x.inviscid);show('instantWithDrag',x.withDrag);show('instantFull',x.full);show('instantClosure',x.closure);
+  show('instantMass',x.mass);show('instantMassPlanetary',x.massPlanetary);show('instantMassRelative',x.massRelative);
+  show('instantPressure',x.pressure);show('instantPressureInterior',x.pressureInterior);show('instantPressureSeam',x.pressureSeam);show('instantPressureSplitClosure',x.pressureSplitClosure);
+  show('instantMomentum',x.momentum);show('instantCoriolis',x.coriolis);show('instantPlanetaryCoriolisResidual',x.planetaryCoriolisResidual);show('instantRelativeMomentumResidual',x.relativeMomentumResidual);
+  show('instantDrag',x.drag);show('instantInviscid',x.inviscid);show('instantPairClosure',x.pairClosure);show('instantWithDrag',x.withDrag);show('instantFull',x.full);show('instantClosure',x.closure);
 }
 
 async function refresh():Promise<void>{
@@ -114,7 +152,7 @@ runBtn.onclick=()=>void(async()=>{
     const startDay=src.cp.completedOuterSteps*DT/86400,startState=src.cp.state;
     const points:Point[]=[diagnose(h,v,startState,startDay,rotation)];renderPoint(points[0]!);
     const instant=instantaneousBreakdown(h,v,ref,startState,rotation);renderInstant(instant,points[0]!.aam.torqueLeverMass);
-    log(`INSTANT mass=${fmtExp(instant.mass)} pressure=${fmtExp(instant.pressure)} momentum=${fmtExp(instant.momentum)} coriolis=${fmtExp(instant.coriolis)} inviscid=${fmtExp(instant.inviscid)} drag=${fmtExp(instant.drag)} withDrag=${fmtExp(instant.withDrag)} full=${fmtExp(instant.full)} closure=${fmtExp(instant.closure)} Nm.`);
+    log(`INSTANT mass=${fmtExp(instant.mass)} [planetary=${fmtExp(instant.massPlanetary)} relative=${fmtExp(instant.massRelative)}] pressure=${fmtExp(instant.pressure)} [interior=${fmtExp(instant.pressureInterior)} seam=${fmtExp(instant.pressureSeam)} splitClosure=${fmtExp(instant.pressureSplitClosure)}] momentum=${fmtExp(instant.momentum)} coriolis=${fmtExp(instant.coriolis)} planetary+coriolis=${fmtExp(instant.planetaryCoriolisResidual)} relative+momentum=${fmtExp(instant.relativeMomentumResidual)} inviscid=${fmtExp(instant.inviscid)} pairClosure=${fmtExp(instant.pairClosure)} drag=${fmtExp(instant.drag)} withDrag=${fmtExp(instant.withDrag)} full=${fmtExp(instant.full)} closure=${fmtExp(instant.closure)} Nm.`);
     log(`start day ${startDay.toFixed(2)} AAM=${fmtExp(points[0]!.aam.absolute)} relAAM=${fmtExp(points[0]!.aam.relative)} dragTorque=${fmtExp(points[0]!.aam.dragTorque)} EKE=${fmt(points[0]!.eddy.midlatitudeEke,4)} poleward_vT=${fmt(points[0]!.eddy.midlatitudePolewardHeatFlux,5)} poleward_uv=${fmt(points[0]!.eddy.midlatitudePolewardMomentumFlux,5)}`);
     const gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,startState,4),opts={heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true} as const,t0=performance.now();
     try{
