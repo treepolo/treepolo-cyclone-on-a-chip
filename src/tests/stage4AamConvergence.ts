@@ -26,7 +26,6 @@ function run(n:number):Row{
     assert(Math.abs(nn-1)<2e-12&&Math.abs(d0)<2e-12&&Math.abs(d1)<2e-12&&ge.normal[0]*dx+ge.normal[1]*dy+ge.normal[2]*dz>0,`N=${n} edge ${e} is not an oriented unit face conormal`);
   }
 
-  // Smooth horizontally varying pressure field crossing every panel seam.
   const pState=createHydrostaticState(h,v,ref);
   for(let c=0;c<h.cellCount;c++){
     const x=h.cellCenters[c*3]!,y=h.cellCenters[c*3+1]!,z=h.cellCenters[c*3+2]!,shape=0.55*(x*x-y*y)+0.35*x*y+0.20*y*z;
@@ -35,10 +34,6 @@ function run(n:number):Row{
   const pFrozen=computeStage4FrozenRhs(h,v,ref,pState,{momentumTransport:false,coriolis:false,heldSuarez:false},g);
   const pTorque=diagnoseAxialAngularMomentumTendency(h,v,pState,zeroRho,pFrozen.uEdge,g).velocityTorque,pLever=diagnoseAxialAngularMomentum(h,v,pState,g).torqueLeverMass;
 
-  // Smooth generic tangential wind.  In the continuum these paired identities
-  // vanish independently:
-  //   planetary mass redistribution + Coriolis
-  //   relative-AAM mass redistribution + material momentum transport
   const s=createHydrostaticState(h,v,ref);
   setAnalyticCellWind(h,g,s,(r,east,north,k)=>{
     const vertical=1+0.08*k,ue=vertical*(11+4*r[0]-3*r[1]+2*r[2]),vn=vertical*(6*r[0]+5*r[1]-4*r[2]+2*r[0]*r[1]);
@@ -62,6 +57,7 @@ try{
   console.log(`refine 8->16: planetary+coriolis=${pc816.toFixed(3)} relative+momentum=${rm816.toFixed(3)}`);
   console.log(`refine 16->32: planetary+coriolis=${pc1632.toFixed(3)} relative+momentum=${rm1632.toFixed(3)}`);
   assert(pc816>3&&pc1632>3,`planetary+Coriolis lost near-second-order convergence: ${pc816}, ${pc1632}`);
-  assert(rm816>1.5&&rm1632>1.5,`material momentum pair lost first-order convergence: ${rm816}, ${rm1632}`);
+  assert(rm816>2.5&&rm1632>3.2,`limited MUSCL material-momentum pair lost near-second-order convergence: ${rm816}, ${rm1632}`);
+  assert(Math.abs(n8.relativeMomentum)<0.05,`N8 limited-MUSCL material momentum AAM residual regressed: ${n8.relativeMomentum} m/s/day`);
   assert(Math.abs(n32.pressure)<0.02,`smooth closed-sphere pressure torque too large at N32: ${n32.pressure} m/s/day`);
 }catch(e){console.error('FAIL Stage4 production AAM spatial-convergence regression');console.error(e);process.exitCode=1;}
