@@ -2,7 +2,7 @@ import { angle3,cross3,dot3,normalize3,scale3,sphericalTriangleAreaUnit,type Vec
 import { buildCubedSphere,type CubedSphereGrid,type HorizontalEdge } from './cubedSphere.js';
 
 function pointKey(p:Vec3):string{const q=1e12;return `${Math.round(p[0]*q)},${Math.round(p[1]*q)},${Math.round(p[2]*q)}`;}
-function averageUnit(points:readonly Vec3[]):Vec3{let x=0,y=0,z=0;for(const p of points){x+=p[0];y+=p[1];z+=p[2];}return normalize3([x,y,z]);}
+function averageUnit(points:readonly Vec3[]):Vec3{let x=0,y=0,z=0;for(const p of points){x+=p[0];y+=p[1];z+=p[2];}return normalize3([x,y,z] as Vec3);}
 function cellCenter(arr:Float64Array,c:number):Vec3{return[arr[c*3]!,arr[c*3+1]!,arr[c*3+2]!];}
 function sharedEndpointKey(a:HorizontalEdge,b:HorizontalEdge):string{const a0=pointKey(a.p0),a1=pointKey(a.p1),b0=pointKey(b.p0),b1=pointKey(b.p1);if(a0===b0||a0===b1)return a0;if(a1===b0||a1===b1)return a1;throw new Error('adjacent cell edges do not share a vertex');}
 
@@ -31,7 +31,7 @@ export function buildModifiedCubedSphere(n:number):CubedSphereGrid{
     }
   }
 
-  // cellEdges are stored in cyclic perimeter order by buildCubedSphere.  The
+  // cellEdges are stored in cyclic perimeter order by buildCubedSphere. The
   // shared vertex of consecutive edges therefore gives a cyclic corner list.
   const cellCornerKeys:string[][]=Array.from({length:raw.cellCount},()=>[]);
   for(let c=0;c<raw.cellCount;c++)for(let s=0;s<4;s++){
@@ -62,9 +62,10 @@ export function buildModifiedCubedSphere(n:number):CubedSphereGrid{
   for(let c=0;c<raw.cellCount;c++){
     const q=cellCornerKeys[c]!.map(k=>{const p=movedVertex.get(k);if(!p)throw new Error('missing relocated cell corner');return p;});
     const area=sphericalTriangleAreaUnit(q[0]!,q[1]!,q[2]!)+sphericalTriangleAreaUnit(q[0]!,q[2]!,q[3]!);
-    if(!(area>0)&&Number.isFinite(area))throw new Error(`invalid modified cubed-sphere cell area at ${c}: ${area}`);
+    if(!(area>0)||!Number.isFinite(area))throw new Error(`invalid modified cubed-sphere cell area at ${c}: ${area}`);
     areas[c]=area;totalAreaUnit+=area;
   }
+  if(Math.abs(totalAreaUnit-4*Math.PI)>2e-10)throw new Error(`modified cubed-sphere area does not close: ${totalAreaUnit}`);
 
   return{...raw,cellCenters:centers,cellAreaUnit:areas,edges,totalAreaUnit};
 }
