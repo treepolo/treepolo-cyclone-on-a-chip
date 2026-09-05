@@ -70,9 +70,14 @@ struct HadvSlot{info:vec4<i32>,face:vec4<f32>,mid:vec4<f32>};struct GradPair{eas
 }
 `;
 const VADV=COMMON+/* wgsl */`
-@group(0)@binding(1)var<storage,read>layerRef:array<f32>;@group(0)@binding(2)var<storage,read>w:array<f32>;@group(0)@binding(3)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(4)var<storage,read_write>dv:array<vec4<f32>>;
-fn z(k:u32)->f32{return layerRef[k*5u];}
-@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let wb=w[c*(P.nz+1u)+k];let wt=w[c*(P.nz+1u)+k+1u];let wc=.5*(wb+wt);var d=dv[q].xyz;let cur=cw[q].xyz;if(wc>0.0&&k>0u){d-=wc*(cur-cw[q-1u].xyz)/(z(k)-z(k-1u));}else if(wc<0.0&&k+1u<P.nz){d-=wc*(cw[q+1u].xyz-cur)/(z(k+1u)-z(k));}dv[q]=vec4<f32>(d,0.0);}
+@group(0)@binding(1)var<storage,read>cellArea:array<f32>;@group(0)@binding(2)var<storage,read>layerRef:array<f32>;@group(0)@binding(3)var<storage,read>rhoInterfaceRef:array<f32>;@group(0)@binding(4)var<storage,read>rho:array<f32>;@group(0)@binding(5)var<storage,read>w:array<f32>;@group(0)@binding(6)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(7)var<storage,read_write>dv:array<vec4<f32>>;
+fn dz(k:u32)->f32{return layerRef[k*5u+1u];}fn r0(k:u32)->f32{return layerRef[k*5u+3u];}
+@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){
+ let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let area=cellArea[c];let cur=cw[q].xyz;var sumM=0.0;var sumQ=vec3<f32>(0.0);
+ let il=k;if(il>0u){let wl=w[c*(P.nz+1u)+il];let sk=select(il,il-1u,wl>=0.0);let src=c*P.nz+sk;let m=(rhoInterfaceRef[il]+rho[src]-r0(sk))*wl*area;let outward=-m;sumM+=outward;sumQ+=outward*cw[c*P.nz+sk].xyz;}
+ let iu=k+1u;if(iu<P.nz){let wu=w[c*(P.nz+1u)+iu];let sk=select(iu,iu-1u,wu>=0.0);let src=c*P.nz+sk;let m=(rhoInterfaceRef[iu]+rho[src]-r0(sk))*wu*area;let outward=m;sumM+=outward;sumQ+=outward*cw[c*P.nz+sk].xyz;}
+ let den=max(rho[q]*area*dz(k),1e-12);let a=(-sumQ+cur*sumM)/den;dv[q]=vec4<f32>(dv[q].xyz+a,0.0);
+}
 `;
 const CORIOLIS=COMMON+/* wgsl */`
 struct CellGeom{east:vec4<f32>,north:vec4<f32>};@group(0)@binding(1)var<storage,read>cellGeom:array<CellGeom>;@group(0)@binding(2)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(3)var<storage,read_write>dv:array<vec4<f32>>;
@@ -101,10 +106,10 @@ const DRAG=COMMON+/* wgsl */`
 /** GPU mirror of computeStage4SlowTendencies(); isolated until agreement passes. */
 export class GpuStage4SlowTendencyReference{
   readonly device:GPUAny;readonly scalarT:GPUAny;readonly uT:GPUAny;readonly wT:GPUAny;readonly hFlux:GPUAny;readonly vFlux:GPUAny;
-  private readonly params:GPUAny;private readonly cw:GPUAny;private readonly dv:GPUAny;private readonly hGrad:GPUAny;private readonly gradWeights:GPUAny;private readonly hadvSlots:GPUAny;private readonly pipelines:Record<string,GPUAny>={};private readonly groups:Record<string,GPUAny>={};
+  private readonly params:GPUAny;private readonly cw:GPUAny;private readonly dv:GPUAny;private readonly hGrad:GPUAny;private readonly gradWeights:GPUAny;private readonly hadvSlots:GPUAny;private readonly rhoInterfaceRef:GPUAny;private readonly pipelines:Record<string,GPUAny>={};private readonly groups:Record<string,GPUAny>={};
   private constructor(public readonly core:GpuRotatingDryCore){
     this.device=core.device;const U=(globalThis as any).GPUBufferUsage,storage=U.STORAGE|U.COPY_DST|U.COPY_SRC,uniform=U.UNIFORM|U.COPY_DST,h=core.h,v=core.v,g=buildRotationGeometry(h),stencil=buildStage4GradientStencilData(h);
-    this.params=makeEmpty(this.device,48,uniform,'Stage4 slow tendency params');this.scalarT=makeEmpty(this.device,h.cellCount*v.nz*8,storage,'Stage4 slow scalar tendency');this.uT=makeEmpty(this.device,h.edgeCount*v.nz*4,storage,'Stage4 slow u tendency');this.wT=makeEmpty(this.device,h.cellCount*(v.nz+1)*4,storage,'Stage4 slow w tendency');this.hFlux=makeEmpty(this.device,h.edgeCount*v.nz*8,storage,'Stage4 slow horizontal perturbation flux');this.vFlux=makeEmpty(this.device,h.cellCount*(v.nz+1)*8,storage,'Stage4 slow vertical perturbation flux');this.cw=makeEmpty(this.device,h.cellCount*v.nz*16,storage,'Stage4 slow cell wind');this.dv=makeEmpty(this.device,h.cellCount*v.nz*16,storage,'Stage4 slow cell velocity tendency');this.hGrad=makeEmpty(this.device,h.cellCount*v.nz*32,storage,'Stage4 slow limited horizontal wind gradients');this.gradWeights=makeBuffer(this.device,stencil.weights,storage,'Stage4 slow horizontal gradient weights');this.hadvSlots=makeBuffer(this.device,buildHadvSlots(core,g),storage,'Stage4 slow horizontal advection slots');
+    this.params=makeEmpty(this.device,48,uniform,'Stage4 slow tendency params');this.scalarT=makeEmpty(this.device,h.cellCount*v.nz*8,storage,'Stage4 slow scalar tendency');this.uT=makeEmpty(this.device,h.edgeCount*v.nz*4,storage,'Stage4 slow u tendency');this.wT=makeEmpty(this.device,h.cellCount*(v.nz+1)*4,storage,'Stage4 slow w tendency');this.hFlux=makeEmpty(this.device,h.edgeCount*v.nz*8,storage,'Stage4 slow horizontal perturbation flux');this.vFlux=makeEmpty(this.device,h.cellCount*(v.nz+1)*8,storage,'Stage4 slow vertical perturbation flux');this.cw=makeEmpty(this.device,h.cellCount*v.nz*16,storage,'Stage4 slow cell wind');this.dv=makeEmpty(this.device,h.cellCount*v.nz*16,storage,'Stage4 slow cell velocity tendency');this.hGrad=makeEmpty(this.device,h.cellCount*v.nz*32,storage,'Stage4 slow limited horizontal wind gradients');this.gradWeights=makeBuffer(this.device,stencil.weights,storage,'Stage4 slow horizontal gradient weights');this.hadvSlots=makeBuffer(this.device,buildHadvSlots(core,g),storage,'Stage4 slow horizontal advection slots');this.rhoInterfaceRef=makeBuffer(this.device,Float32Array.from(core.ref.rhoInterface),storage,'Stage4 slow interface reference density');
     const defs:[string,string,Array<GPUAny>][]=[
       ['hpert',HPERT,[core.core.buffers.edgeCells,core.core.buffers.edgeMetric,core.core.buffers.layerRef,core.core.buffers.rho,core.core.buffers.rhoTheta,core.core.buffers.u,this.hFlux]],
       ['vpert',VPERT,[core.core.buffers.cellArea,core.core.buffers.layerRef,core.core.buffers.rho,core.core.buffers.rhoTheta,core.core.buffers.w,this.vFlux]],
@@ -112,7 +117,7 @@ export class GpuStage4SlowTendencyReference{
       ['cellwind',CELLWIND,[core.buffers.cellGeom,core.core.buffers.cellEdges,core.buffers.recon,core.core.buffers.u,this.cw]],
       ['hgradlim',HGRADLIM,[this.hadvSlots,this.gradWeights,this.cw,this.hGrad]],
       ['hadv',HADV,[this.hadvSlots,core.core.buffers.edgeMetric,core.core.buffers.rho,core.core.buffers.u,this.cw,this.hGrad,core.core.buffers.cellArea,this.dv]],
-      ['vadv',VADV,[core.core.buffers.layerRef,core.core.buffers.w,this.cw,this.dv]],
+      ['vadv',VADV,[core.core.buffers.cellArea,core.core.buffers.layerRef,this.rhoInterfaceRef,core.core.buffers.rho,core.core.buffers.w,this.cw,this.dv]],
       ['coriolis',CORIOLIS,[core.buffers.cellGeom,this.cw,this.dv]],
       ['project',PROJECT,[core.core.buffers.edgeCells,core.buffers.edgeGeom,core.buffers.cellGeom,this.dv,this.uT]],
       ['wtend',WTEND,[core.buffers.wAdvMeta,core.core.buffers.edgeMetric,core.core.buffers.layerRef,core.core.buffers.cellArea,core.core.buffers.u,core.core.buffers.w,this.wT]],
@@ -141,5 +146,5 @@ export class GpuStage4SlowTendencyReference{
     for(let q=0;q<rho.length;q++){rho[q]=st[q*2]!;x[q]=st[q*2+1]!;}for(let q=0;q<hm.length;q++)hm[q]=hf[q*2]!;for(let q=0;q<vm.length;q++)vm[q]=vf[q*2]!;
     return{rhoD:rho,rhoThetaM:x,uEdge:Float64Array.from(u),wInterface:Float64Array.from(w),hMassFlux:hm,vMassFlux:vm};
   }
-  destroy():void{this.params.destroy?.();this.scalarT.destroy?.();this.uT.destroy?.();this.wT.destroy?.();this.hFlux.destroy?.();this.vFlux.destroy?.();this.cw.destroy?.();this.dv.destroy?.();this.hGrad.destroy?.();this.gradWeights.destroy?.();this.hadvSlots.destroy?.();}
+  destroy():void{this.params.destroy?.();this.scalarT.destroy?.();this.uT.destroy?.();this.wT.destroy?.();this.hFlux.destroy?.();this.vFlux.destroy?.();this.cw.destroy?.();this.dv.destroy?.();this.hGrad.destroy?.();this.gradWeights.destroy?.();this.hadvSlots.destroy?.();this.rhoInterfaceRef.destroy?.();}
 }
