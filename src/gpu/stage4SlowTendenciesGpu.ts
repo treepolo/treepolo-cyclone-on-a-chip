@@ -1,10 +1,31 @@
 import { DRY_AIR, EARTH } from '../core/constants.js';
+import { buildRotationGeometry, type RotationGeometry } from '../physics/rotation.js';
 import { Stage4SlowTendencies } from '../solver/stage4SlowTendenciesCpu.js';
 import { DryState } from '../solver/state.js';
+import { buildStage4GradientStencilData } from './stage4GradientStencil.js';
 import { GpuRotatingDryCore } from './rotatingDryCoreGpu.js';
 
 type GPUAny=any;
+function makeBuffer(device:GPUAny,data:ArrayBufferView,usage:number,label:string):GPUAny{const size=Math.max(4,Math.ceil(data.byteLength/4)*4),b=device.createBuffer({label,size,usage,mappedAtCreation:true});new Uint8Array(b.getMappedRange()).set(new Uint8Array(data.buffer,data.byteOffset,data.byteLength));b.unmap();return b;}
 function makeEmpty(device:GPUAny,size:number,usage:number,label:string):GPUAny{return device.createBuffer({label,size:Math.max(4,Math.ceil(size/4)*4),usage});}
+function clampDot(x:number):number{return Math.max(-1,Math.min(1,x));}
+function faceLocalDelta(h:GpuRotatingDryCore['h'],g:RotationGeometry,c:number,eid:number):readonly[number,number]{
+  const o=c*3,m=h.edges[eid]!.midpoint,rx=g.radial[o]!,ry=g.radial[o+1]!,rz=g.radial[o+2]!,mu=clampDot(rx*m[0]+ry*m[1]+rz*m[2]),ang=Math.acos(mu),tx=m[0]-mu*rx,ty=m[1]-mu*ry,tz=m[2]-mu*rz,tm=Math.hypot(tx,ty,tz);
+  if(!(ang>0)||!(tm>0))return[0,0];
+  const scale=EARTH.radius*ang/tm,dx=tx*scale,dy=ty*scale,dz=tz*scale;
+  return[dx*g.east[o]!+dy*g.east[o+1]!+dz*g.east[o+2]!,dx*g.north[o]!+dy*g.north[o+1]!+dz*g.north[o+2]!];
+}
+/** Per cell-slot data packed as WGSL HadvSlot = 3 vec4 = 48 bytes. */
+function buildHadvSlots(core:GpuRotatingDryCore,g:RotationGeometry):Uint8Array{
+  const h=core.h,ab=new ArrayBuffer(h.cellCount*4*48),ii=new Int32Array(ab),ff=new Float32Array(ab);
+  for(let c=0;c<h.cellCount;c++)for(let slot=0;slot<4;slot++){
+    const eid=h.cellEdges[c*4+slot]!,edge=h.edges[eid]!,nb=edge.leftCell===c?edge.rightCell:edge.leftCell,base=(c*4+slot)*12,self=faceLocalDelta(h,g,c,eid),other=faceLocalDelta(h,g,nb,eid);
+    ii[base]=eid;ii[base+1]=nb;ii[base+2]=h.cellEdgeSigns[c*4+slot]!;ii[base+3]=0;
+    ff[base+4]=self[0];ff[base+5]=self[1];ff[base+6]=other[0];ff[base+7]=other[1];
+    ff[base+8]=edge.midpoint[0];ff[base+9]=edge.midpoint[1];ff[base+10]=edge.midpoint[2];ff[base+11]=0;
+  }
+  return new Uint8Array(ab);
+}
 const COMMON=/* wgsl */`
 struct Params{nz:u32,edgeCount:u32,cellCount:u32,_pad0:u32,radius:f32,omega:f32,rd:f32,gamma:f32,pRef:f32,kappa:f32,_pad1:vec2<f32>};
 @group(0)@binding(0)var<uniform>P:Params;
@@ -29,9 +50,24 @@ const CELLWIND=COMMON+/* wgsl */`
 struct CellGeom{east:vec4<f32>,north:vec4<f32>};@group(0)@binding(1)var<storage,read>cellGeom:array<CellGeom>;@group(0)@binding(2)var<storage,read>cellEdges:array<vec4<u32>>;@group(0)@binding(3)var<storage,read>recon:array<vec2<f32>>;@group(0)@binding(4)var<storage,read>u:array<f32>;@group(0)@binding(5)var<storage,read_write>cw:array<vec4<f32>>;
 @compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let ee=cellEdges[c];var le=0.0;var ln=0.0;for(var s:u32=0u;s<4u;s++){let co=recon[c*4u+s];let uv=u[ee[s]*P.nz+k];le+=co.x*uv;ln+=co.y*uv;}cw[q]=vec4<f32>(le*cellGeom[c].east.xyz+ln*cellGeom[c].north.xyz,0.0);}
 `;
+const HGRADLIM=COMMON+/* wgsl */`
+struct HadvSlot{meta:vec4<i32>,face:vec4<f32>,mid:vec4<f32>};struct GradPair{east:vec4<f32>,north:vec4<f32>};
+@group(0)@binding(1)var<storage,read>slots:array<HadvSlot>;@group(0)@binding(2)var<storage,read>weights:array<GradPair>;@group(0)@binding(3)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(4)var<storage,read_write>grad:array<GradPair>;
+@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){
+ let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let base=cw[q].xyz;var lo=base;var hi=base;var ge=vec3<f32>(0.0);var gn=vec3<f32>(0.0);let w=weights[c];
+ for(var s:u32=0u;s<4u;s++){let nb=u32(slots[c*4u+s].meta.y);let nv=cw[nb*P.nz+k].xyz;lo=min(lo,nv);hi=max(hi,nv);let d=nv-base;ge+=w.east[s]*d;gn+=w.north[s]*d;}
+ var phi=1.0;for(var s:u32=0u;s<4u;s++){let fd=slots[c*4u+s].face.xy;let d=ge*fd.x+gn*fd.y;for(var j:u32=0u;j<3u;j++){let x=d[j];if(x>1e-15){phi=min(phi,(hi[j]-base[j])/x);}else if(x< -1e-15){phi=min(phi,(lo[j]-base[j])/x);}}}
+ phi=clamp(phi,0.0,1.0);grad[q].east=vec4<f32>(phi*ge,0.0);grad[q].north=vec4<f32>(phi*gn,0.0);
+}
+`;
 const HADV=COMMON+/* wgsl */`
-@group(0)@binding(1)var<storage,read>cellEdges:array<vec4<u32>>;@group(0)@binding(2)var<storage,read>cellSigns:array<vec4<i32>>;@group(0)@binding(3)var<storage,read>edgeCells:array<vec2<u32>>;@group(0)@binding(4)var<storage,read>edgeMetric:array<vec2<f32>>;@group(0)@binding(5)var<storage,read>cellArea:array<f32>;@group(0)@binding(6)var<storage,read>u:array<f32>;@group(0)@binding(7)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(8)var<storage,read_write>dv:array<vec4<f32>>;
-@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let ee=cellEdges[c];let ss=cellSigns[c];let cur=cw[q].xyz;var d=vec3<f32>(0.0);for(var s:u32=0u;s<4u;s++){let e=ee[s];let outward=f32(ss[s])*u[e*P.nz+k];if(outward<0.0){let cc=edgeCells[e];let n=select(cc.x,cc.y,cc.x==c);let coef=-outward*edgeMetric[e].x/cellArea[c];d+=coef*(cw[n*P.nz+k].xyz-cur);}}dv[q]=vec4<f32>(d,0.0);}
+struct HadvSlot{meta:vec4<i32>,face:vec4<f32>,mid:vec4<f32>};struct GradPair{east:vec4<f32>,north:vec4<f32>};
+@group(0)@binding(1)var<storage,read>slots:array<HadvSlot>;@group(0)@binding(2)var<storage,read>edgeMetric:array<vec2<f32>>;@group(0)@binding(3)var<storage,read>rho:array<f32>;@group(0)@binding(4)var<storage,read>u:array<f32>;@group(0)@binding(5)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(6)var<storage,read>grad:array<GradPair>;@group(0)@binding(7)var<storage,read>cellArea:array<f32>;@group(0)@binding(8)var<storage,read_write>dv:array<vec4<f32>>;
+@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){
+ let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let cur=cw[q].xyz;var sumM=0.0;var sumQ=vec3<f32>(0.0);
+ for(var s:u32=0u;s<4u;s++){let sg=slots[c*4u+s];let e=u32(sg.meta.x);let nb=u32(sg.meta.y);let sign=f32(sg.meta.z);let ue=u[e*P.nz+k];let selfUp=ue*sign>=0.0;let up=select(nb,c,selfUp);let fd=select(sg.face.zw,sg.face.xy,selfUp);let gg=grad[up*P.nz+k];var qf=cw[up*P.nz+k].xyz+gg.east.xyz*fd.x+gg.north.xyz*fd.y;let m=sg.mid.xyz;qf-=m*dot(qf,m);let M=sign*rho[up*P.nz+k]*ue*edgeMetric[e].x;sumM+=M;sumQ+=M*qf;}
+ let den=max(rho[q]*cellArea[c],1e-12);let a=(-sumQ+cur*sumM)/den;dv[q]=vec4<f32>(a,0.0);
+}
 `;
 const VADV=COMMON+/* wgsl */`
 @group(0)@binding(1)var<storage,read>layerRef:array<f32>;@group(0)@binding(2)var<storage,read>w:array<f32>;@group(0)@binding(3)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(4)var<storage,read_write>dv:array<vec4<f32>>;
@@ -65,16 +101,17 @@ const DRAG=COMMON+/* wgsl */`
 /** GPU mirror of computeStage4SlowTendencies(); isolated until agreement passes. */
 export class GpuStage4SlowTendencyReference{
   readonly device:GPUAny;readonly scalarT:GPUAny;readonly uT:GPUAny;readonly wT:GPUAny;readonly hFlux:GPUAny;readonly vFlux:GPUAny;
-  private readonly params:GPUAny;private readonly cw:GPUAny;private readonly dv:GPUAny;private readonly pipelines:Record<string,GPUAny>={};private readonly groups:Record<string,GPUAny>={};
+  private readonly params:GPUAny;private readonly cw:GPUAny;private readonly dv:GPUAny;private readonly hGrad:GPUAny;private readonly gradWeights:GPUAny;private readonly hadvSlots:GPUAny;private readonly pipelines:Record<string,GPUAny>={};private readonly groups:Record<string,GPUAny>={};
   private constructor(public readonly core:GpuRotatingDryCore){
-    this.device=core.device;const U=(globalThis as any).GPUBufferUsage,storage=U.STORAGE|U.COPY_DST|U.COPY_SRC,uniform=U.UNIFORM|U.COPY_DST,h=core.h,v=core.v;
-    this.params=makeEmpty(this.device,48,uniform,'Stage4 slow tendency params');this.scalarT=makeEmpty(this.device,h.cellCount*v.nz*8,storage,'Stage4 slow scalar tendency');this.uT=makeEmpty(this.device,h.edgeCount*v.nz*4,storage,'Stage4 slow u tendency');this.wT=makeEmpty(this.device,h.cellCount*(v.nz+1)*4,storage,'Stage4 slow w tendency');this.hFlux=makeEmpty(this.device,h.edgeCount*v.nz*8,storage,'Stage4 slow horizontal perturbation flux');this.vFlux=makeEmpty(this.device,h.cellCount*(v.nz+1)*8,storage,'Stage4 slow vertical perturbation flux');this.cw=makeEmpty(this.device,h.cellCount*v.nz*16,storage,'Stage4 slow cell wind');this.dv=makeEmpty(this.device,h.cellCount*v.nz*16,storage,'Stage4 slow cell velocity tendency');
+    this.device=core.device;const U=(globalThis as any).GPUBufferUsage,storage=U.STORAGE|U.COPY_DST|U.COPY_SRC,uniform=U.UNIFORM|U.COPY_DST,h=core.h,v=core.v,g=buildRotationGeometry(h),stencil=buildStage4GradientStencilData(h);
+    this.params=makeEmpty(this.device,48,uniform,'Stage4 slow tendency params');this.scalarT=makeEmpty(this.device,h.cellCount*v.nz*8,storage,'Stage4 slow scalar tendency');this.uT=makeEmpty(this.device,h.edgeCount*v.nz*4,storage,'Stage4 slow u tendency');this.wT=makeEmpty(this.device,h.cellCount*(v.nz+1)*4,storage,'Stage4 slow w tendency');this.hFlux=makeEmpty(this.device,h.edgeCount*v.nz*8,storage,'Stage4 slow horizontal perturbation flux');this.vFlux=makeEmpty(this.device,h.cellCount*(v.nz+1)*8,storage,'Stage4 slow vertical perturbation flux');this.cw=makeEmpty(this.device,h.cellCount*v.nz*16,storage,'Stage4 slow cell wind');this.dv=makeEmpty(this.device,h.cellCount*v.nz*16,storage,'Stage4 slow cell velocity tendency');this.hGrad=makeEmpty(this.device,h.cellCount*v.nz*32,storage,'Stage4 slow limited horizontal wind gradients');this.gradWeights=makeBuffer(this.device,stencil.weights,storage,'Stage4 slow horizontal gradient weights');this.hadvSlots=makeBuffer(this.device,buildHadvSlots(core,g),storage,'Stage4 slow horizontal advection slots');
     const defs:[string,string,Array<GPUAny>][]=[
       ['hpert',HPERT,[core.core.buffers.edgeCells,core.core.buffers.edgeMetric,core.core.buffers.layerRef,core.core.buffers.rho,core.core.buffers.rhoTheta,core.core.buffers.u,this.hFlux]],
       ['vpert',VPERT,[core.core.buffers.cellArea,core.core.buffers.layerRef,core.core.buffers.rho,core.core.buffers.rhoTheta,core.core.buffers.w,this.vFlux]],
       ['sdiv',SDIV,[core.core.buffers.cellArea,core.core.buffers.layerRef,core.core.buffers.cellEdges,core.core.buffers.cellSigns,this.hFlux,this.vFlux,this.scalarT]],
       ['cellwind',CELLWIND,[core.buffers.cellGeom,core.core.buffers.cellEdges,core.buffers.recon,core.core.buffers.u,this.cw]],
-      ['hadv',HADV,[core.core.buffers.cellEdges,core.core.buffers.cellSigns,core.core.buffers.edgeCells,core.core.buffers.edgeMetric,core.core.buffers.cellArea,core.core.buffers.u,this.cw,this.dv]],
+      ['hgradlim',HGRADLIM,[this.hadvSlots,this.gradWeights,this.cw,this.hGrad]],
+      ['hadv',HADV,[this.hadvSlots,core.core.buffers.edgeMetric,core.core.buffers.rho,core.core.buffers.u,this.cw,this.hGrad,core.core.buffers.cellArea,this.dv]],
       ['vadv',VADV,[core.core.buffers.layerRef,core.core.buffers.w,this.cw,this.dv]],
       ['coriolis',CORIOLIS,[core.buffers.cellGeom,this.cw,this.dv]],
       ['project',PROJECT,[core.core.buffers.edgeCells,core.buffers.edgeGeom,core.buffers.cellGeom,this.dv,this.uT]],
@@ -92,13 +129,11 @@ export class GpuStage4SlowTendencyReference{
   encodeIntoPass(p:GPUAny,heldSuarez=true,momentum=true,coriolis=true):void{
     const h=this.core.h,v=this.core.v;
     this.dispatch(p,'hpert',h.edgeCount*v.nz);this.dispatch(p,'vpert',h.cellCount*(v.nz+1));this.dispatch(p,'sdiv',h.cellCount*v.nz);
-    if(momentum||coriolis){this.dispatch(p,'cellwind',h.cellCount*v.nz);if(momentum){this.dispatch(p,'hadv',h.cellCount*v.nz);this.dispatch(p,'vadv',h.cellCount*v.nz);}if(coriolis)this.dispatch(p,'coriolis',h.cellCount*v.nz);this.dispatch(p,'project',h.edgeCount*v.nz);}
+    if(momentum||coriolis){this.dispatch(p,'cellwind',h.cellCount*v.nz);if(momentum){this.dispatch(p,'hgradlim',h.cellCount*v.nz);this.dispatch(p,'hadv',h.cellCount*v.nz);this.dispatch(p,'vadv',h.cellCount*v.nz);}if(coriolis)this.dispatch(p,'coriolis',h.cellCount*v.nz);this.dispatch(p,'project',h.edgeCount*v.nz);}
     if(momentum)this.dispatch(p,'wtend',h.cellCount*(v.nz+1));
     if(heldSuarez){this.dispatch(p,'thermal',h.cellCount*v.nz);this.dispatch(p,'drag',h.edgeCount*v.nz);}
   }
-  encode(enc:GPUAny,heldSuarez=true,momentum=true,coriolis=true):void{
-    this.clear(enc);const p=enc.beginComputePass();this.encodeIntoPass(p,heldSuarez,momentum,coriolis);p.end();
-  }
+  encode(enc:GPUAny,heldSuarez=true,momentum=true,coriolis=true):void{this.clear(enc);const p=enc.beginComputePass();this.encodeIntoPass(p,heldSuarez,momentum,coriolis);p.end();}
   compute(heldSuarez=true,momentum=true,coriolis=true):void{this.prepare();const enc=this.device.createCommandEncoder({label:'Stage4 frozen slow tendency reference'});this.encode(enc,heldSuarez,momentum,coriolis);this.device.queue.submit([enc.finish()]);}
   private async read(buffer:GPUAny,count:number):Promise<Float32Array>{const U=(globalThis as any).GPUBufferUsage,M=(globalThis as any).GPUMapMode,bytes=count*4,stage=this.device.createBuffer({size:Math.max(4,bytes),usage:U.COPY_DST|U.MAP_READ}),enc=this.device.createCommandEncoder();enc.copyBufferToBuffer(buffer,0,stage,0,bytes);this.device.queue.submit([enc.finish()]);await stage.mapAsync(M.READ);const out=new Float32Array(stage.getMappedRange().slice(0));stage.unmap();stage.destroy();return out;}
   async download():Promise<Stage4SlowTendencies>{
@@ -106,5 +141,5 @@ export class GpuStage4SlowTendencyReference{
     for(let q=0;q<rho.length;q++){rho[q]=st[q*2]!;x[q]=st[q*2+1]!;}for(let q=0;q<hm.length;q++)hm[q]=hf[q*2]!;for(let q=0;q<vm.length;q++)vm[q]=vf[q*2]!;
     return{rhoD:rho,rhoThetaM:x,uEdge:Float64Array.from(u),wInterface:Float64Array.from(w),hMassFlux:hm,vMassFlux:vm};
   }
-  destroy():void{this.params.destroy?.();this.scalarT.destroy?.();this.uT.destroy?.();this.wT.destroy?.();this.hFlux.destroy?.();this.vFlux.destroy?.();this.cw.destroy?.();this.dv.destroy?.();}
+  destroy():void{this.params.destroy?.();this.scalarT.destroy?.();this.uT.destroy?.();this.wT.destroy?.();this.hFlux.destroy?.();this.vFlux.destroy?.();this.cw.destroy?.();this.dv.destroy?.();this.hGrad.destroy?.();this.gradWeights.destroy?.();this.hadvSlots.destroy?.();}
 }
