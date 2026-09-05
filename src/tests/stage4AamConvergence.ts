@@ -1,27 +1,37 @@
 declare const process:{exitCode?:number};
-import { DRY_AIR, EARTH } from '../core/constants.js';
-import { buildCubedSphere } from '../grid/cubedSphere.js';
+import { DRY_AIR } from '../core/constants.js';
+import { buildCubedSphere, type CubedSphereGrid } from '../grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from '../grid/vertical.js';
 import { buildHeldSuarezReference } from '../physics/heldSuarez.js';
 import { buildRotationGeometry, setAnalyticCellWind } from '../physics/rotation.js';
 import { diagnoseAxialAngularMomentum, diagnoseAxialAngularMomentumTendency } from '../solver/stage4CirculationDiagnostics.js';
 import { computeStage4FrozenRhs } from '../solver/stage4Rk3SplitCpu.js';
 import { computeStage4SlowTendencies } from '../solver/stage4SlowTendenciesCpu.js';
-import { cloneState, createHydrostaticState } from '../solver/state.js';
+import { createHydrostaticState } from '../solver/state.js';
 
 function assert(cond:unknown,msg:string):asserts cond{if(!cond)throw new Error(msg)}
 function inversePressure(p:number):number{return DRY_AIR.pRef/DRY_AIR.rd*Math.pow(p/DRY_AIR.pRef,1/DRY_AIR.gamma)}
 function accelPerDay(torque:number,leverMass:number):number{return torque/leverMass*86400}
+function useTrueFaceConormals(h:CubedSphereGrid):void{
+  for(const e of h.edges){
+    const a=e.p0,b=e.p1;
+    let nx=a[1]*b[2]-a[2]*b[1],ny=a[2]*b[0]-a[0]*b[2],nz=a[0]*b[1]-a[1]*b[0];
+    const mag=Math.hypot(nx,ny,nz);nx/=mag;ny/=mag;nz/=mag;
+    const lo=e.leftCell*3,ro=e.rightCell*3,dx=h.cellCenters[ro]!-h.cellCenters[lo]!,dy=h.cellCenters[ro+1]!-h.cellCenters[lo+1]!,dz=h.cellCenters[ro+2]!-h.cellCenters[lo+2]!;
+    if(nx*dx+ny*dy+nz*dz<0){nx=-nx;ny=-ny;nz=-nz;}
+    e.normal=[nx,ny,nz];
+  }
+}
 
-interface Row{n:number;pressure:number;planetaryCoriolis:number;relativeMomentum:number;inviscid:number;}
-function run(n:number):Row{
-  const h=buildCubedSphere(n),v=buildStretchedVerticalGrid(4,12000,1.15),ref=buildHeldSuarezReference(v),g=buildRotationGeometry(h);
+interface Row{n:number;geometry:'connector'|'face-conormal';pressure:number;planetaryCoriolis:number;relativeMomentum:number;inviscid:number;}
+function run(n:number,geometry:'connector'|'face-conormal'):Row{
+  const h=buildCubedSphere(n);if(geometry==='face-conormal')useTrueFaceConormals(h);
+  const v=buildStretchedVerticalGrid(4,12000,1.15),ref=buildHeldSuarezReference(v),g=buildRotationGeometry(h);
   const zeroRho=new Float64Array(h.cellCount*v.nz),zeroU=new Float64Array(h.edgeCount*v.nz);
 
-  // Smooth, horizontally varying pressure field with zero wind.  On a closed
+  // Smooth, horizontally varying pressure field with zero wind. On a closed
   // spherical surface pressure is an internal force and its global axial torque
-  // should vanish in the continuum.  The m=2 structure deliberately crosses
-  // every cubed-sphere seam instead of aligning with a panel.
+  // should vanish in the continuum. The m=2 structure crosses every panel seam.
   const pState=createHydrostaticState(h,v,ref);
   for(let c=0;c<h.cellCount;c++){
     const x=h.cellCenters[c*3]!,y=h.cellCenters[c*3+1]!,z=h.cellCenters[c*3+2]!;
@@ -36,7 +46,7 @@ function run(n:number):Row{
   const pLever=diagnoseAxialAngularMomentum(h,v,pState,g).torqueLeverMass;
 
   // Smooth generic tangential wind on a horizontally uniform hydrostatic state.
-  // It contains zonal + meridional flow and crosses panel seams.  These two
+  // It contains zonal + meridional flow and crosses panel seams. These two
   // continuum identities should independently vanish:
   //   planetary mass redistribution + Coriolis
   //   relative-AAM mass redistribution + material momentum transport
@@ -59,14 +69,14 @@ function run(n:number):Row{
   const inviscid=planetaryCoriolis+relativeMomentum;
 
   const vals=[pTorque,planetaryCoriolis,relativeMomentum,inviscid,pLever,lever];
-  assert(vals.every(Number.isFinite),`N=${n} AAM convergence diagnostic produced non-finite value`);
-  assert(pLever>0&&lever>0,`N=${n} invalid torque lever mass`);
-  return{n,pressure:accelPerDay(pTorque,pLever),planetaryCoriolis:accelPerDay(planetaryCoriolis,lever),relativeMomentum:accelPerDay(relativeMomentum,lever),inviscid:accelPerDay(inviscid,lever)};
+  assert(vals.every(Number.isFinite),`N=${n} ${geometry} AAM convergence diagnostic produced non-finite value`);
+  assert(pLever>0&&lever>0,`N=${n} ${geometry} invalid torque lever mass`);
+  return{n,geometry,pressure:accelPerDay(pTorque,pLever),planetaryCoriolis:accelPerDay(planetaryCoriolis,lever),relativeMomentum:accelPerDay(relativeMomentum,lever),inviscid:accelPerDay(inviscid,lever)};
 }
 
-try{
-  const rows=[4,8,16,32].map(run);
-  console.log('Stage4 analytic AAM spatial-convergence diagnostic (equivalent m/s/day; continuum target = 0)');
+function print(rows:Row[]):void{
+  const geometry=rows[0]!.geometry;
+  console.log(`geometry=${geometry}`);
   console.log('N\tpressure\tplanetary+coriolis\trelative+momentum\tpair-sum');
   for(const r of rows)console.log(`${r.n}\t${r.pressure.toExponential(6)}\t${r.planetaryCoriolis.toExponential(6)}\t${r.relativeMomentum.toExponential(6)}\t${r.inviscid.toExponential(6)}`);
   for(let i=1;i<rows.length;i++){
@@ -74,4 +84,10 @@ try{
     const ratio=(x:number,y:number)=>Math.abs(y)>0?Math.abs(x/y):Infinity;
     console.log(`refine ${a.n}->${b.n}: |old/new| pressure=${ratio(a.pressure,b.pressure).toFixed(3)} planetary+coriolis=${ratio(a.planetaryCoriolis,b.planetaryCoriolis).toFixed(3)} relative+momentum=${ratio(a.relativeMomentum,b.relativeMomentum).toFixed(3)}`);
   }
+}
+
+try{
+  console.log('Stage4 analytic AAM spatial-convergence diagnostic (equivalent m/s/day; continuum target = 0)');
+  print([4,8,16,32].map(n=>run(n,'connector')));
+  print([4,8,16,32].map(n=>run(n,'face-conormal')));
 }catch(e){console.error('FAIL Stage4 analytic AAM spatial-convergence diagnostic');console.error(e);process.exitCode=1;}
