@@ -1,0 +1,44 @@
+declare const process:{exitCode?:number};
+import { EARTH } from '../core/constants.js';
+import { angle3,cross3,dot3,normalize3,scale3,type Vec3 } from '../core/math.js';
+import { buildCubedSphere,type CubedSphereGrid,type HorizontalEdge } from '../grid/cubedSphere.js';
+
+const AXIS=normalize3([.37,-.21,.905] as Vec3),AMP=27;
+function pkey(p:Vec3):string{const q=1e11;return `${Math.round(p[0]*q)},${Math.round(p[1]*q)},${Math.round(p[2]*q)}`;}
+function center(h:CubedSphereGrid,c:number):Vec3{return[h.cellCenters[c*3]!,h.cellCenters[c*3+1]!,h.cellCenters[c*3+2]!];}
+function tangentToward(a:Vec3,b:Vec3):Vec3{const d:Vec3=[b[0]-dot3(a,b)*a[0],b[1]-dot3(a,b)*a[1],b[2]-dot3(a,b)*a[2]];return normalize3(d);}
+function sharedVertex(a:HorizontalEdge,b:HorizontalEdge):Vec3{const ka0=pkey(a.p0),ka1=pkey(a.p1),kb0=pkey(b.p0),kb1=pkey(b.p1);if(ka0===kb0||ka0===kb1)return a.p0;if(ka1===kb0||ka1===kb1)return a.p1;throw new Error('adjacent cell edges do not share a primal vertex');}
+function buildVertexCells(h:CubedSphereGrid):Map<string,Set<number>>{const out=new Map<string,Set<number>>();for(let c=0;c<h.cellCount;c++)for(let s=0;s<4;s++){const e=h.edges[h.cellEdges[c*4+s]!]!;for(const p of[e.p0,e.p1]){const k=pkey(p),set=out.get(k)??new Set<number>();set.add(c);out.set(k,set);}}return out;}
+function collectCellVertices(h:CubedSphereGrid,c:number):Vec3[]{const byKey=new Map<string,Vec3>();for(let s=0;s<4;s++){const e=h.edges[h.cellEdges[c*4+s]!]!;byKey.set(pkey(e.p0),e.p0);byKey.set(pkey(e.p1),e.p1);}const out=[...byKey.values()];if(out.length!==4)throw new Error(`cell ${c} has ${out.length} distinct vertices`);return out;}
+function avgUnit(vs:Vec3[]):Vec3{let x=0,y=0,z=0;for(const v of vs){x+=v[0];y+=v[1];z+=v[2];}return normalize3([x,y,z]);}
+
+/**
+ * Thuburn-Cotter-Dubos modified equiangular cubed sphere, diagnostic form:
+ *  1) start from equiangular primal vertices;
+ *  2) place each dual vertex at the barycentre of its four surrounding primal vertices;
+ *  3) relocate each primal vertex to the barycentre of its surrounding dual vertices;
+ * and do not iterate steps 2-3.  Topology/panel ids are inherited from the raw grid.
+ */
+function buildModifiedCubedSphere(n:number):CubedSphereGrid{
+  const raw=buildCubedSphere(n),rawVertexCells=buildVertexCells(raw),dualCenters=new Float64Array(raw.cellCount*3);
+  for(let c=0;c<raw.cellCount;c++){const q=avgUnit(collectCellVertices(raw,c));dualCenters.set(q,c*3);}
+  const rawVertexPos=new Map<string,Vec3>();for(const e of raw.edges){rawVertexPos.set(pkey(e.p0),e.p0);rawVertexPos.set(pkey(e.p1),e.p1);}
+  const moved=new Map<string,Vec3>();for(const [k,cells] of rawVertexCells){const vs:Vec3[]=[];for(const c of cells)vs.push([dualCenters[c*3]!,dualCenters[c*3+1]!,dualCenters[c*3+2]!]);moved.set(k,avgUnit(vs));}
+  const edges:HorizontalEdge[]=raw.edges.map(e=>{const p0=moved.get(pkey(e.p0)),p1=moved.get(pkey(e.p1));if(!p0||!p1)throw new Error('missing relocated primal vertex');const l:[number,number,number]=[dualCenters[e.leftCell*3]!,dualCenters[e.leftCell*3+1]!,dualCenters[e.leftCell*3+2]!],r:[number,number,number]=[dualCenters[e.rightCell*3]!,dualCenters[e.rightCell*3+1]!,dualCenters[e.rightCell*3+2]!],delta:Vec3=[r[0]-l[0],r[1]-l[1],r[2]-l[2]];let normal=normalize3(cross3(p0,p1));if(dot3(normal,delta)<0)normal=scale3(normal,-1);return{...e,p0,p1,midpoint:normalize3([p0[0]+p1[0],p0[1]+p1[1],p0[2]+p1[2]]),normal,angularLength:angle3(p0,p1),centerDistanceAngle:angle3(l,r)};});
+  // cell areas are intentionally left as the raw values because this diagnostic
+  // exercises only H geometry; no area-dependent operator reads them.
+  return{...raw,cellCenters:dualCenters,edges};
+}
+
+function dualVectorAtCell(h:CubedSphereGrid,eid:number,c:number):Vec3{const e=h.edges[eid]!,cc=center(h,c),nb=e.leftCell===c?e.rightCell:e.leftCell,cn=center(h,nb),out=tangentToward(cc,cn),len=angle3(cc,cn)*EARTH.radius,sgn=e.leftCell===c?1:-1;return scale3(out,sgn*len);}
+function dualCirculation(h:CubedSphereGrid,eid:number):number{const e=h.edges[eid]!,l=center(h,e.leftCell),r=center(h,e.rightCell),k=normalize3(cross3(l,r));return AMP*EARTH.radius*angle3(l,r)*dot3(AXIS,k);}
+function exactFaceFlux(h:CubedSphereGrid,eid:number):number{const e=h.edges[eid]!,k=normalize3(cross3(e.p0,e.p1)),sgn=dot3(e.normal,k)>=0?1:-1,d:Vec3=[e.p0[0]-e.p1[0],e.p0[1]-e.p1[1],e.p0[2]-e.p1[2]];return AMP*EARTH.radius*sgn*dot3(AXIS,d);}
+function applySymmetricH(h:CubedSphereGrid,V:Float64Array,vertexCells=buildVertexCells(h)):Float64Array{const U=new Float64Array(h.edgeCount);for(let c=0;c<h.cellCount;c++)for(let s=0;s<4;s++){const e0=h.cellEdges[c*4+s]!,e1=h.cellEdges[c*4+((s+1)%4)]!,a=h.edges[e0]!,b=h.edges[e1]!,vertex=sharedVertex(a,b),valence=vertexCells.get(pkey(vertex))?.size??0;if(valence!==3&&valence!==4)throw new Error(`unexpected dual-cell valence ${valence}`);const sc=valence===4?4:6,d0=dualVectorAtCell(h,e0,c),d1=dualVectorAtCell(h,e1,c),area=Math.hypot(...cross3(d0,d1));if(!(area>0))throw new Error('degenerate dual corner');U[e0]=U[e0]!+((V[e0]!*d1[0]-V[e1]!*d0[0])*d1[0]+(V[e0]!*d1[1]-V[e1]!*d0[1])*d1[1]+(V[e0]!*d1[2]-V[e1]!*d0[2])*d1[2])/(sc*area);U[e1]=U[e1]!+((V[e1]!*d0[0]-V[e0]!*d1[0])*d0[0]+(V[e1]!*d0[1]-V[e0]!*d1[1])*d0[1]+(V[e1]!*d0[2]-V[e0]!*d1[2])*d0[2])/(sc*area);}return U;}
+interface Stats{count:number;err2:number;ref2:number;max:number;}
+function stat():Stats{return{count:0,err2:0,ref2:0,max:0};}
+function add(s:Stats,d:number,r:number):void{s.count++;s.err2+=d*d;s.ref2+=r*r;s.max=Math.max(s.max,Math.abs(d));}
+function rel(s:Stats):number{return Math.sqrt(s.err2/Math.max(s.ref2,1e-60));}
+function baryDefect(h:CubedSphereGrid):number{const vc=buildVertexCells(h),pos=new Map<string,Vec3>();for(const e of h.edges){pos.set(pkey(e.p0),e.p0);pos.set(pkey(e.p1),e.p1);}let m=0;for(const [k,cells] of vc){const vs:Vec3[]=[];for(const c of cells)vs.push(center(h,c));const b=avgUnit(vs),p=pos.get(k)!;m=Math.max(m,angle3(p,b));}return m;}
+function diagnose(h:CubedSphereGrid){const vc=buildVertexCells(h),V=new Float64Array(h.edgeCount),target=new Float64Array(h.edgeCount);for(let e=0;e<h.edgeCount;e++){V[e]=dualCirculation(h,e);target[e]=exactFaceFlux(h,e);}const U=applySymmetricH(h,V,vc),all=stat(),interior=stat(),seamRegular=stat(),corner=stat();let energy=0;for(let e=0;e<h.edgeCount;e++){const ge=h.edges[e]!,d=U[e]!-target[e]!,r=target[e]!,isSeam=h.cellPanel[ge.leftCell]!==h.cellPanel[ge.rightCell],isCorner=(vc.get(pkey(ge.p0))?.size===3)||(vc.get(pkey(ge.p1))?.size===3);add(all,d,r);if(isCorner)add(corner,d,r);else if(isSeam)add(seamRegular,d,r);else add(interior,d,r);energy+=.5*V[e]!*U[e]!;}return{all:rel(all),interior:rel(interior),seam:rel(seamRegular),corner:rel(corner),max:all.max/Math.sqrt(all.ref2/all.count),energy,bary:baryDefect(h)};}
+function run(n:number){return{n,raw:diagnose(buildCubedSphere(n)),modified:diagnose(buildModifiedCubedSphere(n))};}
+try{const rows=[4,8,16,32].map(run),ratio=(a:number,b:number)=>a/Math.max(b,1e-30);console.log('Stage4 Hodge grid-geometry A/B: raw equiangular vs one-pass barycentric modified cubed sphere');console.log('N\traw all\tmod all\traw int\tmod int\traw seam\tmod seam\traw corner\tmod corner\traw bary(rad)\tmod bary(rad)\tmod energy');for(const r of rows)console.log(`${r.n}\t${r.raw.all.toExponential(7)}\t${r.modified.all.toExponential(7)}\t${r.raw.interior.toExponential(7)}\t${r.modified.interior.toExponential(7)}\t${r.raw.seam.toExponential(7)}\t${r.modified.seam.toExponential(7)}\t${r.raw.corner.toExponential(7)}\t${r.modified.corner.toExponential(7)}\t${r.raw.bary.toExponential(3)}\t${r.modified.bary.toExponential(3)}\t${r.modified.energy.toExponential(7)}`);console.log(`modified all refine=${ratio(rows[1]!.modified.all,rows[2]!.modified.all).toFixed(3)},${ratio(rows[2]!.modified.all,rows[3]!.modified.all).toFixed(3)} interior=${ratio(rows[1]!.modified.interior,rows[2]!.modified.interior).toFixed(3)},${ratio(rows[2]!.modified.interior,rows[3]!.modified.interior).toFixed(3)} seam=${ratio(rows[1]!.modified.seam,rows[2]!.modified.seam).toFixed(3)},${ratio(rows[2]!.modified.seam,rows[3]!.modified.seam).toFixed(3)} corner=${ratio(rows[1]!.modified.corner,rows[2]!.modified.corner).toFixed(3)},${ratio(rows[2]!.modified.corner,rows[3]!.modified.corner).toFixed(3)}`);if(rows.some(r=>![r.modified.all,r.modified.interior,r.modified.seam,r.modified.corner,r.modified.max,r.modified.energy,r.modified.bary].every(Number.isFinite)))throw new Error('non-finite modified-grid Hodge result');if(rows.some(r=>!(r.modified.energy>0)))throw new Error('modified-grid H quadratic energy not positive');if(rows.some(r=>r.modified.bary>2e-7))throw new Error(`modified grid missed barycentric condition: ${rows.map(r=>r.modified.bary).join(',')}`);}catch(e){console.error('FAIL Stage4 modified cubed-sphere Hodge diagnostic');console.error(e);process.exitCode=1;}
