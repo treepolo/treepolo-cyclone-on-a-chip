@@ -1,4 +1,4 @@
-import { Vec3, add3, angle3, normalize3, scale3, sphericalTriangleAreaUnit, sub3, dot3 } from '../core/math.js';
+import { Vec3, add3, angle3, cross3, normalize3, scale3, sphericalTriangleAreaUnit, sub3, dot3 } from '../core/math.js';
 
 interface FaceBasis { name:string; c:Vec3; a:Vec3; b:Vec3; }
 const FACES:FaceBasis[] = [
@@ -16,6 +16,7 @@ export interface HorizontalEdge {
   p0:Vec3;
   p1:Vec3;
   midpoint:Vec3;
+  /** Unit spherical conormal to the shared great-circle face, oriented left -> right. */
   normal:Vec3;
   angularLength:number;
   centerDistanceAngle:number;
@@ -71,8 +72,15 @@ export function buildCubedSphere(n:number):CubedSphereGrid {
   for(const [key,e] of edgeTemp) {
     if(e.cells.length!==2) throw new Error(`edge ${key} has ${e.cells.length} neighbors`);
     const left=e.cells[0]!, right=e.cells[1]!; const cl=getCenter(centers,left), cr=getCenter(centers,right);
-    const mid=normalize3(add3(e.p0,e.p1));
-    const delta=sub3(cr,cl); const normal=normalize3(sub3(delta,scale3(mid,dot3(delta,mid))));
+    const mid=normalize3(add3(e.p0,e.p1)),delta=sub3(cr,cl);
+    // A C-grid face-normal velocity must be normal to the actual shared face,
+    // not to the line joining the two cell centers. Equal-angle gnomonic
+    // cubed-sphere cells are non-orthogonal in panel interiors, so the two
+    // directions can differ substantially. For a great-circle edge, p0 x p1
+    // is the exact constant spherical conormal along that edge. Orient it from
+    // left cell to right cell to preserve the existing canonical flux sign.
+    let normal=normalize3(cross3(e.p0,e.p1));
+    if(dot3(normal,delta)<0)normal=scale3(normal,-1);
     const edge:HorizontalEdge={leftCell:left,rightCell:right,p0:e.p0,p1:e.p1,midpoint:mid,normal,angularLength:angle3(e.p0,e.p1),centerDistanceAngle:angle3(cl,cr)};
     edgeIdByKey.set(key,edges.length); edges.push(edge);
   }
