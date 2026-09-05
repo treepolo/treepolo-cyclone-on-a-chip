@@ -56,15 +56,27 @@ const ADD_VREF=COMMON+/* wgsl */`
 @group(0)@binding(3)var<storage,read>w:array<f32>;
 @group(0)@binding(4)var<storage,read_write>frozenScalar:array<vec2<f32>>;
 fn dz(k:u32)->f32{return layerRef[k*5u+1u];}fn irho(i:u32)->f32{return interfaceRef[i*2u];}fn ix(i:u32)->f32{return interfaceRef[i*2u+1u];}
-@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let b=c*(P.nz+1u)+k;let wb=w[b];let wt=w[b+1u];frozenScalar[q]=frozenScalar[q]-(vec2<f32>(irho(k+1u),ix(k+1u))*wt-vec2<f32>(irho(k),ix(k))*wb)/dz(k);}
+@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;let count=P.cellCount*(P.nz+1u);if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let b=c*(P.nz+1u)+k;let wb=w[b];let wt=w[b+1u];frozenScalar[q]=frozenScalar[q]-(vec2<f32>(irho(k+1u),ix(k+1u))*wt-vec2<f32>(irho(k),ix(k))*wb)/dz(k);}
 `;
 const PREP_U=COMMON+/* wgsl */`
+struct CellGeom{east:vec4<f32>,north:vec4<f32>};
 @group(0)@binding(1)var<storage,read>edgeCells:array<vec2<u32>>;
-@group(0)@binding(2)var<storage,read>edgeMetric:array<vec2<f32>>;
-@group(0)@binding(3)var<storage,read>predCell:array<vec2<f32>>;
-@group(0)@binding(4)var<storage,read>slowU:array<f32>;
-@group(0)@binding(5)var<storage,read_write>frozenU:array<f32>;
-@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let l=cc.x*P.nz+k;let r=cc.y*P.nz+k;let pl=pressure(predCell[l].y);let pr=pressure(predCell[r].y);let ravg=max(.5*(predCell[l].x+predCell[r].x),1e-12);let dist=max(edgeMetric[e].y,1.0);frozenU[q]=slowU[q]-(pr-pl)/(ravg*dist);}
+@group(0)@binding(2)var<storage,read>edgeGeom:array<vec4<f32>>;
+@group(0)@binding(3)var<storage,read>cellGeom:array<CellGeom>;
+@group(0)@binding(4)var<storage,read>cellEdges:array<vec4<u32>>;
+@group(0)@binding(5)var<storage,read>predCell:array<vec2<f32>>;
+@group(0)@binding(6)var<storage,read>slowU:array<f32>;
+@group(0)@binding(7)var<storage,read_write>frozenU:array<f32>;
+fn radial(c:u32)->vec3<f32>{return normalize(cross(cellGeom[c].east.xyz,cellGeom[c].north.xyz));}
+fn neighbor(c:u32,e:u32)->u32{let cc=edgeCells[e];return select(cc.x,cc.y,cc.x==c);}
+fn pval(c:u32,k:u32)->f32{return pressure(predCell[c*P.nz+k].y);}
+fn cellGradP(c:u32,k:u32)->vec3<f32>{
+  let rc=radial(c);let ec=cellGeom[c].east.xyz;let nc=cellGeom[c].north.xyz;let vc=pval(c,k);let ee=cellEdges[c];
+  var aa=0.0;var ab=0.0;var bb=0.0;var ba=0.0;var bbv=0.0;
+  for(var s:u32=0u;s<4u;s++){let nb=neighbor(c,ee[s]);let rn=radial(nb);let mu=clamp(dot(rc,rn),-1.0,1.0);let ang=acos(mu);let tr=rn-rc*mu;let tm=length(tr);if(ang>0.0&&tm>0.0){let t=tr/tm;let dist=P.radius*ang;let de=dist*dot(t,ec);let dn=dist*dot(t,nc);let dv=pval(nb,k)-vc;aa+=de*de;ab+=de*dn;bb+=dn*dn;ba+=de*dv;bbv+=dn*dv;}}
+  let det=aa*bb-ab*ab;let ge=(bb*ba-ab*bbv)/det;let gn=(-ab*ba+aa*bbv)/det;return ge*ec+gn*nc;
+}
+@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let l=cc.x*P.nz+k;let r=cc.y*P.nz+k;let ravg=max(.5*(predCell[l].x+predCell[r].x),1e-12);let gp=.5*(cellGradP(cc.x,k)+cellGradP(cc.y,k));let gn=dot(gp,edgeGeom[e].xyz);frozenU[q]=slowU[q]-gn/ravg;}
 `;
 const PREP_IFACE=COMMON+/* wgsl */`
 @group(0)@binding(1)var<storage,read>layerRef:array<f32>;
@@ -78,13 +90,26 @@ fn z(k:u32)->f32{return layerRef[k*5u];}fn p0(k:u32)->f32{return layerRef[k*5u+2
 @compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;let count=P.cellCount*(P.nz+1u);if(q>=count){return;}let c=q/(P.nz+1u);let i=q-c*(P.nz+1u);var acc=0.0;if(i>0u&&i<P.nz){let l=i-1u;let u=i;let cl=predCell[c*P.nz+l];let cu=predCell[c*P.nz+u];let rr=.5*(cl.x+cu.x);let rr0=.5*(r0(l)+r0(u));let den=max(.5*(rr0+rr),1e-12);let dzc=z(u)-z(l);let dpPrime=(pressure(cu.y)-p0(u))-(pressure(cl.y)-p0(l));acc=-dpPrime/(den*dzc)-P.gravity*(rr-rr0)/max(rr,1e-12);}let boundary=i==0u||i==P.nz;let rate=select(rayleigh[i],0.0,(P.flags&1u)==0u||boundary);let fw=select(slowW[q]+acc,0.0,boundary);iface[q]=vec4<f32>(predW[q],select(baseW[q],0.0,boundary),fw,rate);}
 `;
 const HVEL=COMMON+/* wgsl */`
+struct CellGeom{east:vec4<f32>,north:vec4<f32>};
 @group(0)@binding(1)var<storage,read>edgeCells:array<vec2<u32>>;
-@group(0)@binding(2)var<storage,read>edgeMetric:array<vec2<f32>>;
-@group(0)@binding(3)var<storage,read>predCell:array<vec2<f32>>;
-@group(0)@binding(4)var<storage,read>acousticCell:array<vec2<f32>>;
-@group(0)@binding(5)var<storage,read>frozenU:array<f32>;
-@group(0)@binding(6)var<storage,read_write>acousticU:array<f32>;
-@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let l=cc.x*P.nz+k;let r=cc.y*P.nz+k;let pl=pressure(predCell[l].y);let pr=pressure(predCell[r].y);let dpl=P.gamma*pl/max(predCell[l].y,1e-12);let dpr=P.gamma*pr/max(predCell[r].y,1e-12);let dl=acousticCell[l]-predCell[l];let dr=acousticCell[r]-predCell[r];let ravg=max(.5*(predCell[l].x+predCell[r].x),1e-12);let dRavg=.5*(dl.x+dr.x);let dist=max(edgeMetric[e].y,1.0);let dDp=dpr*dr.y-dpl*dl.y;let lin=-dDp/(ravg*dist)+(pr-pl)*dRavg/(ravg*ravg*dist);acousticU[q]=acousticU[q]+P.dt*(frozenU[q]+lin);}
+@group(0)@binding(2)var<storage,read>edgeGeom:array<vec4<f32>>;
+@group(0)@binding(3)var<storage,read>cellGeom:array<CellGeom>;
+@group(0)@binding(4)var<storage,read>cellEdges:array<vec4<u32>>;
+@group(0)@binding(5)var<storage,read>predCell:array<vec2<f32>>;
+@group(0)@binding(6)var<storage,read>acousticCell:array<vec2<f32>>;
+@group(0)@binding(7)var<storage,read>frozenU:array<f32>;
+@group(0)@binding(8)var<storage,read_write>acousticU:array<f32>;
+fn radial(c:u32)->vec3<f32>{return normalize(cross(cellGeom[c].east.xyz,cellGeom[c].north.xyz));}
+fn neighbor(c:u32,e:u32)->u32{let cc=edgeCells[e];return select(cc.x,cc.y,cc.x==c);}
+fn pval(c:u32,k:u32)->f32{return pressure(predCell[c*P.nz+k].y);}
+fn dpval(c:u32,k:u32)->f32{let q=c*P.nz+k;let pc=predCell[q];let ac=acousticCell[q];let pp=pressure(pc.y);let dpdx=P.gamma*pp/max(pc.y,1e-12);return dpdx*(ac.y-pc.y);}
+fn cellGrad(c:u32,k:u32,delta:bool)->vec3<f32>{
+  let rc=radial(c);let ec=cellGeom[c].east.xyz;let nc=cellGeom[c].north.xyz;let vc=select(pval(c,k),dpval(c,k),delta);let ee=cellEdges[c];
+  var aa=0.0;var ab=0.0;var bb=0.0;var ba=0.0;var bbv=0.0;
+  for(var s:u32=0u;s<4u;s++){let nb=neighbor(c,ee[s]);let rn=radial(nb);let mu=clamp(dot(rc,rn),-1.0,1.0);let ang=acos(mu);let tr=rn-rc*mu;let tm=length(tr);if(ang>0.0&&tm>0.0){let t=tr/tm;let dist=P.radius*ang;let de=dist*dot(t,ec);let dn=dist*dot(t,nc);let nv=select(pval(nb,k),dpval(nb,k),delta);let dv=nv-vc;aa+=de*de;ab+=de*dn;bb+=dn*dn;ba+=de*dv;bbv+=dn*dv;}}
+  let det=aa*bb-ab*ab;let ge=(bb*ba-ab*bbv)/det;let gn=(-ab*ba+aa*bbv)/det;return ge*ec+gn*nc;
+}
+@compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.edgeCount*P.nz){return;}let e=q/P.nz;let k=q-e*P.nz;let cc=edgeCells[e];let l=cc.x*P.nz+k;let r=cc.y*P.nz+k;let dl=acousticCell[l]-predCell[l];let dr=acousticCell[r]-predCell[r];let ravg=max(.5*(predCell[l].x+predCell[r].x),1e-12);let dRavg=.5*(dl.x+dr.x);let n=edgeGeom[e].xyz;let gPred=dot(.5*(cellGrad(cc.x,k,false)+cellGrad(cc.y,k,false)),n);let gDelta=dot(.5*(cellGrad(cc.x,k,true)+cellGrad(cc.y,k,true)),n);let lin=-gDelta/ravg+gPred*dRavg/(ravg*ravg);acousticU[q]=acousticU[q]+P.dt*(frozenU[q]+lin);}
 `;
 const HREF_FLUX=COMMON+/* wgsl */`
 @group(0)@binding(1)var<storage,read>edgeMetric:array<vec2<f32>>;
@@ -180,7 +205,7 @@ export class GpuStage4Rk3SplitReference{
   static async create(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,state:DryState,acousticRatio=4):Promise<GpuStage4Rk3SplitReference>{const core=await GpuRotatingDryCore.create(h,v,ref,state);core.device.pushErrorScope?.('validation');let out:GpuStage4Rk3SplitReference|undefined;try{out=new GpuStage4Rk3SplitReference(core,acousticRatio);const err=await core.device.popErrorScope?.();if(err){out.destroy();throw new Error(`Stage 4 RK3 split WebGPU validation: ${err.message||err}`);}return out;}catch(e){if(!out){try{await core.device.popErrorScope?.();}catch{}core.destroy();}throw e;}}
   private pipe(code:string,label:string):GPUAny{return this.device.createComputePipeline({label,layout:'auto',compute:{module:this.device.createShaderModule({label:`${label} shader`,code}),entryPoint:'main'}});}
   private bind(name:string,code:string,buffers:GPUAny[]):void{const p=this.pipe(code,`Stage4 RK3 ${name}`);this.pipelines[name]=p;this.groups[name]=this.params.map(param=>this.device.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:param}},...buffers.map((buffer,i)=>({binding:i+1,resource:{buffer}}))]}));}
-  private build():void{const b=this.core.core.buffers,s=this.slow,rb=this.buffers;this.bind('packBase',PACK_BASE,[b.rho,b.rhoTheta,rb.baseCell]);this.bind('prepCell',PREP_CELL,[b.rho,b.rhoTheta,rb.baseCell,s.scalarT,rb.predCell,rb.acousticCell,rb.frozenScalar]);this.bind('addHref',ADD_HREF,[b.cellEdges,b.cellSigns,b.edgeMetric,b.cellArea,b.layerRef,b.u,rb.frozenScalar]);this.bind('addVref',ADD_VREF,[b.layerRef,b.interfaceRef,b.w,rb.frozenScalar]);this.bind('prepU',PREP_U,[b.edgeCells,b.edgeMetric,rb.predCell,s.uT,rb.frozenU]);this.bind('prepIface',PREP_IFACE,[b.layerRef,rb.predCell,b.w,rb.baseW,s.wT,b.heviRayleigh,rb.iface]);this.bind('hvel',HVEL,[b.edgeCells,b.edgeMetric,rb.predCell,rb.acousticCell,rb.frozenU,rb.acousticU]);this.bind('hrefFlux',HREF_FLUX,[b.edgeMetric,b.layerRef,b.u,rb.acousticU,rb.hRefFlux]);this.bind('hrefDiv',HREF_DIV,[b.cellArea,b.layerRef,b.cellEdges,b.cellSigns,rb.hRefFlux,rb.hCorr]);this.bind('vertical',VERTICAL,[b.layerRef,b.interfaceRef,rb.predCell,rb.acousticCell,rb.frozenScalar,rb.hCorr,rb.iface,rb.refFlux]);this.bind('unpackCell',UNPACK_CELL,[rb.acousticCell,b.rho,b.rhoTheta]);this.bind('unpackW',UNPACK_W,[rb.iface,b.w]);}
+  private build():void{const b=this.core.core.buffers,s=this.slow,rb=this.buffers,cg=this.core.buffers;this.bind('packBase',PACK_BASE,[b.rho,b.rhoTheta,rb.baseCell]);this.bind('prepCell',PREP_CELL,[b.rho,b.rhoTheta,rb.baseCell,s.scalarT,rb.predCell,rb.acousticCell,rb.frozenScalar]);this.bind('addHref',ADD_HREF,[b.cellEdges,b.cellSigns,b.edgeMetric,b.cellArea,b.layerRef,b.u,rb.frozenScalar]);this.bind('addVref',ADD_VREF,[b.layerRef,b.interfaceRef,b.w,rb.frozenScalar]);this.bind('prepU',PREP_U,[b.edgeCells,cg.edgeGeom,cg.cellGeom,b.cellEdges,rb.predCell,s.uT,rb.frozenU]);this.bind('prepIface',PREP_IFACE,[b.layerRef,rb.predCell,b.w,rb.baseW,s.wT,b.heviRayleigh,rb.iface]);this.bind('hvel',HVEL,[b.edgeCells,cg.edgeGeom,cg.cellGeom,b.cellEdges,rb.predCell,rb.acousticCell,rb.frozenU,rb.acousticU]);this.bind('hrefFlux',HREF_FLUX,[b.edgeMetric,b.layerRef,b.u,rb.acousticU,rb.hRefFlux]);this.bind('hrefDiv',HREF_DIV,[b.cellArea,b.layerRef,b.cellEdges,b.cellSigns,rb.hRefFlux,rb.hCorr]);this.bind('vertical',VERTICAL,[b.layerRef,b.interfaceRef,rb.predCell,rb.acousticCell,rb.frozenScalar,rb.hCorr,rb.iface,rb.refFlux]);this.bind('unpackCell',UNPACK_CELL,[rb.acousticCell,b.rho,b.rhoTheta]);this.bind('unpackW',UNPACK_W,[rb.iface,b.w]);}
   private writeParams(stage:number,dt:number,top:boolean):void{const ab=new ArrayBuffer(48),u=new Uint32Array(ab),f=new Float32Array(ab);u[0]=this.core.v.nz;u[1]=this.core.h.edgeCount;u[2]=this.core.h.cellCount;u[3]=top?1:0;f[4]=dt;f[5]=EARTH.radius;f[6]=EARTH.gravity;f[7]=DRY_AIR.rd;f[8]=DRY_AIR.gamma;f[9]=DRY_AIR.pRef;f[10]=STAGE4_HEVI_OFFCENTERING;this.device.queue.writeBuffer(this.params[stage],0,ab);}
   private dispatch(p:GPUAny,name:string,count:number,stage:number,size=128):void{p.setPipeline(this.pipelines[name]);p.setBindGroup(0,this.groups[name]![stage]);p.dispatchWorkgroups(Math.ceil(count/size));}
   private one(enc:GPUAny,name:string,count:number,stage:number,size=128):void{const p=enc.beginComputePass();this.dispatch(p,name,count,stage,size);p.end();}
