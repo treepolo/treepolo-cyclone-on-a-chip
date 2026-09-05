@@ -20,7 +20,7 @@ interface Test{name:string;fn:()=>void}
 const tests:Test[]=[];
 const test=(name:string,fn:()=>void)=>tests.push({name,fn});
 
-function solidBodyReconstructionError(n:number):{rel:number;ratio:number}{
+function solidBodyReconstructionError(n:number):{rel:number;seamRms:number;interiorRms:number}{
   const h=buildCubedSphere(n),v=buildStretchedVerticalGrid(4,10000,1),ref=buildHeldSuarezReference(v),s=createHydrostaticState(h,v,ref),g=buildRotationGeometry(h),omega=2e-5;
   setAnalyticCellWind(h,g,s,r=>[-omega*6371000*r[1],omega*6371000*r[0],0]);
   const w=reconstructCellHorizontalWind(h,g,s,0);let num=0,den=0,seam=0,interior=0,ns=0,ni=0;
@@ -30,17 +30,18 @@ function solidBodyReconstructionError(n:number):{rel:number;ratio:number}{
     for(let slot=0;slot<4;slot++){const e=h.edges[h.cellEdges[c*4+slot]!]!;if(h.cellPanel[e.leftCell]!==h.cellPanel[e.rightCell])isSeam=true}
     if(isSeam){seam+=err*err;ns++}else{interior+=err*err;ni++}
   }
-  return{rel:Math.sqrt(num/den),ratio:Math.sqrt(seam/ns)/Math.sqrt(interior/ni)};
+  return{rel:Math.sqrt(num/den),seamRms:Math.sqrt(seam/ns),interiorRms:Math.sqrt(interior/ni)};
 }
 
 test('V2 face-normal C-grid reconstruction converges for solid-body wind across cubed-sphere seams',()=>{
   // With true face-normal DOFs, projecting cell winds to faces and reconstructing
-  // them back is no longer an algebraic identity on this non-orthogonal grid;
-  // it is a spatial interpolation and must converge under refinement.
+  // them back is a spatial interpolation on the non-orthogonal grid. Global and
+  // seam-local absolute errors must both fall under refinement. A seam/interior
+  // ratio is not a convergence measure because the interior may converge faster.
   const a=solidBodyReconstructionError(16),b=solidBodyReconstructionError(32);
-  assert(b.rel<a.rel*.4,`solid-body reconstruction did not converge: N16=${a.rel}, N32=${b.rel}`);
+  assert(b.rel<a.rel*.4,`solid-body global reconstruction did not converge: N16=${a.rel}, N32=${b.rel}`);
   assert(b.rel<1e-3,`solid-body N32 reconstruction relL2=${b.rel}`);
-  assert(a.ratio<10&&b.ratio<10,`seam/interior RMS ratio N16=${a.ratio}, N32=${b.ratio}`);
+  assert(b.seamRms<a.seamRms*.7,`solid-body seam RMS did not converge: N16=${a.seamRms}, N32=${b.seamRms}`);
 });
 
 test('V2 inertial oscillation preserves amplitude and period',()=>{
