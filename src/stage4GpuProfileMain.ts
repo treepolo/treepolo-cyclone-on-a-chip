@@ -4,7 +4,7 @@ import { addHeldSuarezWavePerturbation, buildHeldSuarezReference } from './physi
 import { buildModelTopSpongeRates } from './physics/modelTopSponge.js';
 import { GpuDryCorePrototype } from './gpu/dryCoreGpu.js';
 import { GpuRotatingDryCore } from './gpu/rotatingDryCoreGpu.js';
-import { GpuStage4Rk3SplitReference } from './gpu/stage4Rk3SplitGpu.js';
+import { GpuStage4Rk3SplitReference, STAGE4_VERTICAL_WORKGROUP_SIZE } from './gpu/stage4Rk3SplitGpu.js';
 import { buildRk3SplitSchedule } from './solver/rk3SplitSchedule.js';
 import { STAGE4_HEVI_OFFCENTERING } from './solver/stage4Config.js';
 import { createHydrostaticState } from './solver/state.js';
@@ -162,7 +162,7 @@ async function profile(gpu:GpuStage4Rk3SplitReference){
       for(let n=0;n<steps;n++){
         const acousticStep=n+1;
         const acoustic=(name:string,count:number,size=128)=>timed({outer,stage,acousticStep,category:'acoustic',kernel:`acoustic.${name}`},p=>rkDispatch(p,name,count,stageIndex,size));
-        acoustic('hvel',h.edgeCount*v.nz);acoustic('hrefFlux',h.edgeCount*v.nz);acoustic('hrefDiv',h.cellCount*v.nz);acoustic('vertical',h.cellCount,1);
+        acoustic('hvel',h.edgeCount*v.nz);acoustic('hrefFlux',h.edgeCount*v.nz);acoustic('hrefDiv',h.cellCount*v.nz);acoustic('vertical',h.cellCount,STAGE4_VERTICAL_WORKGROUP_SIZE);
         timed({outer,stage,acousticStep,category:'damping',kernel:'damping.divergence'},p=>divDispatch(p,div,'divergence'));
         timed({outer,stage,acousticStep,category:'damping',kernel:'damping.adjust'},p=>divDispatch(p,div,'adjust'));
       }
@@ -229,7 +229,7 @@ runBtn.onclick=()=>void(async()=>{
     $('topKernel').textContent=result.kernels[0]?`${result.kernels[0].kernel} — ${result.kernels[0].sharePct.toFixed(1)}%`:'—';
     $('yield').textContent=yieldMode;
     logEl.textContent=JSON.stringify({
-      config:{grid:'N=8 × 48',cells:18432,dtSeconds:DT,warmupOuterSteps:WARMUP_BATCH,profileOuterSteps:PROFILE_OUTER_STEPS,timestampFeature:'timestamp-query',yieldMode},
+      config:{grid:'N=8 × 48',cells:18432,dtSeconds:DT,warmupOuterSteps:WARMUP_BATCH,profileOuterSteps:PROFILE_OUTER_STEPS,timestampFeature:'timestamp-query',verticalWorkgroupSize:STAGE4_VERTICAL_WORKGROUP_SIZE,yieldMode},
       summary:{queryCount:result.queryCount,dispatches:result.dispatches,profileGpuWaitMs:result.profileGpuWaitMs,measuredComputeMs:result.measuredComputeMs,measuredComputeMsPerOuter:result.measuredComputeMsPerOuter,measuredVsProfileWaitPct:result.measuredVsProfileWaitPct},
       categories:result.categories,
       kernels:result.kernels,
