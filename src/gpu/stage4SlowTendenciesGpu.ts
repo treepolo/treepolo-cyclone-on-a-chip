@@ -51,21 +51,21 @@ struct CellGeom{east:vec4<f32>,north:vec4<f32>};@group(0)@binding(1)var<storage,
 @compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let ee=cellEdges[c];var le=0.0;var ln=0.0;for(var s:u32=0u;s<4u;s++){let co=recon[c*4u+s];let uv=u[ee[s]*P.nz+k];le+=co.x*uv;ln+=co.y*uv;}cw[q]=vec4<f32>(le*cellGeom[c].east.xyz+ln*cellGeom[c].north.xyz,0.0);}
 `;
 const HGRADLIM=COMMON+/* wgsl */`
-struct HadvSlot{meta:vec4<i32>,face:vec4<f32>,mid:vec4<f32>};struct GradPair{east:vec4<f32>,north:vec4<f32>};
+struct HadvSlot{info:vec4<i32>,face:vec4<f32>,mid:vec4<f32>};struct GradPair{east:vec4<f32>,north:vec4<f32>};
 @group(0)@binding(1)var<storage,read>slots:array<HadvSlot>;@group(0)@binding(2)var<storage,read>weights:array<GradPair>;@group(0)@binding(3)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(4)var<storage,read_write>grad:array<GradPair>;
 @compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){
  let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let base=cw[q].xyz;var lo=base;var hi=base;var ge=vec3<f32>(0.0);var gn=vec3<f32>(0.0);let w=weights[c];
- for(var s:u32=0u;s<4u;s++){let nb=u32(slots[c*4u+s].meta.y);let nv=cw[nb*P.nz+k].xyz;lo=min(lo,nv);hi=max(hi,nv);let d=nv-base;ge+=w.east[s]*d;gn+=w.north[s]*d;}
+ for(var s:u32=0u;s<4u;s++){let nb=u32(slots[c*4u+s].info.y);let nv=cw[nb*P.nz+k].xyz;lo=min(lo,nv);hi=max(hi,nv);let d=nv-base;ge+=w.east[s]*d;gn+=w.north[s]*d;}
  var phi=1.0;for(var s:u32=0u;s<4u;s++){let fd=slots[c*4u+s].face.xy;let d=ge*fd.x+gn*fd.y;for(var j:u32=0u;j<3u;j++){let x=d[j];if(x>1e-15){phi=min(phi,(hi[j]-base[j])/x);}else if(x< -1e-15){phi=min(phi,(lo[j]-base[j])/x);}}}
  phi=clamp(phi,0.0,1.0);grad[q].east=vec4<f32>(phi*ge,0.0);grad[q].north=vec4<f32>(phi*gn,0.0);
 }
 `;
 const HADV=COMMON+/* wgsl */`
-struct HadvSlot{meta:vec4<i32>,face:vec4<f32>,mid:vec4<f32>};struct GradPair{east:vec4<f32>,north:vec4<f32>};
+struct HadvSlot{info:vec4<i32>,face:vec4<f32>,mid:vec4<f32>};struct GradPair{east:vec4<f32>,north:vec4<f32>};
 @group(0)@binding(1)var<storage,read>slots:array<HadvSlot>;@group(0)@binding(2)var<storage,read>edgeMetric:array<vec2<f32>>;@group(0)@binding(3)var<storage,read>rho:array<f32>;@group(0)@binding(4)var<storage,read>u:array<f32>;@group(0)@binding(5)var<storage,read>cw:array<vec4<f32>>;@group(0)@binding(6)var<storage,read>grad:array<GradPair>;@group(0)@binding(7)var<storage,read>cellArea:array<f32>;@group(0)@binding(8)var<storage,read_write>dv:array<vec4<f32>>;
 @compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){
  let q=gid.x;if(q>=P.cellCount*P.nz){return;}let c=q/P.nz;let k=q-c*P.nz;let cur=cw[q].xyz;var sumM=0.0;var sumQ=vec3<f32>(0.0);
- for(var s:u32=0u;s<4u;s++){let sg=slots[c*4u+s];let e=u32(sg.meta.x);let nb=u32(sg.meta.y);let sign=f32(sg.meta.z);let ue=u[e*P.nz+k];let selfUp=ue*sign>=0.0;let up=select(nb,c,selfUp);let fd=select(sg.face.zw,sg.face.xy,selfUp);let gg=grad[up*P.nz+k];var qf=cw[up*P.nz+k].xyz+gg.east.xyz*fd.x+gg.north.xyz*fd.y;let m=sg.mid.xyz;qf-=m*dot(qf,m);let M=sign*rho[up*P.nz+k]*ue*edgeMetric[e].x;sumM+=M;sumQ+=M*qf;}
+ for(var s:u32=0u;s<4u;s++){let sg=slots[c*4u+s];let e=u32(sg.info.x);let nb=u32(sg.info.y);let sign=f32(sg.info.z);let ue=u[e*P.nz+k];let selfUp=ue*sign>=0.0;let up=select(nb,c,selfUp);let fd=select(sg.face.zw,sg.face.xy,selfUp);let gg=grad[up*P.nz+k];var qf=cw[up*P.nz+k].xyz+gg.east.xyz*fd.x+gg.north.xyz*fd.y;let m=sg.mid.xyz;qf-=m*dot(qf,m);let M=sign*rho[up*P.nz+k]*ue*edgeMetric[e].x;sumM+=M;sumQ+=M*qf;}
  let den=max(rho[q]*cellArea[c],1e-12);let a=(-sumQ+cur*sumM)/den;dv[q]=vec4<f32>(a,0.0);
 }
 `;
