@@ -9,7 +9,7 @@ export const STAGE4_RK3_CHECKPOINT_TEST_KEY='stage4-rk3-checkpoint-self-test';
 export const STAGE4_RK3_CHECKPOINT_SCHEMA_VERSION=1;
 // Bump this whenever a numerical change makes a prognostic state unsafe to
 // resume under the current Stage 4 production integrator.
-export const STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE='stage4-rk3-split-v1|N8|NZ48|H40000|stretch1.4|dt10|acoustic4|offcenter0.10|held-suarez-v1|material-momentum-muscl-bj-v2|fref-fpert-3d-v1|rayleigh-v1|acoustic-divergence-v1|face-conormal-v1|nonorth-pressure-v1';
+export const STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE='stage4-rk3-split-v1|N8|NZ48|H40000|stretch1.4|dt10|acoustic4|offcenter0.10|held-suarez-v1|material-momentum-muscl-bj-v2|vertical-mass-momentum-v1|fref-fpert-3d-v1|rayleigh-v1|acoustic-divergence-v1|face-conormal-v1|nonorth-pressure-v1';
 
 export interface Stage4Rk3ClimateCheckpoint{
   schemaVersion:number;
