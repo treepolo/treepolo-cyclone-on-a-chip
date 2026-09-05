@@ -15,6 +15,12 @@ export interface AxialAngularMomentumDiagnostics {
   torqueLeverMass:number;
 }
 
+export interface AxialAngularMomentumTendencyDiagnostics {
+  massRedistributionTorque:number;
+  velocityTorque:number;
+  totalTorque:number;
+}
+
 export interface EddyDiagnostics {
   midlatitudeEke:number;
   midlatitudePolewardHeatFlux:number;
@@ -39,7 +45,8 @@ function cellBasis(h:CubedSphereGrid,g:RotationGeometry,c:number):{east:[number,
  *
  * dragTorque is evaluated from the actual discrete Held-Suarez edge tendency,
  * then reconstructed to cell-centered eastward acceleration. This makes the
- * budget compare against the torque the production slow RHS really applies.
+ * budget compare against the torque the production slow RHS really applies,
+ * rather than against a separate analytic approximation.
  */
 export function diagnoseAxialAngularMomentum(h:CubedSphereGrid,v:VerticalGrid,s:DryState,rotation:RotationGeometry=buildRotationGeometry(h)):AxialAngularMomentumDiagnostics{
   const R=EARTH.radius,ref=buildHeldSuarezReference(v);
@@ -59,6 +66,46 @@ export function diagnoseAxialAngularMomentum(h:CubedSphereGrid,v:VerticalGrid,s:
     }
   }
   return{absolute,planetary,relative,dragTorque,torqueLeverMass};
+}
+
+/**
+ * Instantaneous dM/dt induced by an arbitrary discrete density tendency and
+ * edge-velocity acceleration, evaluated against the current state. This is the
+ * product-rule derivative of the same AAM functional used above:
+ *
+ * dM/dt = integral [rho_t * m_specific + rho * R cos(phi) * u_t] dV.
+ *
+ * Supplying only rhoT isolates mass redistribution; supplying only uEdgeT
+ * isolates a velocity-space torque. Because the diagnostic is linear in the
+ * supplied tendencies, independently computed discrete operators can be summed
+ * without running divergent toggle trajectories.
+ */
+export function diagnoseAxialAngularMomentumTendency(
+  h:CubedSphereGrid,
+  v:VerticalGrid,
+  s:DryState,
+  rhoT:ArrayLike<number>,
+  uEdgeT:ArrayLike<number>,
+  rotation:RotationGeometry=buildRotationGeometry(h),
+):AxialAngularMomentumTendencyDiagnostics{
+  if(rhoT.length!==s.rhoD.length)throw new Error('AAM tendency rho length mismatch');
+  if(uEdgeT.length!==s.uEdge.length)throw new Error('AAM tendency u length mismatch');
+  const R=EARTH.radius;
+  const accelState:DryState={rhoD:s.rhoD,rhoThetaM:s.rhoThetaM,uEdge:Float64Array.from(uEdgeT),wInterface:s.wInterface,time:s.time};
+  let massRedistributionTorque=0,velocityTorque=0;
+  for(let k=0;k<v.nz;k++){
+    const wind=reconstructCellHorizontalWind(h,rotation,s,k);
+    const accel=reconstructCellHorizontalWind(h,rotation,accelState,k);
+    for(let c=0;c<h.cellCount;c++){
+      const q=cell3DIndex(c,k,v.nz),o=c*3,b=cellBasis(h,rotation,c),vol=h.cellAreaUnit[c]!*R*R*v.dz[k]!,mass=s.rhoD[q]!*vol;
+      const u=wind[o]!*b.east[0]+wind[o+1]!*b.east[1]+wind[o+2]!*b.east[2];
+      const au=accel[o]!*b.east[0]+accel[o+1]!*b.east[1]+accel[o+2]!*b.east[2];
+      const lever=R*b.cosLat,specific=EARTH.omega*lever*lever+lever*u;
+      massRedistributionTorque+=rhoT[q]!*vol*specific;
+      velocityTorque+=mass*lever*au;
+    }
+  }
+  return{massRedistributionTorque,velocityTorque,totalTorque:massRedistributionTorque+velocityTorque};
 }
 
 /** Instantaneous zonal-eddy diagnostics. Heat and momentum fluxes are signed
