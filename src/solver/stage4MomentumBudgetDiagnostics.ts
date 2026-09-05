@@ -67,14 +67,7 @@ function projectCellVectorTendencyToEdges(
 
 /**
  * Split the material AAM cancellation into horizontal and vertical pieces using
- * exactly the production Stage-4 discrete flux definitions.  Diagnostic only.
- *
- * Horizontal continuity combines rho0*u with the perturbation donor flux, which
- * is exactly the total donor rho*u face flux.  Vertical continuity deliberately
- * mirrors the production reference/perturbation split: rho0(interface)*w plus
- * (rho_donor-rho0(donor-center))*w.  Horizontal momentum uses production
- * MUSCL-BJ; vertical horizontal-momentum transport is the current donor-cell
- * material form.  Their sums must reproduce the existing relative+momentum pair.
+ * exactly the production Stage-4 discrete flux definitions. Diagnostic only.
  */
 export function diagnoseStage4DirectionalAamBreakdown(
   h:CubedSphereGrid,
@@ -93,7 +86,7 @@ export function diagnoseStage4DirectionalAamBreakdown(
       const q=edge3DIndex(e,k,nz),vel=state.uEdge[q]!,lc=ge.leftCell,rc=ge.rightCell,l=cell3DIndex(lc,k,nz),r=cell3DIndex(rc,k,nz),up=vel>=0?l:r;
       const fm=state.rhoD[up]!*vel*edgeLength*v.dz[k]!;
       const vl=h.cellAreaUnit[lc]!*R*R*v.dz[k]!,vr=h.cellAreaUnit[rc]!*R*R*v.dz[k]!;
-      rhoH[l]-=fm/vl;rhoH[r]+=fm/vr;
+      rhoH[l]=rhoH[l]!-fm/vl;rhoH[r]=rhoH[r]!+fm/vr;
     }
   }
 
@@ -104,7 +97,7 @@ export function diagnoseStage4DirectionalAamBreakdown(
       const qi=w3DIndex(c,i,nz),vel=state.wInterface[qi]!,srcK=vel>=0?i-1:i,src=cell3DIndex(c,srcK,nz);
       const fm=(ref.rhoInterface[i]!+state.rhoD[src]!-ref.rhoCenter[srcK]!)*vel*area;
       const lower=cell3DIndex(c,i-1,nz),upper=cell3DIndex(c,i,nz);
-      rhoV[lower]-=fm/(area*v.dz[i-1]!);rhoV[upper]+=fm/(area*v.dz[i]!);
+      rhoV[lower]=rhoV[lower]!-fm/(area*v.dz[i-1]!);rhoV[upper]=rhoV[upper]!+fm/(area*v.dz[i]!);
     }
   }
 
@@ -117,10 +110,10 @@ export function diagnoseStage4DirectionalAamBreakdown(
     const o=c*3,dv=vCell[k]!,wc=.5*(state.wInterface[w3DIndex(c,k,nz)]!+state.wInterface[w3DIndex(c,k+1,nz)]!),cur=windByK[k]!;
     if(wc>0&&k>0){
       const below=windByK[k-1]!,dz=v.zCenter[k]!-v.zCenter[k-1]!;
-      dv[o]-=wc*(cur[o]!-below[o]!)/dz;dv[o+1]-=wc*(cur[o+1]!-below[o+1]!)/dz;dv[o+2]-=wc*(cur[o+2]!-below[o+2]!)/dz;
+      dv[o]=dv[o]!-wc*(cur[o]!-below[o]!)/dz;dv[o+1]=dv[o+1]!-wc*(cur[o+1]!-below[o+1]!)/dz;dv[o+2]=dv[o+2]!-wc*(cur[o+2]!-below[o+2]!)/dz;
     }else if(wc<0&&k<nz-1){
       const above=windByK[k+1]!,dz=v.zCenter[k+1]!-v.zCenter[k]!;
-      dv[o]-=wc*(above[o]!-cur[o]!)/dz;dv[o+1]-=wc*(above[o+1]!-cur[o+1]!)/dz;dv[o+2]-=wc*(above[o+2]!-cur[o+2]!)/dz;
+      dv[o]=dv[o]!-wc*(above[o]!-cur[o]!)/dz;dv[o+1]=dv[o+1]!-wc*(above[o+1]!-cur[o+1]!)/dz;dv[o+2]=dv[o+2]!-wc*(above[o+2]!-cur[o+2]!)/dz;
     }
   }
   const vU=projectCellVectorTendencyToEdges(h,v,rotation,vCell);
@@ -145,16 +138,7 @@ export function diagnoseStage4DirectionalAamBreakdown(
 
 /**
  * Decompose the frozen Stage-4 RHS into axial-angular-momentum torque pairs.
- *
  * This is diagnostic only: it does not alter the state or apply any AAM fixer.
- * The two physically coupled pairs are
- *
- *   planetary mass redistribution + Coriolis
- *   relative mass redistribution + material momentum transport
- *
- * and pressure is reported independently, including cubed-sphere seam/interior
- * pieces.  A non-zero pair residual therefore identifies a discrete operator
- * mismatch without prescribing what the circulation should look like.
  */
 export function diagnoseStage4InstantAamBreakdown(
   h:CubedSphereGrid,
