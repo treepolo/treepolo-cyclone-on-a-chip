@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node dist/tests/run.js && node dist/tests/stage4.js && node dist/tests/rk3Split.js && node dist/tests/stage4SlowTendencies.js && node dist/tests/stage4AcousticColumn.js && node dist/tests/stage4Rk3Cpu.js && node dist/tests/stage4SplitConsistency.js && node dist/tests/stage4AamConvergence.js && node dist/tests/stage4GradientStencil.js && node dist/tests/stage4MomentumAdvectionPrototype.js && node dist/tests/stage4MomentumMassFlux.js && node dist/tests/stage4PressureTorquePrototype.js",
+    "test": "npm run build && node dist/tests/run.js && node dist/tests/stage4.js && node dist/tests/rk3Split.js && node dist/tests/stage4SlowTendencies.js && node dist/tests/stage4AcousticColumn.js && node dist/tests/stage4Rk3Cpu.js && node dist/tests/stage4SplitConsistency.js && node dist/tests/stage4AamConvergence.js && node dist/tests/stage4GradientStencil.js && node dist/tests/stage4MomentumAdvectionPrototype.js && node dist/tests/stage4MomentumMassFlux.js && node dist/tests/stage4PressureTorquePrototype.js && node dist/tests/stage4ScalarTransportPrototype.js",
     "serve": "npm run build && node tools/serve.mjs"
   },
   "devDependencies": {
