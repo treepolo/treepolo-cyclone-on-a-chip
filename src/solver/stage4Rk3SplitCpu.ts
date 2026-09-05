@@ -2,6 +2,7 @@ import { DRY_AIR, EARTH } from '../core/constants.js';
 import { CubedSphereGrid } from '../grid/cubedSphere.js';
 import { VerticalGrid } from '../grid/vertical.js';
 import { acousticDivergenceCoefficientForDt, applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
+import { reconstructEdgeNormalScalarGradient } from '../physics/horizontalGradient.js';
 import { buildModelTopSpongeRates } from '../physics/modelTopSponge.js';
 import { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
 import { buildRotationGeometry, RotationGeometry } from '../physics/rotation.js';
@@ -38,12 +39,14 @@ export function computeStage4FrozenRhs(h:CubedSphereGrid,v:VerticalGrid,ref:Refe
     rho[q]=rho[q]!-(ref.rhoInterface[k+1]!*wt-ref.rhoInterface[k]!*wb)/dz;x[q]=x[q]!-(ref.rhoThetaInterface[k+1]!*wt-ref.rhoThetaInterface[k]!*wb)/dz;
   }
 
-  // Predictor pressure accelerations.
-  for(let e=0;e<h.edgeCount;e++){
-    const ge=h.edges[e]!,dist=Math.max(ge.centerDistanceAngle*R,1);
-    for(let k=0;k<nz;k++){
-      const l=cell3DIndex(ge.leftCell,k,nz),r=cell3DIndex(ge.rightCell,k,nz),q=edge3DIndex(e,k,nz),rhoAvg=Math.max(.5*(predictor.rhoD[l]!+predictor.rhoD[r]!),1e-12);u[q]=u[q]!-(pressure[r]!-pressure[l]!)/(rhoAvg*dist);
-    }
+  // Predictor horizontal pressure acceleration.  The cubed sphere is
+  // non-orthogonal, so a left/right center difference is not the derivative
+  // normal to the shared face.  Reconstruct cell tangent gradients from the
+  // four neighboring centers and project their average to the exact conormal.
+  for(let e=0;e<h.edgeCount;e++)for(let k=0;k<nz;k++){
+    const ge=h.edges[e]!,l=cell3DIndex(ge.leftCell,k,nz),r=cell3DIndex(ge.rightCell,k,nz),q=edge3DIndex(e,k,nz),rhoAvg=Math.max(.5*(predictor.rhoD[l]!+predictor.rhoD[r]!),1e-12);
+    const gradP=reconstructEdgeNormalScalarGradient(h,g,e,c=>pressure[cell3DIndex(c,k,nz)]!);
+    u[q]=u[q]!-gradP/rhoAvg;
   }
   const pr=new Float64Array(nz),px=new Float64Array(nz),pw=new Float64Array(nz+1);
   for(let c=0;c<h.cellCount;c++){
@@ -56,14 +59,16 @@ export function computeStage4FrozenRhs(h:CubedSphereGrid,v:VerticalGrid,ref:Refe
 
 /** One predictor-relative global acoustic small step. */
 export function advanceStage4AcousticSmallStep(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,predictor:DryState,acoustic:DryState,frozen:Stage4FrozenRhs,dt:number,options:Stage4Rk3SplitOptions={},rayleighRates?:ArrayLike<number>):void{
-  if(!(dt>0))throw new Error('Stage4 acoustic dt must be positive');const nz=v.nz,R=EARTH.radius;
-  // Forward pressure correction for horizontal velocity.
-  for(let e=0;e<h.edgeCount;e++){
-    const ge=h.edges[e]!,dist=Math.max(ge.centerDistanceAngle*R,1);
-    for(let k=0;k<nz;k++){
-      const l=cell3DIndex(ge.leftCell,k,nz),r=cell3DIndex(ge.rightCell,k,nz),q=edge3DIndex(e,k,nz),drL=acoustic.rhoD[l]!-predictor.rhoD[l]!,drR=acoustic.rhoD[r]!-predictor.rhoD[r]!,dxL=acoustic.rhoThetaM[l]!-predictor.rhoThetaM[l]!,dxR=acoustic.rhoThetaM[r]!-predictor.rhoThetaM[r]!,rhoAvg=Math.max(.5*(predictor.rhoD[l]!+predictor.rhoD[r]!),1e-12),dRhoAvg=.5*(drL+drR),dpPred=frozen.pressure[r]!-frozen.pressure[l]!,dDp=frozen.dpdRhoTheta[r]!*dxR-frozen.dpdRhoTheta[l]!*dxL,linearPressure=-dDp/(rhoAvg*dist)+dpPred*dRhoAvg/(rhoAvg*rhoAvg*dist);
-      acoustic.uEdge[q]=acoustic.uEdge[q]!+dt*(frozen.uEdge[q]!+linearPressure);
-    }
+  if(!(dt>0))throw new Error('Stage4 acoustic dt must be positive');const nz=v.nz,R=EARTH.radius,g=buildRotationGeometry(h);
+  // Forward pressure correction for horizontal velocity.  This is the exact
+  // linearization of -grad_n(p)/rhoAvg using the same non-orthogonal gradient
+  // operator as the frozen predictor RHS.
+  for(let e=0;e<h.edgeCount;e++)for(let k=0;k<nz;k++){
+    const ge=h.edges[e]!,l=cell3DIndex(ge.leftCell,k,nz),r=cell3DIndex(ge.rightCell,k,nz),q=edge3DIndex(e,k,nz),drL=acoustic.rhoD[l]!-predictor.rhoD[l]!,drR=acoustic.rhoD[r]!-predictor.rhoD[r]!,rhoAvg=Math.max(.5*(predictor.rhoD[l]!+predictor.rhoD[r]!),1e-12),dRhoAvg=.5*(drL+drR);
+    const gradPred=reconstructEdgeNormalScalarGradient(h,g,e,c=>frozen.pressure[cell3DIndex(c,k,nz)]!);
+    const gradDelta=reconstructEdgeNormalScalarGradient(h,g,e,c=>{const qc=cell3DIndex(c,k,nz);return frozen.dpdRhoTheta[qc]!*(acoustic.rhoThetaM[qc]!-predictor.rhoThetaM[qc]!);});
+    const linearPressure=-gradDelta/rhoAvg+gradPred*dRhoAvg/(rhoAvg*rhoAvg);
+    acoustic.uEdge[q]=acoustic.uEdge[q]!+dt*(frozen.uEdge[q]!+linearPressure);
   }
 
   // Backward reference-continuity correction. Nonlinear perturbation transport
