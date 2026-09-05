@@ -16,6 +16,8 @@ export interface AxialAngularMomentumDiagnostics {
 }
 
 export interface AxialAngularMomentumTendencyDiagnostics {
+  planetaryMassRedistributionTorque:number;
+  relativeMassRedistributionTorque:number;
   massRedistributionTorque:number;
   velocityTorque:number;
   totalTorque:number;
@@ -76,9 +78,16 @@ export function diagnoseAxialAngularMomentum(h:CubedSphereGrid,v:VerticalGrid,s:
  * dM/dt = integral [rho_t * m_specific + rho * R cos(phi) * u_t] dV.
  *
  * Supplying only rhoT isolates mass redistribution; supplying only uEdgeT
- * isolates a velocity-space torque. Because the diagnostic is linear in the
- * supplied tendencies, independently computed discrete operators can be summed
- * without running divergent toggle trajectories.
+ * isolates a velocity-space torque. The mass part is also split into its
+ * planetary and relative-AAM pieces, which lets the caller test the two
+ * continuum cancellation identities separately:
+ *
+ *   planetary mass redistribution <-> Coriolis
+ *   relative mass redistribution  <-> material momentum transport
+ *
+ * Because the diagnostic is linear in the supplied tendencies, independently
+ * computed discrete operators can be summed without running divergent toggle
+ * trajectories.
  */
 export function diagnoseAxialAngularMomentumTendency(
   h:CubedSphereGrid,
@@ -92,7 +101,7 @@ export function diagnoseAxialAngularMomentumTendency(
   if(uEdgeT.length!==s.uEdge.length)throw new Error('AAM tendency u length mismatch');
   const R=EARTH.radius;
   const accelState:DryState={rhoD:s.rhoD,rhoThetaM:s.rhoThetaM,uEdge:Float64Array.from(uEdgeT),wInterface:s.wInterface,time:s.time};
-  let massRedistributionTorque=0,velocityTorque=0;
+  let planetaryMassRedistributionTorque=0,relativeMassRedistributionTorque=0,velocityTorque=0;
   for(let k=0;k<v.nz;k++){
     const wind=reconstructCellHorizontalWind(h,rotation,s,k);
     const accel=reconstructCellHorizontalWind(h,rotation,accelState,k);
@@ -100,12 +109,20 @@ export function diagnoseAxialAngularMomentumTendency(
       const q=cell3DIndex(c,k,v.nz),o=c*3,b=cellBasis(h,rotation,c),vol=h.cellAreaUnit[c]!*R*R*v.dz[k]!,mass=s.rhoD[q]!*vol;
       const u=wind[o]!*b.east[0]+wind[o+1]!*b.east[1]+wind[o+2]!*b.east[2];
       const au=accel[o]!*b.east[0]+accel[o+1]!*b.east[1]+accel[o+2]!*b.east[2];
-      const lever=R*b.cosLat,specific=EARTH.omega*lever*lever+lever*u;
-      massRedistributionTorque+=rhoT[q]!*vol*specific;
+      const lever=R*b.cosLat,planetarySpecific=EARTH.omega*lever*lever,relativeSpecific=lever*u;
+      planetaryMassRedistributionTorque+=rhoT[q]!*vol*planetarySpecific;
+      relativeMassRedistributionTorque+=rhoT[q]!*vol*relativeSpecific;
       velocityTorque+=mass*lever*au;
     }
   }
-  return{massRedistributionTorque,velocityTorque,totalTorque:massRedistributionTorque+velocityTorque};
+  const massRedistributionTorque=planetaryMassRedistributionTorque+relativeMassRedistributionTorque;
+  return{
+    planetaryMassRedistributionTorque,
+    relativeMassRedistributionTorque,
+    massRedistributionTorque,
+    velocityTorque,
+    totalTorque:massRedistributionTorque+velocityTorque,
+  };
 }
 
 /** Instantaneous zonal-eddy diagnostics. Heat and momentum fluxes are signed
