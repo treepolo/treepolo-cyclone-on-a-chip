@@ -155,14 +155,14 @@ async function profile(gpu:GpuStage4Rk3SplitReference){
       slow('cellwind',h.cellCount*v.nz);slow('hadv',h.cellCount*v.nz);slow('vadv',h.cellCount*v.nz);slow('coriolis',h.cellCount*v.nz);slow('project',h.edgeCount*v.nz);slow('wtend',h.cellCount*(v.nz+1));slow('thermal',h.cellCount*v.nz);slow('drag',h.edgeCount*v.nz);
 
       const prep=(name:string,count:number,size=128)=>timed({outer,stage,acousticStep:null,category:'prep',kernel:`prep.${name}`},p=>rkDispatch(p,name,count,stageIndex,size));
-      prep('prepCell',h.cellCount*v.nz);prep('addHref',h.cellCount*v.nz);prep('addVref',h.cellCount*v.nz);prep('predGrad',h.cellCount*v.nz);prep('prepU',h.edgeCount*v.nz);prep('prepIface',h.cellCount*(v.nz+1));
+      prep('prepCell',h.cellCount*v.nz);prep('addHref',h.cellCount*v.nz);prep('addVref',h.cellCount*v.nz);prep('prepU',h.edgeCount*v.nz);prep('prepIface',h.cellCount*(v.nz+1));
       enc.copyBufferToBuffer(rb.baseU,0,rb.acousticU,0,h.edgeCount*v.nz*4);
 
       const div=stageIndex===0?g.divergenceStage1:g.divergence;
       for(let n=0;n<steps;n++){
         const acousticStep=n+1;
         const acoustic=(name:string,count:number,size=128)=>timed({outer,stage,acousticStep,category:'acoustic',kernel:`acoustic.${name}`},p=>rkDispatch(p,name,count,stageIndex,size));
-        acoustic('deltaGrad',h.cellCount*v.nz);acoustic('hvel',h.edgeCount*v.nz);acoustic('hrefFlux',h.edgeCount*v.nz);acoustic('hrefDiv',h.cellCount*v.nz);acoustic('vertical',h.cellCount,STAGE4_VERTICAL_WORKGROUP_SIZE);
+        acoustic('hvel',h.edgeCount*v.nz);acoustic('hrefFlux',h.edgeCount*v.nz);acoustic('hrefDiv',h.cellCount*v.nz);acoustic('vertical',h.cellCount,STAGE4_VERTICAL_WORKGROUP_SIZE);
         timed({outer,stage,acousticStep,category:'damping',kernel:'damping.divergence'},p=>divDispatch(p,div,'divergence'));
         timed({outer,stage,acousticStep,category:'damping',kernel:'damping.adjust'},p=>divDispatch(p,div,'adjust'));
       }
