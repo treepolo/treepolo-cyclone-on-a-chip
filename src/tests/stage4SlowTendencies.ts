@@ -4,6 +4,7 @@ import { buildCubedSphere } from '../grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from '../grid/vertical.js';
 import { buildHeldSuarezReference } from '../physics/heldSuarez.js';
 import { buildRotationGeometry, setAnalyticCellWind } from '../physics/rotation.js';
+import { diagnoseAxialAngularMomentum, diagnoseAxialAngularMomentumTendency } from '../solver/stage4CirculationDiagnostics.js';
 import { computeStage4SlowTendencies } from '../solver/stage4SlowTendenciesCpu.js';
 import { cloneState, createHydrostaticState, w3DIndex } from '../solver/state.js';
 
@@ -55,6 +56,24 @@ test('Vertical mass transport preserves a horizontally moving column that is uni
   let diff=0,scale=0;
   for(let q=0;q<a.uEdge.length;q++){diff=Math.max(diff,Math.abs(b.uEdge[q]!-a.uEdge[q]!));scale=Math.max(scale,Math.abs(a.uEdge[q]!),Math.abs(b.uEdge[q]!));}
   assert(diff<2e-12*Math.max(1,scale),`vertical carrier changed height-uniform horizontal wind: diff=${diff}, scale=${scale}`);
+});
+
+test('Discrete AAM tendency matches central finite difference of the AAM functional',()=>{
+  const h=buildCubedSphere(4),v=buildStretchedVerticalGrid(8,12000,1.2),ref=buildHeldSuarezReference(v),g=buildRotationGeometry(h),s=createHydrostaticState(h,v,ref);
+  for(let q=0;q<s.uEdge.length;q++)s.uEdge[q]=7*Math.sin((q+1)*.137)+2*Math.cos((q+1)*.071);
+  const rhoT=new Float64Array(s.rhoD.length),uT=new Float64Array(s.uEdge.length);
+  for(let q=0;q<rhoT.length;q++)rhoT[q]=s.rhoD[q]!*1e-6*Math.sin((q+1)*.191);
+  for(let q=0;q<uT.length;q++)uT[q]=1e-4*Math.cos((q+1)*.163);
+  const analytic=diagnoseAxialAngularMomentumTendency(h,v,s,rhoT,uT,g);
+  const eps=500,plus=cloneState(s),minus=cloneState(s);
+  for(let q=0;q<s.rhoD.length;q++){plus.rhoD[q]=plus.rhoD[q]!+eps*rhoT[q]!;minus.rhoD[q]=minus.rhoD[q]!-eps*rhoT[q]!;}
+  for(let q=0;q<s.uEdge.length;q++){plus.uEdge[q]=plus.uEdge[q]!+eps*uT[q]!;minus.uEdge[q]=minus.uEdge[q]!-eps*uT[q]!;}
+  const fd=(diagnoseAxialAngularMomentum(h,v,plus,g).absolute-diagnoseAxialAngularMomentum(h,v,minus,g).absolute)/(2*eps);
+  const err=Math.abs(fd-analytic.totalTorque),scale=Math.max(1,Math.abs(fd),Math.abs(analytic.totalTorque));
+  assert(err/scale<5e-8,`AAM tendency finite-difference mismatch: analytic=${analytic.totalTorque}, fd=${fd}, rel=${err/scale}`);
+  const splitErr=Math.abs(analytic.massRedistributionTorque-analytic.planetaryMassRedistributionTorque-analytic.relativeMassRedistributionTorque);
+  const splitScale=Math.max(1,Math.abs(analytic.massRedistributionTorque),Math.abs(analytic.planetaryMassRedistributionTorque),Math.abs(analytic.relativeMassRedistributionTorque));
+  assert(splitErr/splitScale<5e-14,`AAM mass split closure mismatch: err=${splitErr}, scale=${splitScale}`);
 });
 
 let passed=0;for(const t of tests){try{t.fn();console.log(`PASS ${t.name}`);passed++}catch(e){console.error(`FAIL ${t.name}`);console.error(e);process.exitCode=1}}
