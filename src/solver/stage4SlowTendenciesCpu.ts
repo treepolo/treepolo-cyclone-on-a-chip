@@ -2,6 +2,7 @@ import { DRY_AIR, EARTH } from '../core/constants.js';
 import { CubedSphereGrid } from '../grid/cubedSphere.js';
 import { VerticalGrid } from '../grid/vertical.js';
 import { heldSuarezDragRate, heldSuarezTeq, heldSuarezThermalRate } from '../physics/heldSuarez.js';
+import { computeHorizontalMaterialMomentumTendency } from '../physics/horizontalMomentumTransport.js';
 import { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
 import { buildRotationGeometry, reconstructCellHorizontalWind, RotationGeometry } from '../physics/rotation.js';
 import { pressureFromRhoTheta, thetaFromTP } from '../physics/thermodynamics.js';
@@ -29,12 +30,15 @@ export interface Stage4SlowTendencies {
  * acoustic correction owns compression of the reference atmosphere while the
  * large-step RHS owns nonlinear transport of departures from that reference.
  *
- * Prognostic horizontal wind is velocity, not rho*u. Its slow transport is
- * therefore evaluated directly in material form -u_h.grad_h(u)-w du/dz using
- * donor-cell upstream differences. Horizontal vector derivatives are formed in
- * global Cartesian components and then projected to each target cell's tangent
- * plane before edge projection, giving the discrete covariant acceleration on
- * the sphere rather than retaining basis-rotation radial components.
+ * Horizontal material momentum now uses the same total donor mass carrier as
+ * the discrete continuity equation and reconstructs the upwind horizontal wind
+ * to the actual great-circle face midpoint with tangent least-squares gradients
+ * plus a local Barth-Jespersen-style vector limiter.  The conservative momentum
+ * flux is converted back to a velocity tendency with the discrete continuity
+ * identity, rather than relying on a first-order velocity-only donor difference.
+ * This is a numerical compatibility/accuracy change; no climatological target
+ * or preferred wind sign is present.  Vertical horizontal-momentum transport
+ * remains donor-cell for now and is changed separately.
  */
 export function computeStage4SlowTendencies(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,s:DryState,options:Stage4SlowOptions={},rotation?:RotationGeometry):Stage4SlowTendencies {
   const momentum=options.momentumTransport!==false,coriolis=options.coriolis!==false,heldSuarez=options.heldSuarez!==false,nz=v.nz,R=EARTH.radius,g=rotation??buildRotationGeometry(h);
@@ -63,17 +67,13 @@ export function computeStage4SlowTendencies(h:CubedSphereGrid,v:VerticalGrid,ref
   if(momentum||coriolis){
     const windByK:Float64Array[]=Array.from({length:nz},(_,k)=>reconstructCellHorizontalWind(h,g,s,k)),cellVT:Float64Array[]=Array.from({length:nz},()=>new Float64Array(h.cellCount*3));
     if(momentum){
-      // Horizontal donor-cell material advection. In flux-divergence form for
-      // an advected velocity this is sum(F*(u_up-u_cell))/volume, so outflow
-      // faces vanish and inflow faces supply the upstream difference.
-      for(let c=0;c<h.cellCount;c++)for(let k=0;k<nz;k++){
-        const cur=windByK[k]!,o=c*3,dv=cellVT[k]!,area=h.cellAreaUnit[c]!*R*R;
-        for(let slot=0;slot<4;slot++){
-          const eid=h.cellEdges[c*4+slot]!,sgn=h.cellEdgeSigns[c*4+slot]!,ge=h.edges[eid]!,outward=sgn*s.uEdge[edge3DIndex(eid,k,nz)]!;
-          if(outward<0){const n=ge.leftCell===c?ge.rightCell:ge.leftCell,nw=windByK[k]!,no=n*3,coef=-outward*(ge.angularLength*R)/area;dv[o]=dv[o]!+coef*(nw[no]!-cur[o]!);dv[o+1]=dv[o+1]!+coef*(nw[no+1]!-cur[o+1]!);dv[o+2]=dv[o+2]!+coef*(nw[no+2]!-cur[o+2]!);}
-        }
-      }
+      // Horizontal mass-flux-consistent limited second-order transport.
+      const horizontal=computeHorizontalMaterialMomentumTendency(h,v,s,g,'muscl-bj',windByK);
+      for(let k=0;k<nz;k++)cellVT[k]!.set(horizontal[k]!);
+
       // Vertical donor-cell material advection using layer-center velocity.
+      // This remains intentionally unchanged in this revision so horizontal
+      // transport can be validated independently.
       for(let c=0;c<h.cellCount;c++)for(let k=0;k<nz;k++){
         const o=c*3,dv=cellVT[k]!,wc=.5*(s.wInterface[w3DIndex(c,k,nz)]!+s.wInterface[w3DIndex(c,k+1,nz)]!),cur=windByK[k]!;
         if(wc>0&&k>0){const below=windByK[k-1]!,dz=v.zCenter[k]!-v.zCenter[k-1]!;dv[o]=dv[o]!-wc*(cur[o]!-below[o]!)/dz;dv[o+1]=dv[o+1]!-wc*(cur[o+1]!-below[o+1]!)/dz;dv[o+2]=dv[o+2]!-wc*(cur[o+2]!-below[o+2]!)/dz;}
