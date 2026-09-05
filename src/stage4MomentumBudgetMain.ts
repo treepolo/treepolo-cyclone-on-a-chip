@@ -9,7 +9,16 @@ import {
 } from './persistence/stage4Rk3Checkpoint.js';
 import { buildHeldSuarezReference } from './physics/heldSuarez.js';
 import { buildRotationGeometry } from './physics/rotation.js';
-import { diagnoseAxialAngularMomentum, diagnoseEddies, type AxialAngularMomentumDiagnostics, type EddyDiagnostics } from './solver/stage4CirculationDiagnostics.js';
+import {
+  diagnoseAxialAngularMomentum,
+  diagnoseAxialAngularMomentumTendency,
+  diagnoseEddies,
+  type AxialAngularMomentumDiagnostics,
+  type EddyDiagnostics,
+} from './solver/stage4CirculationDiagnostics.js';
+import { computeStage4FrozenRhs } from './solver/stage4Rk3SplitCpu.js';
+import { computeStage4SlowTendencies } from './solver/stage4SlowTendenciesCpu.js';
+import type { DryState } from './solver/state.js';
 
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const logEl=$<HTMLPreElement>('log');
@@ -18,6 +27,17 @@ const DIAGNOSTIC_KEY='stage4-rk3-spinup-diagnostic';
 const DT=10,STEPS_PER_QUARTER=Math.round(21600/DT),BATCH=40;
 
 type Point={day:number;aam:AxialAngularMomentumDiagnostics;eddy:EddyDiagnostics};
+type InstantBreakdown={
+  mass:number;
+  pressure:number;
+  momentum:number;
+  coriolis:number;
+  drag:number;
+  inviscid:number;
+  withDrag:number;
+  full:number;
+  closure:number;
+};
 function log(s:string):void{logEl.textContent=`${s}\n${logEl.textContent||''}`.slice(0,50000);}
 function valid(cp:Stage4Rk3ClimateCheckpoint|null):cp is Stage4Rk3ClimateCheckpoint{
   if(!cp)return false;
@@ -32,11 +52,12 @@ async function latestCheckpoint():Promise<{cp:Stage4Rk3ClimateCheckpoint;kind:st
 }
 function fmtExp(x:number):string{return Number.isFinite(x)?x.toExponential(4):'—';}
 function fmt(x:number,d=4):string{return Number.isFinite(x)?x.toFixed(d):'—';}
+function signed(x:number,d=5):string{return `${x>=0?'+':''}${fmt(x,d)}`;}
 async function yieldToBrowser():Promise<void>{
   const scheduler=(globalThis as any).scheduler;
   if(typeof scheduler?.yield==='function')await scheduler.yield();else await new Promise<void>(r=>setTimeout(r,0));
 }
-function diagnose(h:ReturnType<typeof buildCubedSphere>,v:ReturnType<typeof buildStretchedVerticalGrid>,state:any,day:number,rotation:ReturnType<typeof buildRotationGeometry>):Point{
+function diagnose(h:ReturnType<typeof buildCubedSphere>,v:ReturnType<typeof buildStretchedVerticalGrid>,state:DryState,day:number,rotation:ReturnType<typeof buildRotationGeometry>):Point{
   return{day,aam:diagnoseAxialAngularMomentum(h,v,state,rotation),eddy:diagnoseEddies(h,v,state,24,rotation)};
 }
 function renderPoint(p:Point):void{
@@ -47,6 +68,32 @@ function renderPoint(p:Point):void{
   $('eke').textContent=fmt(p.eddy.midlatitudeEke,3)+' m²/s²';
   $('heat').textContent=fmt(p.eddy.midlatitudePolewardHeatFlux,4)+' K·m/s';
   $('mom').textContent=fmt(p.eddy.midlatitudePolewardMomentumFlux,4)+' m²/s²';
+}
+function instantaneousBreakdown(
+  h:ReturnType<typeof buildCubedSphere>,
+  v:ReturnType<typeof buildStretchedVerticalGrid>,
+  ref:ReturnType<typeof buildHeldSuarezReference>,
+  state:DryState,
+  rotation:ReturnType<typeof buildRotationGeometry>,
+):InstantBreakdown{
+  const zeroRho=new Float64Array(state.rhoD.length),zeroU=new Float64Array(state.uEdge.length);
+  const pressureAndContinuity=computeStage4FrozenRhs(h,v,ref,state,{momentumTransport:false,coriolis:false,heldSuarez:false},rotation);
+  const momentumT=computeStage4SlowTendencies(h,v,ref,state,{momentumTransport:true,coriolis:false,heldSuarez:false},rotation);
+  const coriolisT=computeStage4SlowTendencies(h,v,ref,state,{momentumTransport:false,coriolis:true,heldSuarez:false},rotation);
+  const dragT=computeStage4SlowTendencies(h,v,ref,state,{momentumTransport:false,coriolis:false,heldSuarez:true},rotation);
+  const fullT=computeStage4FrozenRhs(h,v,ref,state,{momentumTransport:true,coriolis:true,heldSuarez:true},rotation);
+  const mass=diagnoseAxialAngularMomentumTendency(h,v,state,pressureAndContinuity.rhoD,zeroU,rotation).totalTorque;
+  const pressure=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,pressureAndContinuity.uEdge,rotation).totalTorque;
+  const momentum=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,momentumT.uEdge,rotation).totalTorque;
+  const coriolis=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,coriolisT.uEdge,rotation).totalTorque;
+  const drag=diagnoseAxialAngularMomentumTendency(h,v,state,zeroRho,dragT.uEdge,rotation).totalTorque;
+  const full=diagnoseAxialAngularMomentumTendency(h,v,state,fullT.rhoD,fullT.uEdge,rotation).totalTorque;
+  const inviscid=mass+pressure+momentum+coriolis,withDrag=inviscid+drag;
+  return{mass,pressure,momentum,coriolis,drag,inviscid,withDrag,full,closure:full-withDrag};
+}
+function renderInstant(x:InstantBreakdown,lever:number):void{
+  const show=(id:string,t:number)=>{$(id).textContent=`${fmtExp(t)} N m  (${signed(t/lever*86400)} m/s/day)`;};
+  show('instantMass',x.mass);show('instantPressure',x.pressure);show('instantMomentum',x.momentum);show('instantCoriolis',x.coriolis);show('instantDrag',x.drag);show('instantInviscid',x.inviscid);show('instantWithDrag',x.withDrag);show('instantFull',x.full);show('instantClosure',x.closure);
 }
 
 async function refresh():Promise<void>{
@@ -66,6 +113,8 @@ runBtn.onclick=()=>void(async()=>{
     const h=buildCubedSphere(8),v=buildStretchedVerticalGrid(48,40000,1.4),ref=buildHeldSuarezReference(v),rotation=buildRotationGeometry(h);
     const startDay=src.cp.completedOuterSteps*DT/86400,startState=src.cp.state;
     const points:Point[]=[diagnose(h,v,startState,startDay,rotation)];renderPoint(points[0]!);
+    const instant=instantaneousBreakdown(h,v,ref,startState,rotation);renderInstant(instant,points[0]!.aam.torqueLeverMass);
+    log(`INSTANT mass=${fmtExp(instant.mass)} pressure=${fmtExp(instant.pressure)} momentum=${fmtExp(instant.momentum)} coriolis=${fmtExp(instant.coriolis)} inviscid=${fmtExp(instant.inviscid)} drag=${fmtExp(instant.drag)} withDrag=${fmtExp(instant.withDrag)} full=${fmtExp(instant.full)} closure=${fmtExp(instant.closure)} Nm.`);
     log(`start day ${startDay.toFixed(2)} AAM=${fmtExp(points[0]!.aam.absolute)} relAAM=${fmtExp(points[0]!.aam.relative)} dragTorque=${fmtExp(points[0]!.aam.dragTorque)} EKE=${fmt(points[0]!.eddy.midlatitudeEke,4)} poleward_vT=${fmt(points[0]!.eddy.midlatitudePolewardHeatFlux,5)} poleward_uv=${fmt(points[0]!.eddy.midlatitudePolewardMomentumFlux,5)}`);
     const gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,startState,4),opts={heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true} as const,t0=performance.now();
     try{
@@ -82,9 +131,9 @@ runBtn.onclick=()=>void(async()=>{
     let dragIntegral=0;
     for(let i=1;i<points.length;i++)dragIntegral+=.5*(points[i-1]!.aam.dragTorque+points[i]!.aam.dragTorque)*(points[i]!.day-points[i-1]!.day)*86400;
     const meanDrag=dragIntegral/totalSeconds,residual=observed-meanDrag,lever=.5*(first.aam.torqueLeverMass+last.aam.torqueLeverMass),obsAccel=observed/lever*86400,dragAccel=meanDrag/lever*86400,resAccel=residual/lever*86400;
-    $('observed').textContent=`${fmtExp(observed)} N m  (${obsAccel>=0?'+':''}${fmt(obsAccel,5)} m/s/day)`;
-    $('meanDrag').textContent=`${fmtExp(meanDrag)} N m  (${dragAccel>=0?'+':''}${fmt(dragAccel,5)} m/s/day)`;
-    $('residual').textContent=`${fmtExp(residual)} N m  (${resAccel>=0?'+':''}${fmt(resAccel,5)} m/s/day)`;
+    $('observed').textContent=`${fmtExp(observed)} N m  (${signed(obsAccel)} m/s/day)`;
+    $('meanDrag').textContent=`${fmtExp(meanDrag)} N m  (${signed(dragAccel)} m/s/day)`;
+    $('residual').textContent=`${fmtExp(residual)} N m  (${signed(resAccel)} m/s/day)`;
     $('ekeChange').textContent=`${fmt(first.eddy.midlatitudeEke,3)} → ${fmt(last.eddy.midlatitudeEke,3)} m²/s²`;
     $('heatChange').textContent=`${fmt(first.eddy.midlatitudePolewardHeatFlux,4)} → ${fmt(last.eddy.midlatitudePolewardHeatFlux,4)} K·m/s`;
     $('momChange').textContent=`${fmt(first.eddy.midlatitudePolewardMomentumFlux,4)} → ${fmt(last.eddy.midlatitudePolewardMomentumFlux,4)} m²/s²`;
