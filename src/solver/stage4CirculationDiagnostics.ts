@@ -1,6 +1,7 @@
 import { EARTH } from '../core/constants.js';
 import { CubedSphereGrid } from '../grid/cubedSphere.js';
 import { VerticalGrid } from '../grid/vertical.js';
+import { buildHeldSuarezReference } from '../physics/heldSuarez.js';
 import { pressureFromRhoTheta, temperatureFromThetaP } from '../physics/thermodynamics.js';
 import { buildRotationGeometry, reconstructCellHorizontalWind, RotationGeometry } from '../physics/rotation.js';
 import { computeStage4SlowTendencies } from './stage4SlowTendenciesCpu.js';
@@ -31,21 +32,18 @@ function cellBasis(h:CubedSphereGrid,g:RotationGeometry,c:number):{east:[number,
 
 /**
  * Global axial angular momentum in the same shallow-sphere geometry used by
- * Stage 4.  In the rotating frame the conserved quantity (absent external
+ * Stage 4. In the rotating frame the conserved quantity (absent external
  * torque) is
  *
  *   M = integral rho [Omega R^2 cos^2(phi) + R cos(phi) u] dV.
  *
  * dragTorque is evaluated from the actual discrete Held-Suarez edge tendency,
- * then reconstructed to cell-centered eastward acceleration.  This makes the
- * budget compare against the torque the production slow RHS really applies,
- * rather than against a separate analytic approximation.
+ * then reconstructed to cell-centered eastward acceleration. This makes the
+ * budget compare against the torque the production slow RHS really applies.
  */
 export function diagnoseAxialAngularMomentum(h:CubedSphereGrid,v:VerticalGrid,s:DryState,rotation:RotationGeometry=buildRotationGeometry(h)):AxialAngularMomentumDiagnostics{
-  const R=EARTH.radius;
-  const drag=computeStage4SlowTendencies(h,v,{...({} as any)},s,{momentumTransport:false,coriolis:false,heldSuarez:true},rotation);
-  // reconstructCellHorizontalWind only consumes uEdge; preserve the production
-  // state arrays to avoid allocating unrelated diagnostic copies.
+  const R=EARTH.radius,ref=buildHeldSuarezReference(v);
+  const drag=computeStage4SlowTendencies(h,v,ref,s,{momentumTransport:false,coriolis:false,heldSuarez:true},rotation);
   const dragState:DryState={rhoD:s.rhoD,rhoThetaM:s.rhoThetaM,uEdge:drag.uEdge,wInterface:s.wInterface,time:s.time};
   let absolute=0,planetary=0,relative=0,dragTorque=0,torqueLeverMass=0;
   for(let k=0;k<v.nz;k++){
@@ -63,7 +61,7 @@ export function diagnoseAxialAngularMomentum(h:CubedSphereGrid,v:VerticalGrid,s:
   return{absolute,planetary,relative,dragTorque,torqueLeverMass};
 }
 
-/** Instantaneous zonal-eddy diagnostics.  Heat and momentum fluxes are signed
+/** Instantaneous zonal-eddy diagnostics. Heat and momentum fluxes are signed
  * poleward in both hemispheres, so a physically active baroclinic field adds
  * rather than cancelling across the equator. */
 export function diagnoseEddies(h:CubedSphereGrid,v:VerticalGrid,s:DryState,bins=24,rotation:RotationGeometry=buildRotationGeometry(h)):EddyDiagnostics{
