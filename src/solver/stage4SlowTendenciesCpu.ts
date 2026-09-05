@@ -6,6 +6,7 @@ import { computeHorizontalMaterialMomentumTendency } from '../physics/horizontal
 import { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
 import { buildRotationGeometry, reconstructCellHorizontalWind, RotationGeometry } from '../physics/rotation.js';
 import { pressureFromRhoTheta, thetaFromTP } from '../physics/thermodynamics.js';
+import { computeVerticalHorizontalMomentumTendency } from '../physics/verticalHorizontalMomentumTransport.js';
 import { computeVerticalVelocityAdvectionTendency } from '../physics/verticalMomentumAdvection.js';
 import { DryState, cell3DIndex, edge3DIndex, w3DIndex } from './state.js';
 
@@ -30,15 +31,14 @@ export interface Stage4SlowTendencies {
  * acoustic correction owns compression of the reference atmosphere while the
  * large-step RHS owns nonlinear transport of departures from that reference.
  *
- * Horizontal material momentum now uses the same total donor mass carrier as
- * the discrete continuity equation and reconstructs the upwind horizontal wind
- * to the actual great-circle face midpoint with tangent least-squares gradients
- * plus a local Barth-Jespersen-style vector limiter.  The conservative momentum
- * flux is converted back to a velocity tendency with the discrete continuity
- * identity, rather than relying on a first-order velocity-only donor difference.
- * This is a numerical compatibility/accuracy change; no climatological target
- * or preferred wind sign is present.  Vertical horizontal-momentum transport
- * remains donor-cell for now and is changed separately.
+ * Horizontal material momentum uses the same total donor mass carrier as the
+ * discrete continuity equation and reconstructs the upwind horizontal wind to
+ * the actual great-circle face midpoint with tangent least-squares gradients
+ * plus a local Barth-Jespersen-style vector limiter. Vertical transport likewise
+ * uses the exact total vertical carrier produced by reference+perturbation
+ * continuity and converts conservative donor momentum flux back to a material
+ * velocity tendency with the discrete product rule. Neither operator contains a
+ * climatological target, preferred wind sign, or global AAM correction.
  */
 export function computeStage4SlowTendencies(h:CubedSphereGrid,v:VerticalGrid,ref:ReferenceAtmosphere,s:DryState,options:Stage4SlowOptions={},rotation?:RotationGeometry):Stage4SlowTendencies {
   const momentum=options.momentumTransport!==false,coriolis=options.coriolis!==false,heldSuarez=options.heldSuarez!==false,nz=v.nz,R=EARTH.radius,g=rotation??buildRotationGeometry(h);
@@ -67,17 +67,11 @@ export function computeStage4SlowTendencies(h:CubedSphereGrid,v:VerticalGrid,ref
   if(momentum||coriolis){
     const windByK:Float64Array[]=Array.from({length:nz},(_,k)=>reconstructCellHorizontalWind(h,g,s,k)),cellVT:Float64Array[]=Array.from({length:nz},()=>new Float64Array(h.cellCount*3));
     if(momentum){
-      // Horizontal mass-flux-consistent limited second-order transport.
       const horizontal=computeHorizontalMaterialMomentumTendency(h,v,s,g,'muscl-bj',windByK);
-      for(let k=0;k<nz;k++)cellVT[k]!.set(horizontal[k]!);
-
-      // Vertical donor-cell material advection using layer-center velocity.
-      // This remains intentionally unchanged in this revision so horizontal
-      // transport can be validated independently.
-      for(let c=0;c<h.cellCount;c++)for(let k=0;k<nz;k++){
-        const o=c*3,dv=cellVT[k]!,wc=.5*(s.wInterface[w3DIndex(c,k,nz)]!+s.wInterface[w3DIndex(c,k+1,nz)]!),cur=windByK[k]!;
-        if(wc>0&&k>0){const below=windByK[k-1]!,dz=v.zCenter[k]!-v.zCenter[k-1]!;dv[o]=dv[o]!-wc*(cur[o]!-below[o]!)/dz;dv[o+1]=dv[o+1]!-wc*(cur[o+1]!-below[o+1]!)/dz;dv[o+2]=dv[o+2]!-wc*(cur[o+2]!-below[o+2]!)/dz;}
-        else if(wc<0&&k<nz-1){const above=windByK[k+1]!,dz=v.zCenter[k+1]!-v.zCenter[k]!;dv[o]=dv[o]!-wc*(above[o]!-cur[o]!)/dz;dv[o+1]=dv[o+1]!-wc*(above[o+1]!-cur[o+1]!)/dz;dv[o+2]=dv[o+2]!-wc*(above[o+2]!-cur[o+2]!)/dz;}
+      const vertical=computeVerticalHorizontalMomentumTendency(h,v,ref,s,g,windByK);
+      for(let k=0;k<nz;k++){
+        const dst=cellVT[k]!,ha=horizontal[k]!,va=vertical[k]!;
+        for(let i=0;i<dst.length;i++)dst[i]=ha[i]!+va[i]!;
       }
     }
     if(coriolis){
@@ -87,7 +81,7 @@ export function computeStage4SlowTendencies(h:CubedSphereGrid,v:VerticalGrid,ref
       }}
     }
     // Covariant/tangent projection at each source cell before averaging to the
-    // staggered edge.  The global-vector derivative may contain a radial piece
+    // staggered edge. The global-vector derivative may contain a radial piece
     // solely because the tangent basis rotates across the sphere; that piece is
     // not a physical horizontal acceleration.
     for(let e=0;e<h.edgeCount;e++){
