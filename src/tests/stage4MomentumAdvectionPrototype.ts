@@ -7,8 +7,10 @@ import { reconstructCellScalarGradient } from '../physics/horizontalGradient.js'
 import { buildRotationGeometry, reconstructCellHorizontalWind, setAnalyticCellWind } from '../physics/rotation.js';
 import { diagnoseAxialAngularMomentum, diagnoseAxialAngularMomentumTendency } from '../solver/stage4CirculationDiagnostics.js';
 import { computeStage4FrozenRhs } from '../solver/stage4Rk3SplitCpu.js';
-import { createHydrostaticState, edge3DIndex } from '../solver/state.js';
+import { computeStage4SlowTendencies } from '../solver/stage4SlowTendenciesCpu.js';
+import { createHydrostaticState, edge3DIndex, type DryState } from '../solver/state.js';
 
+interface Metrics{aamResidual:number;kineticResidual:number;}
 function accelPerDay(torque:number,leverMass:number):number{return torque/leverMass*86400;}
 function clampDot(x:number):number{return Math.max(-1,Math.min(1,x));}
 
@@ -24,9 +26,31 @@ function setup(n:number){
   return{h,v,ref,g,s,continuity,windByK};
 }
 
-function finish(ctx:ReturnType<typeof setup>,cellA:Float64Array[]):number{
-  const{h,v,g,s,continuity}=ctx;
-  const zeroU=new Float64Array(s.uEdge.length),zeroRho=new Float64Array(s.rhoD.length),uT=new Float64Array(s.uEdge.length);
+function metricsFromEdgeTendency(ctx:ReturnType<typeof setup>,uT:Float64Array):Metrics{
+  const{h,v,g,s,continuity,windByK}=ctx;
+  const zeroU=new Float64Array(s.uEdge.length),zeroRho=new Float64Array(s.rhoD.length);
+  const mass=diagnoseAxialAngularMomentumTendency(h,v,s,continuity.rhoD,zeroU,g);
+  const mom=diagnoseAxialAngularMomentumTendency(h,v,s,zeroRho,uT,g).velocityTorque;
+  const lever=diagnoseAxialAngularMomentum(h,v,s,g).torqueLeverMass;
+
+  const accelState:DryState={rhoD:s.rhoD,rhoThetaM:s.rhoThetaM,uEdge:uT,wInterface:s.wInterface,time:s.time};
+  const accelByK=Array.from({length:v.nz},(_,k)=>reconstructCellHorizontalWind(h,g,accelState,k));
+  let dke=0,totalMass=0;
+  for(let c=0;c<h.cellCount;c++)for(let k=0;k<v.nz;k++){
+    const q=c*v.nz+k,o=c*3,vol=h.cellAreaUnit[c]!*EARTH.radius*EARTH.radius*v.dz[k]!,rho=s.rhoD[q]!,rhoT=continuity.rhoD[q]!,w=windByK[k]!,a=accelByK[k]!;
+    const speed2=w[o]!*w[o]!+w[o+1]!*w[o+1]!+w[o+2]!*w[o+2]!;
+    const work=w[o]!*a[o]!+w[o+1]!*a[o+1]!+w[o+2]!*a[o+2]!;
+    dke+=vol*(.5*rhoT*speed2+rho*work);
+    totalMass+=vol*rho;
+  }
+  return{
+    aamResidual:accelPerDay(mass.relativeMassRedistributionTorque+mom,lever),
+    kineticResidual:dke/totalMass*86400,
+  };
+}
+
+function finish(ctx:ReturnType<typeof setup>,cellA:Float64Array[]):Metrics{
+  const{h,v,s}=ctx,uT=new Float64Array(s.uEdge.length);
   for(let e=0;e<h.edgeCount;e++){
     const ge=h.edges[e]!,l=ge.leftCell,r=ge.rightCell,norm=ge.normal;
     for(let k=0;k<v.nz;k++){
@@ -34,18 +58,17 @@ function finish(ctx:ReturnType<typeof setup>,cellA:Float64Array[]):number{
       uT[edge3DIndex(e,k,v.nz)]=.5*((a[lo]!+a[ro]!)*norm[0]+(a[lo+1]!+a[ro+1]!)*norm[1]+(a[lo+2]!+a[ro+2]!)*norm[2]);
     }
   }
-  const mass=diagnoseAxialAngularMomentumTendency(h,v,s,continuity.rhoD,zeroU,g);
-  const mom=diagnoseAxialAngularMomentumTendency(h,v,s,zeroRho,uT,g).velocityTorque;
-  const lever=diagnoseAxialAngularMomentum(h,v,s,g).torqueLeverMass;
-  return accelPerDay(mass.relativeMassRedistributionTorque+mom,lever);
+  return metricsFromEdgeTendency(ctx,uT);
 }
 
-/**
- * Smooth-flow experiment only. NOT production. Evaluate -u·grad(u) from
- * least-squares gradients of global Cartesian wind components, then apply the
- * covariant tangent projection before returning to C-grid face normals.
- */
-function centeredCovariantMomentum(n:number):number{
+function donorCellProduction(n:number):Metrics{
+  const ctx=setup(n),{h,v,ref,g,s}=ctx;
+  const t=computeStage4SlowTendencies(h,v,ref,s,{momentumTransport:true,coriolis:false,heldSuarez:false},g);
+  return metricsFromEdgeTendency(ctx,t.uEdge);
+}
+
+/** Smooth-flow experiment only. NOT production. */
+function centeredCovariantMomentum(n:number):Metrics{
   const ctx=setup(n),{h,v,g,windByK}=ctx,cellA=Array.from({length:v.nz},()=>new Float64Array(h.cellCount*3));
   for(let k=0;k<v.nz;k++){
     const wind=windByK[k]!,a=cellA[k]!;
@@ -66,18 +89,13 @@ function centeredCovariantMomentum(n:number):number{
 }
 
 /**
- * Unlimited second-order upwind finite-volume experiment.  Face wind is
+ * Unlimited second-order upwind finite-volume experiment. Face wind is
  * reconstructed from the upwind cell to the actual great-circle face midpoint
- * with the same tangent-plane least-squares gradients used by the pressure
- * operator.  The material derivative is evaluated as
- *
- *   -div(u q) + q div(u)
- *
- * so the first-order limit exactly reduces to the existing donor-cell material
- * operator.  No limiter is used here yet; this is an accuracy/AAM experiment,
- * not a production stability decision.
+ * using tangent-plane least-squares gradients. The material derivative is
+ * -div(u q)+q div(u), so its first-order limit is the existing donor operator.
+ * No limiter is used yet: this is a consistency experiment, not production.
  */
-function musclCovariantMomentum(n:number):number{
+function musclCovariantMomentum(n:number):Metrics{
   const ctx=setup(n),{h,v,g,s,windByK}=ctx,R=EARTH.radius,cellA=Array.from({length:v.nz},()=>new Float64Array(h.cellCount*3));
   for(let k=0;k<v.nz;k++){
     const wind=windByK[k]!,a=cellA[k]!;
@@ -104,7 +122,8 @@ function musclCovariantMomentum(n:number):number{
         sumF+=F;sumX+=F*qx;sumY+=F*qy;sumZ+=F*qz;
       }
       let ax=-sumX/area+curx*sumF/area,ay=-sumY/area+cury*sumF/area,az=-sumZ/area+curz*sumF/area;
-      const rx=g.radial[o]!,ry=g.radial[o+1]!,rz=g.radial[o+2]!,rd=ax*rx+ay*ry+az*rz;ax-=rd*rx;ay-=rd*ry;az-=rd*rz;
+      const rx=g.radial[o]!,ry=g.radial[o+1]!,rz=g.radial[o+2]!,rd=ax*rx+ay*ry+az*rz;
+      ax-=rd*rx;ay-=rd*ry;az-=rd*rz;
       a[o]=ax;a[o+1]=ay;a[o+2]=az;
     }
   }
@@ -112,12 +131,16 @@ function musclCovariantMomentum(n:number):number{
 }
 
 try{
-  const ns=[4,8,16,32],centered=ns.map(n=>({n,residual:centeredCovariantMomentum(n)})),muscl=ns.map(n=>({n,residual:musclCovariantMomentum(n)}));
+  const ns=[4,8,16,32];
+  const donor=ns.map(n=>({n,...donorCellProduction(n)}));
+  const centered=ns.map(n=>({n,...centeredCovariantMomentum(n)}));
+  const muscl=ns.map(n=>({n,...musclCovariantMomentum(n)}));
   const ratio=(a:number,b:number)=>Math.abs(a)/Math.max(Math.abs(b),1e-30);
-  console.log('Stage4 experimental material-momentum AAM residual (m/s/day; NOT production)');
-  console.log('N\tcentered-covariant\tunlimited-MUSCL');
-  for(let i=0;i<ns.length;i++)console.log(`${ns[i]}\t${centered[i]!.residual.toExponential(8)}\t${muscl[i]!.residual.toExponential(8)}`);
-  console.log(`centered refine 8->16=${ratio(centered[1]!.residual,centered[2]!.residual).toFixed(3)} 16->32=${ratio(centered[2]!.residual,centered[3]!.residual).toFixed(3)}`);
-  console.log(`MUSCL refine 8->16=${ratio(muscl[1]!.residual,muscl[2]!.residual).toFixed(3)} 16->32=${ratio(muscl[2]!.residual,muscl[3]!.residual).toFixed(3)}`);
-  if(![...centered,...muscl].every(r=>Number.isFinite(r.residual)))throw new Error('non-finite prototype result');
+  console.log('Stage4 material-momentum smooth-flow diagnostics (NOT production except donor)');
+  console.log('AAM residual: equivalent m/s/day; kinetic residual: specific KE m^2/s^2/day; continuum advection targets = 0');
+  console.log('N\tdonor AAM\tcentered AAM\tMUSCL AAM\tdonor KE\tcentered KE\tMUSCL KE');
+  for(let i=0;i<ns.length;i++)console.log(`${ns[i]}\t${donor[i]!.aamResidual.toExponential(8)}\t${centered[i]!.aamResidual.toExponential(8)}\t${muscl[i]!.aamResidual.toExponential(8)}\t${donor[i]!.kineticResidual.toExponential(8)}\t${centered[i]!.kineticResidual.toExponential(8)}\t${muscl[i]!.kineticResidual.toExponential(8)}`);
+  console.log(`AAM centered refine 8->16=${ratio(centered[1]!.aamResidual,centered[2]!.aamResidual).toFixed(3)} 16->32=${ratio(centered[2]!.aamResidual,centered[3]!.aamResidual).toFixed(3)}`);
+  console.log(`AAM MUSCL refine 8->16=${ratio(muscl[1]!.aamResidual,muscl[2]!.aamResidual).toFixed(3)} 16->32=${ratio(muscl[2]!.aamResidual,muscl[3]!.aamResidual).toFixed(3)}`);
+  if(![...donor,...centered,...muscl].every(r=>Number.isFinite(r.aamResidual)&&Number.isFinite(r.kineticResidual)))throw new Error('non-finite prototype result');
 }catch(e){console.error('FAIL Stage4 momentum-advection prototype');console.error(e);process.exitCode=1;}
