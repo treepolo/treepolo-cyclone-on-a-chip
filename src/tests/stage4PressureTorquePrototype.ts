@@ -12,12 +12,13 @@ function inversePressure(p:number):number{return DRY_AIR.pRef/DRY_AIR.rd*Math.po
 function accelPerDay(torque:number,lever:number):number{return torque/lever*86400;}
 
 function smoothMode(x:number,y:number,z:number,m:number):number{
-  // Re[(x+i y)^m] is a globally smooth spherical polynomial. Multiplying by
-  // (1 + 0.35 z + 0.15 z^2) prevents equatorial symmetry from accidentally
-  // hiding an axial-torque defect while preserving global smoothness.
   let re=1,im=0;
   for(let i=0;i<m;i++){const nr=re*x-im*y,ni=re*y+im*x;re=nr;im=ni;}
   return re*(1+.35*z+.15*z*z);
+}
+
+function densityShape(x:number,y:number,z:number):number{
+  return .48*x-.31*y+.27*z+.22*x*y-.17*y*z+.09*(x*x-z*z);
 }
 
 function currentLsPressureAcceleration(
@@ -32,11 +33,10 @@ function currentLsPressureAcceleration(
 }
 
 /**
- * Diagnostic Green-Gauss candidate, not production.  A single arithmetic
- * face pressure is shared by both neighboring cells. Each cell integrates the
- * pressure traction p_f n_out L over its four actual great-circle faces, then
- * divides by cell area and density. This is a local finite-volume pressure
- * force; no global AAM correction or target torque appears anywhere.
+ * Diagnostic Green-Gauss candidate, not production. A single face pressure is
+ * shared by both cells; each cell integrates local pressure traction first and
+ * divides by its own mass metric only afterwards. No global torque correction
+ * or climate target is used.
  */
 function greenGaussPressureAcceleration(
   h:ReturnType<typeof buildCubedSphere>,v:ReturnType<typeof buildStretchedVerticalGrid>,s:DryState,g:ReturnType<typeof buildRotationGeometry>,pressure:Float64Array,
@@ -66,12 +66,12 @@ function greenGaussPressureAcceleration(
   return uT;
 }
 
-function run(n:number,m:number){
+function run(n:number,m:number,varyDensity:boolean){
   const h=buildCubedSphere(n),v=buildStretchedVerticalGrid(4,12000,1.15),ref=buildHeldSuarezReference(v),g=buildRotationGeometry(h),s=createHydrostaticState(h,v,ref),pressure=new Float64Array(s.rhoThetaM.length);
   for(let c=0;c<h.cellCount;c++){
-    const x=h.cellCenters[c*3]!,y=h.cellCenters[c*3+1]!,z=h.cellCenters[c*3+2]!,shape=smoothMode(x,y,z,m);
+    const x=h.cellCenters[c*3]!,y=h.cellCenters[c*3+1]!,z=h.cellCenters[c*3+2]!,shape=smoothMode(x,y,z,m),rf=varyDensity?1+.28*densityShape(x,y,z):1;
     for(let k=0;k<v.nz;k++){
-      const q=cell3DIndex(c,k,v.nz),p=ref.pCenter[k]!*(1+.018*shape);pressure[q]=p;s.rhoThetaM[q]=inversePressure(p);
+      const q=cell3DIndex(c,k,v.nz),p=ref.pCenter[k]!*(1+.018*shape);pressure[q]=p;s.rhoThetaM[q]=inversePressure(p);s.rhoD[q]=s.rhoD[q]!*rf;
     }
   }
   const zeroRho=new Float64Array(s.rhoD.length),lever=diagnoseAxialAngularMomentum(h,v,s,g).torqueLeverMass;
@@ -80,11 +80,14 @@ function run(n:number,m:number){
 }
 
 try{
-  console.log('Stage4 closed-sphere pressure-torque stress test (equivalent m/s/day; continuum target = 0; Green-Gauss is diagnostic only)');
-  console.log('mode\tN8 LS\tN8 GG\tN16 LS\tN16 GG\tN32 LS\tN32 GG');
-  for(const m of [1,2,3,4,5,6,7,8]){
-    const r8=run(8,m),r16=run(16,m),r32=run(32,m);
-    console.log(`${m}\t${r8.ls.toExponential(7)}\t${r8.greenGauss.toExponential(7)}\t${r16.ls.toExponential(7)}\t${r16.greenGauss.toExponential(7)}\t${r32.ls.toExponential(7)}\t${r32.greenGauss.toExponential(7)}`);
-    if(![r8.ls,r8.greenGauss,r16.ls,r16.greenGauss,r32.ls,r32.greenGauss].every(Number.isFinite))throw new Error(`non-finite pressure torque mode ${m}`);
+  console.log('Stage4 closed-sphere pressure-torque stress test (equivalent m/s/day; continuum pressure-force target = 0; Green-Gauss diagnostic only)');
+  for(const varying of [false,true]){
+    console.log(`horizontal density ${varying?'VARIES':'uniform'}`);
+    console.log('mode\tN8 LS\tN8 GG\tN16 LS\tN16 GG\tN32 LS\tN32 GG');
+    for(const m of [1,2,3,4,5,6,7,8]){
+      const r8=run(8,m,varying),r16=run(16,m,varying),r32=run(32,m,varying);
+      console.log(`${m}\t${r8.ls.toExponential(7)}\t${r8.greenGauss.toExponential(7)}\t${r16.ls.toExponential(7)}\t${r16.greenGauss.toExponential(7)}\t${r32.ls.toExponential(7)}\t${r32.greenGauss.toExponential(7)}`);
+      if(![r8.ls,r8.greenGauss,r16.ls,r16.greenGauss,r32.ls,r32.greenGauss].every(Number.isFinite))throw new Error(`non-finite pressure torque mode ${m}`);
+    }
   }
 }catch(e){console.error('FAIL Stage4 pressure-torque prototype');console.error(e);process.exitCode=1;}
