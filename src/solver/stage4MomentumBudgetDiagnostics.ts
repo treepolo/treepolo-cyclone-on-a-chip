@@ -4,6 +4,7 @@ import type { VerticalGrid } from '../grid/vertical.js';
 import { computeHorizontalMaterialMomentumTendency } from '../physics/horizontalMomentumTransport.js';
 import type { ReferenceAtmosphere } from '../physics/referenceAtmosphere.js';
 import { reconstructCellHorizontalWind, type RotationGeometry } from '../physics/rotation.js';
+import { computeVerticalHorizontalMomentumTendency } from '../physics/verticalHorizontalMomentumTransport.js';
 import { diagnoseAxialAngularMomentumTendency } from './stage4CirculationDiagnostics.js';
 import { computeStage4FrozenRhs } from './stage4Rk3SplitCpu.js';
 import { computeStage4SlowTendencies } from './stage4SlowTendenciesCpu.js';
@@ -103,19 +104,8 @@ export function diagnoseStage4DirectionalAamBreakdown(
 
   const windByK:Float64Array[]=Array.from({length:nz},(_,k)=>reconstructCellHorizontalWind(h,rotation,state,k));
   const hCell=computeHorizontalMaterialMomentumTendency(h,v,state,rotation,'muscl-bj',windByK);
+  const vCell=computeVerticalHorizontalMomentumTendency(h,v,ref,state,rotation,windByK);
   const hU=projectCellVectorTendencyToEdges(h,v,rotation,hCell);
-
-  const vCell:Float64Array[]=Array.from({length:nz},()=>new Float64Array(h.cellCount*3));
-  for(let c=0;c<h.cellCount;c++)for(let k=0;k<nz;k++){
-    const o=c*3,dv=vCell[k]!,wc=.5*(state.wInterface[w3DIndex(c,k,nz)]!+state.wInterface[w3DIndex(c,k+1,nz)]!),cur=windByK[k]!;
-    if(wc>0&&k>0){
-      const below=windByK[k-1]!,dz=v.zCenter[k]!-v.zCenter[k-1]!;
-      dv[o]=dv[o]!-wc*(cur[o]!-below[o]!)/dz;dv[o+1]=dv[o+1]!-wc*(cur[o+1]!-below[o+1]!)/dz;dv[o+2]=dv[o+2]!-wc*(cur[o+2]!-below[o+2]!)/dz;
-    }else if(wc<0&&k<nz-1){
-      const above=windByK[k+1]!,dz=v.zCenter[k+1]!-v.zCenter[k]!;
-      dv[o]=dv[o]!-wc*(above[o]!-cur[o]!)/dz;dv[o+1]=dv[o+1]!-wc*(above[o+1]!-cur[o+1]!)/dz;dv[o+2]=dv[o+2]!-wc*(above[o+2]!-cur[o+2]!)/dz;
-    }
-  }
   const vU=projectCellVectorTendencyToEdges(h,v,rotation,vCell);
 
   const hMass=diagnoseAxialAngularMomentumTendency(h,v,state,rhoH,zeroU,rotation).relativeMassRedistributionTorque;
