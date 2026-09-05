@@ -24,7 +24,7 @@ function limiter(h:ReturnType<typeof buildCubedSphere>,g:ReturnType<typeof build
 }
 interface Row{n:number;donorL2:number;musclL2:number;donorCons:number;musclCons:number;faceViolation:number;}
 function run(n:number):Row{
-  const h=buildCubedSphere(n),v=buildStretchedVerticalGrid(2,2000,1.05),ref=buildHeldSuarezReference(v),g=buildRotationGeometry(h),s=createHydrostaticState(h,v,ref),V=22,a=.17,b=-.11,c0=.07;
+  const h=buildCubedSphere(n),v=buildStretchedVerticalGrid(4,4000,1.05),ref=buildHeldSuarezReference(v),g=buildRotationGeometry(h),s=createHydrostaticState(h,v,ref),V=22,a=.17,b=-.11,c0=.07;
   setAnalyticCellWind(h,g,s,r=>[-V*r[1],V*r[0],0]);
   const q=new Float64Array(h.cellCount),exact=new Float64Array(h.cellCount),grad=new Float64Array(h.cellCount*3);
   for(let c=0;c<h.cellCount;c++){
