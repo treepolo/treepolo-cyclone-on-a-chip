@@ -4,6 +4,7 @@ import { dot3, Vec3 } from '../core/math.js';
 import { buildCubedSphere } from '../grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from '../grid/vertical.js';
 import { ACOUSTIC_DIVERGENCE_REFERENCE_COEFFICIENT, acousticDivergenceCoefficientForDt, acousticDivergenceRms, applyAcousticDivergenceDamping } from '../physics/acousticDivergenceDamping.js';
+import { reconstructEdgeNormalScalarGradient } from '../physics/horizontalGradient.js';
 import { addHeldSuarezWavePerturbation, buildHeldSuarezReference } from '../physics/heldSuarez.js';
 import { buildModelTopSpongeRates, MODEL_TOP_SPONGE } from '../physics/modelTopSponge.js';
 import { buildRotationGeometry, reconstructCellHorizontalWind, rotateLocalCoriolis, setAnalyticCellWind } from '../physics/rotation.js';
@@ -19,8 +20,8 @@ interface Test{name:string;fn:()=>void}
 const tests:Test[]=[];
 const test=(name:string,fn:()=>void)=>tests.push({name,fn});
 
-test('V2 rotation geometry reconstructs solid-body wind across cubed-sphere seams',()=>{
-  const h=buildCubedSphere(16),v=buildStretchedVerticalGrid(4,10000,1),ref=buildHeldSuarezReference(v),s=createHydrostaticState(h,v,ref),g=buildRotationGeometry(h),omega=2e-5;
+function solidBodyReconstructionError(n:number):{rel:number;ratio:number}{
+  const h=buildCubedSphere(n),v=buildStretchedVerticalGrid(4,10000,1),ref=buildHeldSuarezReference(v),s=createHydrostaticState(h,v,ref),g=buildRotationGeometry(h),omega=2e-5;
   setAnalyticCellWind(h,g,s,r=>[-omega*6371000*r[1],omega*6371000*r[0],0]);
   const w=reconstructCellHorizontalWind(h,g,s,0);let num=0,den=0,seam=0,interior=0,ns=0,ni=0;
   for(let c=0;c<h.cellCount;c++){
@@ -29,8 +30,17 @@ test('V2 rotation geometry reconstructs solid-body wind across cubed-sphere seam
     for(let slot=0;slot<4;slot++){const e=h.edges[h.cellEdges[c*4+slot]!]!;if(h.cellPanel[e.leftCell]!==h.cellPanel[e.rightCell])isSeam=true}
     if(isSeam){seam+=err*err;ns++}else{interior+=err*err;ni++}
   }
-  const rel=Math.sqrt(num/den),ratio=Math.sqrt(seam/ns)/Math.sqrt(interior/ni);
-  assert(rel<2e-3,`solid-body reconstruction relL2=${rel}`);assert(ratio<10,`seam/interior RMS ratio=${ratio}`);
+  return{rel:Math.sqrt(num/den),ratio:Math.sqrt(seam/ns)/Math.sqrt(interior/ni)};
+}
+
+test('V2 face-normal C-grid reconstruction converges for solid-body wind across cubed-sphere seams',()=>{
+  // With true face-normal DOFs, projecting cell winds to faces and reconstructing
+  // them back is no longer an algebraic identity on this non-orthogonal grid;
+  // it is a spatial interpolation and must converge under refinement.
+  const a=solidBodyReconstructionError(16),b=solidBodyReconstructionError(32);
+  assert(b.rel<a.rel*.4,`solid-body reconstruction did not converge: N16=${a.rel}, N32=${b.rel}`);
+  assert(b.rel<1e-3,`solid-body N32 reconstruction relL2=${b.rel}`);
+  assert(a.ratio<10&&b.ratio<10,`seam/interior RMS ratio N16=${a.ratio}, N32=${b.ratio}`);
 });
 
 test('V2 inertial oscillation preserves amplitude and period',()=>{
@@ -39,9 +49,10 @@ test('V2 inertial oscillation preserves amplitude and period',()=>{
   assert(Math.hypot(u-u0,v-v0)/Math.hypot(u0,v0)<2e-13,`inertial cycle error=${Math.hypot(u-u0,v-v0)}`);
 });
 
-test('V2 discrete spherical pressure gradient is geostrophically balanced',()=>{
+test('V2 nonorthogonal spherical pressure gradient is geostrophically balanced',()=>{
   const h=buildCubedSphere(32),g=buildRotationGeometry(h),A=2e4,R=EARTH.radius,edgeA=new Float64Array(h.edgeCount);
-  for(let e=0;e<h.edgeCount;e++){const ge=h.edges[e]!,zl=h.cellCenters[ge.leftCell*3+2]!,zr=h.cellCenters[ge.rightCell*3+2]!,phiL=-A*zl*zl,phiR=-A*zr*zr;edgeA[e]=-(phiR-phiL)/(ge.centerDistanceAngle*R)}
+  const phi=(c:number)=>{const z=h.cellCenters[c*3+2]!;return-A*z*z};
+  for(let e=0;e<h.edgeCount;e++)edgeA[e]=-reconstructEdgeNormalScalarGradient(h,g,e,phi,R);
   let num=0,den=0;
   for(let c=0;c<h.cellCount;c++){
     const z=h.cellCenters[c*3+2]!,lat=Math.asin(z);if(Math.abs(lat)<15*Math.PI/180)continue;let an=0;
