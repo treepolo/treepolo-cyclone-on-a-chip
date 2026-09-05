@@ -8,6 +8,8 @@ export interface Stage4GradientStencilData {
   neighbors: Uint32Array;
   /** Two vec4<f32> per cell: east-gradient weights then north-gradient weights. */
   weights: Float32Array;
+  /** Two vec4<f32> per edge: left-cell then right-cell scalar-difference weights already projected onto the exact face conormal and multiplied by 1/2 for face averaging. */
+  edgeProjectedWeights: Float32Array;
 }
 
 function vec(a:Float64Array,c:number):Vec3{return[a[c*3]!,a[c*3+1]!,a[c*3+2]!]}
@@ -22,6 +24,14 @@ function vec(a:Float64Array,c:number):Vec3{return[a[c*3]!,a[c*3+1]!,a[c*3+2]!]}
  * This is algebraically the same 2x2 normal-equation solve used by
  * reconstructCellScalarGradient; only the state-independent geometry is moved
  * out of the repeated GPU pressure-gradient kernels.
+ *
+ * edgeProjectedWeights additionally folds each adjacent cell's east/north
+ * basis and the exact shared-face conormal into four scalar-difference weights.
+ * Therefore an edge-normal face-averaged gradient can be evaluated without a
+ * separate cell-gradient dispatch or intermediate buffer:
+ *
+ *   grad_n(edge) = sum_s wL_s*(phi(nbL_s)-phi(L))
+ *                + sum_s wR_s*(phi(nbR_s)-phi(R)).
  */
 export function buildStage4GradientStencilData(h:CubedSphereGrid,radius=EARTH.radius):Stage4GradientStencilData{
   const g=buildRotationGeometry(h),neighbors=new Uint32Array(h.cellCount*4),weights=new Float32Array(h.cellCount*8);
@@ -46,5 +56,14 @@ export function buildStage4GradientStencilData(h:CubedSphereGrid,radius=EARTH.ra
       weights[c*8+4+s]=(-ab*de[s]!+aa*dn[s]!)/det;
     }
   }
-  return{neighbors,weights};
+  const edgeProjectedWeights=new Float32Array(h.edgeCount*8);
+  for(let eid=0;eid<h.edgeCount;eid++){
+    const edge=h.edges[eid]!,n=edge.normal;
+    for(const [side,c,base] of [[0,edge.leftCell,0],[1,edge.rightCell,4]] as const){
+      void side;
+      const ec=vec(g.east,c),nc=vec(g.north,c),pe=.5*dot3(ec,n),pn=.5*dot3(nc,n);
+      for(let s=0;s<4;s++)edgeProjectedWeights[eid*8+base+s]=pe*weights[c*8+s]!+pn*weights[c*8+4+s]!;
+    }
+  }
+  return{neighbors,weights,edgeProjectedWeights};
 }
