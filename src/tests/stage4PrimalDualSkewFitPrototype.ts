@@ -25,18 +25,12 @@ function buildSkewFit(h:CubedSphereGrid):SparseOp{
   const rows:Array<Map<number,number>>=Array.from({length:h.edgeCount},()=>new Map<number,number>());let fit2=0,fitN=0,maxFitRms=0,minPivot=Infinity;
   for(let c=0;c<h.cellCount;c++){
     const cc=center(h,c),b=basis(cc),f=2*EARTH.omega*cc[2],edges=Array.from({length:4},(_,s)=>h.cellEdges[c*4+s]!);
-    // N maps local east/north constant velocity to globally-oriented primal
-    // normal fluxes on the four cell faces.
     const N=edges.map(eid=>{const e=h.edges[eid]!,L=e.angularLength*EARTH.radius;return[L*dot3(e.normal,b.east),L*dot3(e.normal,b.north)] as [number,number];});
-    // B is this cell's half-contribution to the four globally-oriented dual
-    // circulation tendencies for the same two constant basis winds.
     const B:number[][]=[];
     for(const eid of edges){const e=h.edges[eid]!,l=center(h,e.leftCell),r=center(h,e.rightCell),mid=normalize3([l[0]+r[0],l[1]+r[1],l[2]+r[2]] as Vec3),t=tangentToward(mid,r),Ld=Math.acos(Math.max(-1,Math.min(1,dot3(l,r))))*EARTH.radius;B.push([-.5*Ld*f*dot3(t,b.north),.5*Ld*f*dot3(t,b.east)]);}
-    // Eight physical consistency equations (4 target edges x 2 tangent basis
-    // winds) for the six independent entries of a 4x4 skew matrix.
     const M:number[][]=[],rhs:number[]=[];
     for(let i=0;i<4;i++)for(let q=0;q<2;q++){const row=new Array<number>(6).fill(0);for(let p=0;p<6;p++){const [a,z]=PAIRS[p]!;if(i===a)row[p]=N[z]![q]!;else if(i===z)row[p]=-N[a]![q]!;}M.push(row);rhs.push(B[i]![q]!);}
-    const G=Array.from({length:6},()=>new Array<number>(6).fill(0)),g=new Array<number>(6).fill(0);for(let m=0;m<8;m++)for(let p=0;p<6;p++){g[p]+=M[m]![p]!*rhs[m]!;for(let q=0;q<6;q++)G[p]![q]+=M[m]![p]!*M[m]![q]!;}
+    const G=Array.from({length:6},()=>new Array<number>(6).fill(0)),g=new Array<number>(6).fill(0);for(let m=0;m<8;m++)for(let p=0;p<6;p++){g[p]=g[p]!+M[m]![p]!*rhs[m]!;for(let q=0;q<6;q++)G[p]![q]=G[p]![q]!+M[m]![p]!*M[m]![q]!;}
     const sol=solve6(G,g);minPivot=Math.min(minPivot,sol.minPivot);let local2=0,ref2=0;for(let m=0;m<8;m++){let y=0;for(let p=0;p<6;p++)y+=M[m]![p]!*sol.x[p]!;const d=y-rhs[m]!;local2+=d*d;ref2+=rhs[m]!*rhs[m]!;}const local=Math.sqrt(local2/Math.max(ref2,1e-60));fit2+=local2;fitN+=ref2;maxFitRms=Math.max(maxFitRms,local);
     for(let p=0;p<6;p++){const [i,j]=PAIRS[p]!,ei=edges[i]!,ej=edges[j]!,x=sol.x[p]!,ri=rows[ei]!,rj=rows[ej]!;ri.set(ej,(ri.get(ej)??0)+x);rj.set(ei,(rj.get(ei)??0)-x);}
   }
