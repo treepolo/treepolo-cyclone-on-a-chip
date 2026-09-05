@@ -27,7 +27,7 @@ function setSmooth3dState(n:number){
     }
     for(let k=0;k<v.nz;k++){
       const q=c*v.nz+k,fac=1+.025*(x*y+.4*zeta)*(1-.3*v.zCenter[k]!/v.top);
-      s.rhoD[q]*=fac;s.rhoThetaM[q]*=fac;
+      s.rhoD[q]=s.rhoD[q]!*fac;s.rhoThetaM[q]=s.rhoThetaM[q]!*fac;
     }
   }
   return{h,v,ref,g,s};
