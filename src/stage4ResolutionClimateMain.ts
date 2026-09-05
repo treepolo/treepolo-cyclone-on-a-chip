@@ -1,5 +1,6 @@
 import { buildCubedSphere } from './grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from './grid/vertical.js';
+import { loadCompatibleStage4ResolutionCheckpoint, saveStage4ResolutionCheckpoint } from './persistence/stage4ResolutionCheckpoint.js';
 import { buildHeldSuarezReference } from './physics/heldSuarez.js';
 import { buildRotationGeometry } from './physics/rotation.js';
 import { diagnoseAxialAngularMomentum, diagnoseEddies } from './solver/stage4CirculationDiagnostics.js';
@@ -11,14 +12,17 @@ const params=new URLSearchParams(location.search),n=Math.max(4,Math.round(Number
 const run=$<HTMLButtonElement>('run'),log=$<HTMLPreElement>('log');
 $('config').textContent=`N=${n} × 48, ${days} day${days===1?'':'s'}, dt=10 s`;
 run.onclick=()=>void(async()=>{
-  run.disabled=true;log.textContent='';$('status').textContent='INITIALIZING';const started=performance.now();
+  run.disabled=true;log.textContent='';$('status').textContent='CHECKING RESUMABLE CHECKPOINT';const started=performance.now();
   try{
+    const resume=await loadCompatibleStage4ResolutionCheckpoint(n,days),resumeDay=resume?resume.state.time/86400:0;
+    if(resume){const last=resume.samples[resume.samples.length-1];$('status').textContent=`RESUMING N${n} FROM DAY ${resumeDay.toFixed(2)}`;$('day').textContent=resumeDay.toFixed(2);if(last){$('trade').textContent=`${last.trade.toFixed(4)} m/s`;$('jet').textContent=`${last.jet.toFixed(4)} m/s`;$('mass').textContent=last.massDrift.toExponential(4);}}
+    else $('status').textContent='INITIALIZING FRESH DAY-0 STATE';
     const result=await runStage4ResolutionClimate(n,days,s=>{
       $('day').textContent=s.day.toFixed(2);$('trade').textContent=`${s.trade.toFixed(4)} m/s`;$('jet').textContent=`${s.jet.toFixed(4)} m/s`;$('mass').textContent=s.massDrift.toExponential(4);
-    },p=>{$('status').textContent=`N${n} day ${p.simulatedDay.toFixed(3)} / ${days}`;$('elapsed').textContent=`${(p.elapsedMs/1000).toFixed(1)} s`;});
+    },p=>{$('status').textContent=`N${n} day ${p.simulatedDay.toFixed(3)} / ${days}${resume?' (resumed)':''}`;$('elapsed').textContent=`${(p.elapsedMs/1000).toFixed(1)} s`;},{resume,onCheckpoint:cp=>saveStage4ResolutionCheckpoint(n,days,cp)});
     const h=buildCubedSphere(n),v=buildStretchedVerticalGrid(48,40000,1.4),ref=buildHeldSuarezReference(v),g=buildRotationGeometry(h),aam=diagnoseAxialAngularMomentum(h,v,result.finalState,g),eddy=diagnoseEddies(h,v,result.finalState,24,g),instant=diagnoseStage4InstantAamBreakdown(h,v,ref,result.finalState,g),z=result.finalZonal;
     log.textContent=JSON.stringify({
-      model:'Stage4 production equations; fresh day-0; resolution-controlled diagnostic',horizontalN:n,days,elapsedMs:result.elapsedMs,failures:result.failures,samples:result.samples,
+      model:'Stage4 production equations; resumable fresh day-0 resolution-controlled diagnostic',horizontalN:n,days,resumedFromDay:resumeDay,elapsedMs:result.elapsedMs,failures:result.failures,samples:result.samples,
       finalZonal:{bins:z.bins,latDeg:Array.from(z.latDeg),temperature:Array.from(z.temperature),zonalWind:Array.from(z.zonalWind),meridionalWind:Array.from(z.meridionalWind),streamfunction:Array.from(z.streamfunction),maxUpperMidlatitudeWesterly:z.maxUpperMidlatitudeWesterly,meanTropicalLowLevelZonal:z.meanTropicalLowLevelZonal,maxAbsStreamfunction:z.maxAbsStreamfunction,nhDominantStreamfunction:z.nhDominantStreamfunction,shDominantStreamfunction:z.shDominantStreamfunction},
       finalAam:aam,finalEddy:eddy,instantaneousAamBreakdown:instant,
     },null,2);
