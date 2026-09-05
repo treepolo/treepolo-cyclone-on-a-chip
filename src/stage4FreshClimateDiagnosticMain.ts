@@ -1,8 +1,11 @@
+import { EARTH } from './core/constants.js';
 import { buildCubedSphere } from './grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from './grid/vertical.js';
 import { GpuStage4Rk3SplitReference } from './gpu/stage4Rk3SplitGpu.js';
 import type { Stage4Rk3ClimateCheckpoint } from './persistence/stage4Rk3Checkpoint.js';
+import { acousticDivergenceCoefficientForDt, applyAcousticDivergenceDamping, computeAcousticDivergence } from './physics/acousticDivergenceDamping.js';
 import { buildHeldSuarezReference } from './physics/heldSuarez.js';
+import { reconstructEdgeNormalScalarGradient } from './physics/horizontalGradient.js';
 import { buildRotationGeometry } from './physics/rotation.js';
 import {
   diagnoseAxialAngularMomentum,
@@ -11,7 +14,7 @@ import {
   type EddyDiagnostics,
 } from './solver/stage4CirculationDiagnostics.js';
 import { diagnoseStage4InstantAamBreakdown } from './solver/stage4MomentumBudgetDiagnostics.js';
-import type { DryState } from './solver/state.js';
+import { cloneState, edge3DIndex, type DryState } from './solver/state.js';
 import { runStage4Rk3Climate, type Stage4Rk3ClimateProgress } from './validation/stage4Rk3Climate.js';
 import type { ClimateDaySample } from './validation/stage4Gpu.js';
 
@@ -111,6 +114,76 @@ async function oneDayIntegratedBudget(
   };
 }
 
+function applyNonorthDivergenceCandidate(
+  h:ReturnType<typeof buildCubedSphere>,
+  v:ReturnType<typeof buildStretchedVerticalGrid>,
+  ref:ReturnType<typeof buildHeldSuarezReference>,
+  s:DryState,
+  coefficient:number,
+):void{
+  const div=computeAcousticDivergence(h,v,ref,s),g=buildRotationGeometry(h),R=EARTH.radius;
+  for(let e=0;e<h.edgeCount;e++){
+    const L=h.edges[e]!.centerDistanceAngle*R,L2=L*L;
+    for(let k=0;k<v.nz;k++){
+      const q=edge3DIndex(e,k,v.nz),gradN=reconstructEdgeNormalScalarGradient(h,g,e,c=>div[c*v.nz+k]!);
+      s.uEdge[q]=s.uEdge[q]!+coefficient*L2*gradN;
+    }
+  }
+}
+
+async function oneStepOperatorAttribution(
+  h:ReturnType<typeof buildCubedSphere>,
+  v:ReturnType<typeof buildStretchedVerticalGrid>,
+  ref:ReturnType<typeof buildHeldSuarezReference>,
+  rotation:ReturnType<typeof buildRotationGeometry>,
+  state:DryState,
+){
+  const before=diagnoseAxialAngularMomentum(h,v,state,rotation),lever=before.torqueLeverMass;
+  const variants=[
+    ['production',{heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true}],
+    ['noDivergence',{heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:false,topAbsorber:true}],
+    ['noTopAbsorber',{heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:false}],
+    ['noDivergenceNoTop',{heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:false,topAbsorber:false}],
+  ] as const;
+  const slopes:Record<string,number>={};
+  for(const [name,opts] of variants){
+    const gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,state,4);
+    try{
+      gpu.step(DT,opts);
+      await gpu.device.queue.onSubmittedWorkDone();
+      const next=await gpu.downloadState(state.time+DT),a=diagnoseAxialAngularMomentum(h,v,next,rotation);
+      slopes[name]=(a.absolute-before.absolute)/DT/lever*86400;
+    }finally{gpu.destroy();}
+  }
+
+  const instant=diagnoseStage4InstantAamBreakdown(h,v,ref,state,rotation);
+  const directDt=DT/4,coef=acousticDivergenceCoefficientForDt(directDt);
+  const legacy=cloneState(state),nonorth=cloneState(state);
+  applyAcousticDivergenceDamping(h,v,ref,legacy,coef);
+  applyNonorthDivergenceCandidate(h,v,ref,nonorth,coef);
+  const legacyA=diagnoseAxialAngularMomentum(h,v,legacy,rotation),nonorthA=diagnoseAxialAngularMomentum(h,v,nonorth,rotation);
+  const directScale=86400/(directDt*lever);
+  const frozenMsDay=instant.full/lever*86400;
+  return{
+    oneOuterStepEquivalentMsPerDay:slopes,
+    differencesEquivalentMsPerDay:{
+      divergenceContribution:slopes.production!-slopes.noDivergence!,
+      topAbsorberContribution:slopes.production!-slopes.noTopAbsorber!,
+      divergenceContributionWithoutTop:slopes.noTopAbsorber!-slopes.noDivergenceNoTop!,
+      topContributionWithoutDivergence:slopes.noDivergence!-slopes.noDivergenceNoTop!,
+      productionMinusFrozenRhs:slopes.production!-frozenMsDay,
+      noDivergenceMinusFrozenRhs:slopes.noDivergence!-frozenMsDay,
+    },
+    frozenInstantEquivalentMsPerDay:frozenMsDay,
+    directSingleAcousticFilterEquivalentMsPerDay:{
+      dt:directDt,
+      coefficient:coef,
+      legacy:(legacyA.absolute-before.absolute)*directScale,
+      nonorthCandidate:(nonorthA.absolute-before.absolute)*directScale,
+    },
+  };
+}
+
 runBtn.onclick=()=>void(async()=>{
   runBtn.disabled=true;
   logEl.textContent='';
@@ -151,6 +224,9 @@ runBtn.onclick=()=>void(async()=>{
     const recent=samples.filter(s=>s.day>=25);
     const tradeSlope=linearSlope(recent);
 
+    $('status').textContent='30-day complete; attributing one-step AAM operators';
+    const attribution=await oneStepOperatorAttribution(h,v,ref,rotation,finalState);
+
     $('status').textContent='30-day complete; running independent day-30 → 31 AAM budget';
     const integrated=await oneDayIntegratedBudget(h,v,ref,rotation,finalState,30);
 
@@ -190,6 +266,7 @@ runBtn.onclick=()=>void(async()=>{
         midlatitudePolewardMomentumFlux:eddy.midlatitudePolewardMomentumFlux,
       },
       instantaneousAamBreakdown:instant,
+      oneStepOperatorAttribution:attribution,
       integratedDay30To31:integrated,
     };
 
