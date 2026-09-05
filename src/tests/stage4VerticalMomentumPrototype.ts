@@ -6,7 +6,7 @@ import { buildHeldSuarezReference } from '../physics/heldSuarez.js';
 import { buildRotationGeometry, reconstructCellHorizontalWind, type RotationGeometry } from '../physics/rotation.js';
 import { diagnoseAxialAngularMomentum, diagnoseAxialAngularMomentumTendency } from '../solver/stage4CirculationDiagnostics.js';
 import { diagnoseStage4DirectionalAamBreakdown } from '../solver/stage4MomentumBudgetDiagnostics.js';
-import { cell3DIndex, createHydrostaticState, edge3DIndex, w3DIndex, type DryState } from '../solver/state.js';
+import { cell3DIndex, createHydrostaticState, edge3DIndex, w3DIndex } from '../solver/state.js';
 
 type V3=readonly[number,number,number];
 function basis(r:V3):{east:V3;north:V3}{const xy=Math.hypot(r[0],r[1]),e:V3=xy>1e-14?[-r[1]/xy,r[0]/xy,0]:[0,1,0],n:V3=[-r[2]*e[1],r[2]*e[0],xy];return{east:e,north:n};}
@@ -39,7 +39,16 @@ function state(nz:number){
   }
   return{h,v,ref,g,s};
 }
-function massConsistentVerticalCandidate(q:ReturnType<typeof state>):Float64Array{
+function legacyVerticalU(q:ReturnType<typeof state>):Float64Array{
+  const {h,v,g,s}=q,nz=v.nz,winds=Array.from({length:nz},(_,k)=>reconstructCellHorizontalWind(h,g,s,k)),cell=Array.from({length:nz},()=>new Float64Array(h.cellCount*3));
+  for(let c=0;c<h.cellCount;c++)for(let k=0;k<nz;k++){
+    const o=c*3,dv=cell[k]!,wc=.5*(s.wInterface[w3DIndex(c,k,nz)]!+s.wInterface[w3DIndex(c,k+1,nz)]!),cur=winds[k]!;
+    if(wc>0&&k>0){const below=winds[k-1]!,dz=v.zCenter[k]!-v.zCenter[k-1]!;dv[o]=-wc*(cur[o]!-below[o]!)/dz;dv[o+1]=-wc*(cur[o+1]!-below[o+1]!)/dz;dv[o+2]=-wc*(cur[o+2]!-below[o+2]!)/dz;}
+    else if(wc<0&&k<nz-1){const above=winds[k+1]!,dz=v.zCenter[k+1]!-v.zCenter[k]!;dv[o]=-wc*(above[o]!-cur[o]!)/dz;dv[o+1]=-wc*(above[o+1]!-cur[o+1]!)/dz;dv[o+2]=-wc*(above[o+2]!-cur[o+2]!)/dz;}
+  }
+  return project(h,v,g,cell);
+}
+function independentMassConsistentU(q:ReturnType<typeof state>):Float64Array{
   const {h,v,ref,g,s}=q,nz=v.nz,R=EARTH.radius,winds=Array.from({length:nz},(_,k)=>reconstructCellHorizontalWind(h,g,s,k)),cell=Array.from({length:nz},()=>new Float64Array(h.cellCount*3));
   for(let c=0;c<h.cellCount;c++){
     const area=h.cellAreaUnit[c]!*R*R;
@@ -57,16 +66,18 @@ function massConsistentVerticalCandidate(q:ReturnType<typeof state>):Float64Arra
   return project(h,v,g,cell);
 }
 try{
-  console.log('Stage4 vertical horizontal-momentum AAM prototype; N8 horizontal grid');
-  console.log('nz\tlegacy vertical pair\tmass-consistent vertical pair\timprovement\tdirectional closure');
-  const rows=[] as {nz:number;legacy:number;candidate:number}[];
+  console.log('Stage4 vertical horizontal-momentum AAM regression; N8 horizontal grid');
+  console.log('nz\tlegacy pair\tproduction pair\timprovement\tindependent delta\tdirectional closure');
+  const rows=[] as {nz:number;legacy:number;production:number}[];
   for(const nz of [6,12,24,48]){
-    const q=state(nz),dir=diagnoseStage4DirectionalAamBreakdown(q.h,q.v,q.ref,q.s,q.g),candidateU=massConsistentVerticalCandidate(q),zeroRho=new Float64Array(q.s.rhoD.length),candidateMom=diagnoseAxialAngularMomentumTendency(q.h,q.v,q.s,zeroRho,candidateU,q.g).velocityTorque,lever=diagnoseAxialAngularMomentum(q.h,q.v,q.s,q.g).torqueLeverMass,scale=86400/lever,candidate=(dir.verticalRelativeMass+candidateMom)*scale,legacy=dir.verticalPairResidual*scale;
-    rows.push({nz,legacy,candidate});
-    console.log(`${nz}\t${legacy.toExponential(8)}\t${candidate.toExponential(8)}\t${(Math.abs(legacy)/Math.max(Math.abs(candidate),1e-30)).toFixed(2)}x\t${(dir.closure*scale).toExponential(3)}`);
-    if(!Number.isFinite(candidate)||!Number.isFinite(legacy))throw new Error(`non-finite vertical prototype at nz=${nz}`);
+    const q=state(nz),dir=diagnoseStage4DirectionalAamBreakdown(q.h,q.v,q.ref,q.s,q.g),legacyU=legacyVerticalU(q),indU=independentMassConsistentU(q),zeroRho=new Float64Array(q.s.rhoD.length),legacyMom=diagnoseAxialAngularMomentumTendency(q.h,q.v,q.s,zeroRho,legacyU,q.g).velocityTorque,indMom=diagnoseAxialAngularMomentumTendency(q.h,q.v,q.s,zeroRho,indU,q.g).velocityTorque,lever=diagnoseAxialAngularMomentum(q.h,q.v,q.s,q.g).torqueLeverMass,scale=86400/lever,legacy=(dir.verticalRelativeMass+legacyMom)*scale,production=dir.verticalPairResidual*scale,independent=(dir.verticalRelativeMass+indMom)*scale,delta=production-independent;
+    rows.push({nz,legacy,production});
+    console.log(`${nz}\t${legacy.toExponential(8)}\t${production.toExponential(8)}\t${(Math.abs(legacy)/Math.max(Math.abs(production),1e-30)).toFixed(2)}x\t${delta.toExponential(3)}\t${(dir.closure*scale).toExponential(3)}`);
+    if(![legacy,production,independent,delta].every(Number.isFinite))throw new Error(`non-finite vertical regression at nz=${nz}`);
+    if(Math.abs(delta)>1e-11)throw new Error(`production vertical operator disagrees with independent reference at nz=${nz}: ${delta}`);
+    if(nz===48&&Math.abs(production)>Math.abs(legacy)/100)throw new Error(`production vertical AAM pairing did not improve by 100x at nz=48: legacy=${legacy} production=${production}`);
   }
   const ratio=(a:number,b:number)=>Math.abs(a)/Math.max(Math.abs(b),1e-30);
   console.log(`legacy refine 12->24=${ratio(rows[1]!.legacy,rows[2]!.legacy).toFixed(3)} 24->48=${ratio(rows[2]!.legacy,rows[3]!.legacy).toFixed(3)}`);
-  console.log(`candidate refine 12->24=${ratio(rows[1]!.candidate,rows[2]!.candidate).toFixed(3)} 24->48=${ratio(rows[2]!.candidate,rows[3]!.candidate).toFixed(3)}`);
-}catch(e){console.error('FAIL Stage4 vertical momentum prototype');console.error(e);process.exitCode=1;}
+  console.log(`production fixed-N8 floor 12->24=${ratio(rows[1]!.production,rows[2]!.production).toFixed(3)} 24->48=${ratio(rows[2]!.production,rows[3]!.production).toFixed(3)}`);
+}catch(e){console.error('FAIL Stage4 vertical momentum regression');console.error(e);process.exitCode=1;}
