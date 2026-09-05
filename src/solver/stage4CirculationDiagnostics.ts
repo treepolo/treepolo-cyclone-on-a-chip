@@ -75,10 +75,10 @@ export function diagnoseEddies(h:CubedSphereGrid,v:VerticalGrid,s:DryState,bins=
       const u=wind[o]!*b.east[0]+wind[o+1]!*b.east[1]+wind[o+2]!*b.east[2];
       const vn=wind[o]!*b.north[0]+wind[o+1]!*b.north[1]+wind[o+2]!*b.north[2];
       const p=pressureFromRhoTheta(s.rhoThetaM[q]!),theta=s.rhoThetaM[q]!/Math.max(s.rhoD[q]!,1e-12),T=temperatureFromThetaP(theta,p);
-      meanU[id]+=w*u;meanV[id]+=w*vn;meanT[id]+=w*T;weight[id]+=w;
+      meanU[id]=meanU[id]!+w*u;meanV[id]=meanV[id]!+w*vn;meanT[id]=meanT[id]!+w*T;weight[id]=weight[id]!+w;
     }
   }
-  for(let i=0;i<n;i++)if(weight[i]!>0){meanU[i]/=weight[i]!;meanV[i]/=weight[i]!;meanT[i]/=weight[i]!;}
+  for(let i=0;i<n;i++)if(weight[i]!>0){const wi=weight[i]!;meanU[i]=meanU[i]!/wi;meanV[i]=meanV[i]!/wi;meanT[i]=meanT[i]!/wi;}
   let eke=0,heat=0,mom=0,massSum=0;
   for(let c=0;c<h.cellCount;c++){
     const b=cellBasis(h,rotation,c),latDeg=b.lat*180/Math.PI,absLat=Math.abs(latDeg),bi=Math.max(0,Math.min(bins-1,Math.floor((b.lat+Math.PI/2)/Math.PI*bins))),poleSign=latDeg>=0?1:-1;
