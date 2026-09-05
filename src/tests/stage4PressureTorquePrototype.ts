@@ -3,7 +3,7 @@ import { DRY_AIR, EARTH } from '../core/constants.js';
 import { buildCubedSphere } from '../grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from '../grid/vertical.js';
 import { buildHeldSuarezReference } from '../physics/heldSuarez.js';
-import { reconstructEdgeNormalScalarGradient } from '../physics/horizontalGradient.js';
+import { reconstructCellScalarGradient, reconstructEdgeNormalScalarGradient } from '../physics/horizontalGradient.js';
 import { buildRotationGeometry } from '../physics/rotation.js';
 import { diagnoseAxialAngularMomentum, diagnoseAxialAngularMomentumTendency } from '../solver/stage4CirculationDiagnostics.js';
 import { cell3DIndex, createHydrostaticState, edge3DIndex, type DryState } from '../solver/state.js';
@@ -28,6 +28,34 @@ function currentLsPressureAcceleration(
   for(let e=0;e<h.edgeCount;e++)for(let k=0;k<v.nz;k++){
     const ge=h.edges[e]!,l=cell3DIndex(ge.leftCell,k,v.nz),r=cell3DIndex(ge.rightCell,k,v.nz),rho=.5*(s.rhoD[l]!+s.rhoD[r]!),grad=reconstructEdgeNormalScalarGradient(h,g,e,c=>pressure[cell3DIndex(c,k,v.nz)]!);
     uT[edge3DIndex(e,k,v.nz)]=-grad/Math.max(rho,1e-12);
+  }
+  return uT;
+}
+
+/**
+ * Cell-metric LS candidate.  Reconstruct grad(p) at each cell, divide by that
+ * cell's own density, then average the physical acceleration vectors to the
+ * face-normal velocity DOF.  Diagnostic only; this changes only the order of
+ * interpolation and density division, with no torque correction.
+ */
+function cellMetricLsPressureAcceleration(
+  h:ReturnType<typeof buildCubedSphere>,v:ReturnType<typeof buildStretchedVerticalGrid>,s:DryState,g:ReturnType<typeof buildRotationGeometry>,pressure:Float64Array,
+):Float64Array{
+  const cellA=Array.from({length:v.nz},()=>new Float64Array(h.cellCount*3));
+  for(let k=0;k<v.nz;k++){
+    const a=cellA[k]!;
+    for(let c=0;c<h.cellCount;c++){
+      const q=cell3DIndex(c,k,v.nz),grad=reconstructCellScalarGradient(h,g,c,cc=>pressure[cell3DIndex(cc,k,v.nz)]!),rho=Math.max(s.rhoD[q]!,1e-12),o=c*3;
+      a[o]=-grad[0]/rho;a[o+1]=-grad[1]/rho;a[o+2]=-grad[2]/rho;
+    }
+  }
+  const uT=new Float64Array(h.edgeCount*v.nz);
+  for(let e=0;e<h.edgeCount;e++){
+    const edge=h.edges[e]!,l=edge.leftCell,r=edge.rightCell,n=edge.normal;
+    for(let k=0;k<v.nz;k++){
+      const a=cellA[k]!,lo=l*3,ro=r*3;
+      uT[edge3DIndex(e,k,v.nz)]=.5*((a[lo]!+a[ro]!)*n[0]+(a[lo+1]!+a[ro+1]!)*n[1]+(a[lo+2]!+a[ro+2]!)*n[2]);
+    }
   }
   return uT;
 }
@@ -76,18 +104,18 @@ function run(n:number,m:number,varyDensity:boolean){
   }
   const zeroRho=new Float64Array(s.rhoD.length),lever=diagnoseAxialAngularMomentum(h,v,s,g).torqueLeverMass;
   const torque=(uT:Float64Array)=>accelPerDay(diagnoseAxialAngularMomentumTendency(h,v,s,zeroRho,uT,g).velocityTorque,lever);
-  return{n,m,ls:torque(currentLsPressureAcceleration(h,v,s,g,pressure)),greenGauss:torque(greenGaussPressureAcceleration(h,v,s,g,pressure))};
+  return{n,m,ls:torque(currentLsPressureAcceleration(h,v,s,g,pressure)),cellLs:torque(cellMetricLsPressureAcceleration(h,v,s,g,pressure)),greenGauss:torque(greenGaussPressureAcceleration(h,v,s,g,pressure))};
 }
 
 try{
-  console.log('Stage4 closed-sphere pressure-torque stress test (equivalent m/s/day; continuum pressure-force target = 0; Green-Gauss diagnostic only)');
+  console.log('Stage4 closed-sphere pressure-torque stress test (equivalent m/s/day; continuum pressure-force target = 0; candidates diagnostic only)');
   for(const varying of [false,true]){
     console.log(`horizontal density ${varying?'VARIES':'uniform'}`);
-    console.log('mode\tN8 LS\tN8 GG\tN16 LS\tN16 GG\tN32 LS\tN32 GG');
+    console.log('mode\tN8 edgeLS\tN8 cellLS\tN8 GG\tN16 edgeLS\tN16 cellLS\tN16 GG\tN32 edgeLS\tN32 cellLS\tN32 GG');
     for(const m of [1,2,3,4,5,6,7,8]){
       const r8=run(8,m,varying),r16=run(16,m,varying),r32=run(32,m,varying);
-      console.log(`${m}\t${r8.ls.toExponential(7)}\t${r8.greenGauss.toExponential(7)}\t${r16.ls.toExponential(7)}\t${r16.greenGauss.toExponential(7)}\t${r32.ls.toExponential(7)}\t${r32.greenGauss.toExponential(7)}`);
-      if(![r8.ls,r8.greenGauss,r16.ls,r16.greenGauss,r32.ls,r32.greenGauss].every(Number.isFinite))throw new Error(`non-finite pressure torque mode ${m}`);
+      console.log(`${m}\t${r8.ls.toExponential(7)}\t${r8.cellLs.toExponential(7)}\t${r8.greenGauss.toExponential(7)}\t${r16.ls.toExponential(7)}\t${r16.cellLs.toExponential(7)}\t${r16.greenGauss.toExponential(7)}\t${r32.ls.toExponential(7)}\t${r32.cellLs.toExponential(7)}\t${r32.greenGauss.toExponential(7)}`);
+      if(![r8.ls,r8.cellLs,r8.greenGauss,r16.ls,r16.cellLs,r16.greenGauss,r32.ls,r32.cellLs,r32.greenGauss].every(Number.isFinite))throw new Error(`non-finite pressure torque mode ${m}`);
     }
   }
 }catch(e){console.error('FAIL Stage4 pressure-torque prototype');console.error(e);process.exitCode=1;}
