@@ -2,7 +2,7 @@ declare const process:{exitCode?:number};
 import { dot3 } from '../core/math.js';
 import { buildCubedSphere } from '../grid/cubedSphere.js';
 import { buildStage4GradientStencilData } from '../gpu/stage4GradientStencil.js';
-import { reconstructCellScalarGradient } from '../physics/horizontalGradient.js';
+import { reconstructCellScalarGradient, reconstructEdgeNormalScalarGradient } from '../physics/horizontalGradient.js';
 import { buildRotationGeometry } from '../physics/rotation.js';
 
 function assert(cond:unknown,msg:string):asserts cond{if(!cond)throw new Error(msg)}
@@ -24,5 +24,18 @@ try{
   const rel=Math.sqrt(err2/ref2);
   assert(rel<2e-7,`cached gradient stencil relative L2=${rel}`);
   assert(maxRel<1e-6,`cached gradient stencil max relative error=${maxRel}`);
-  console.log(`PASS cached Stage 4 gradient stencil matches direct least-squares reference relL2=${rel} maxRel=${maxRel}`);
+
+  let edgeErr2=0,edgeRef2=0,edgeMaxRel=0;
+  for(let eid=0;eid<h.edgeCount;eid++){
+    const edge=h.edges[eid]!,l=edge.leftCell,r=edge.rightCell,vl=value(l),vr=value(r);
+    let cached=0;
+    for(let s=0;s<4;s++)cached+=st.edgeProjectedWeights[eid*8+s]!*(value(st.neighbors[l*4+s]!)-vl);
+    for(let s=0;s<4;s++)cached+=st.edgeProjectedWeights[eid*8+4+s]!*(value(st.neighbors[r*4+s]!)-vr);
+    const direct=reconstructEdgeNormalScalarGradient(h,g,eid,value),d=cached-direct;
+    edgeErr2+=d*d;edgeRef2+=direct*direct;edgeMaxRel=Math.max(edgeMaxRel,Math.abs(d)/Math.max(Math.abs(direct),1e-20));
+  }
+  const edgeRel=Math.sqrt(edgeErr2/edgeRef2);
+  assert(edgeRel<2e-7,`edge-projected gradient stencil relative L2=${edgeRel}`);
+  assert(edgeMaxRel<2e-5,`edge-projected gradient stencil max relative error=${edgeMaxRel}`);
+  console.log(`PASS cached Stage 4 gradient stencil matches direct least-squares reference relL2=${rel} maxRel=${maxRel} edgeRelL2=${edgeRel} edgeMaxRel=${edgeMaxRel}`);
 }catch(e){console.error('FAIL cached Stage 4 gradient stencil regression');console.error(e);process.exitCode=1;}
