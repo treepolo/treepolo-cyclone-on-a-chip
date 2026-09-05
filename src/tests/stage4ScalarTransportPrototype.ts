@@ -37,7 +37,7 @@ function run(n:number):Row{
     const donorFace=q[up]!;const d=faceDelta(h,g,up,eid),o=up*3,musclFace=q[up]!+phi[up]!*(grad[o]!*d[0]+grad[o+1]!*d[1]+grad[o+2]!*d[2]);
     let lo=q[up]!,hi=q[up]!;for(let ss=0;ss<4;ss++){const ee=h.edges[h.cellEdges[up*4+ss]!]!,nb=ee.leftCell===up?ee.rightCell:ee.leftCell;lo=Math.min(lo,q[nb]!);hi=Math.max(hi,q[nb]!);}faceViolation=Math.max(faceViolation,lo-musclFace,musclFace-hi,0);
     const fd=ue*L*donorFace,fm=ue*L*musclFace,al=h.cellAreaUnit[e.leftCell]!*EARTH.radius*EARTH.radius,ar=h.cellAreaUnit[e.rightCell]!*EARTH.radius*EARTH.radius;
-    donor[e.leftCell]-=fd/al;donor[e.rightCell]+=fd/ar;muscl[e.leftCell]-=fm/al;muscl[e.rightCell]+=fm/ar;
+    donor[e.leftCell]=donor[e.leftCell]!-fd/al;donor[e.rightCell]=donor[e.rightCell]!+fd/ar;muscl[e.leftCell]=muscl[e.leftCell]!-fm/al;muscl[e.rightCell]=muscl[e.rightCell]!+fm/ar;
   }
   let ed=0,em=0,scale=0,cd=0,cm=0,fluxScale=0;
   for(let cell=0;cell<h.cellCount;cell++){
