@@ -2,7 +2,14 @@ import { EARTH } from './core/constants.js';
 import { buildCubedSphere } from './grid/cubedSphere.js';
 import { buildStretchedVerticalGrid } from './grid/vertical.js';
 import { GpuStage4Rk3SplitReference } from './gpu/stage4Rk3SplitGpu.js';
-import type { Stage4Rk3ClimateCheckpoint } from './persistence/stage4Rk3Checkpoint.js';
+import {
+  assertStage4Rk3CheckpointCompatible,
+  clearStage4Rk3Checkpoint,
+  loadStage4Rk3Checkpoint,
+  saveStage4Rk3Checkpoint,
+  STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE,
+  type Stage4Rk3ClimateCheckpoint,
+} from './persistence/stage4Rk3Checkpoint.js';
 import { acousticDivergenceCoefficientForDt, applyAcousticDivergenceDamping, computeAcousticDivergence } from './physics/acousticDivergenceDamping.js';
 import { buildHeldSuarezReference } from './physics/heldSuarez.js';
 import { reconstructEdgeNormalScalarGradient } from './physics/horizontalGradient.js';
@@ -24,6 +31,7 @@ const logEl=$<HTMLPreElement>('log');
 const DT=10;
 const STEPS_PER_QUARTER=Math.round(21600/DT);
 const BATCH=40;
+const TARGET_DAYS=30;
 
 interface BudgetPoint{day:number;aam:AxialAngularMomentumDiagnostics;eddy:EddyDiagnostics;}
 
@@ -39,6 +47,25 @@ async function yieldToBrowser():Promise<void>{
   const scheduler=(globalThis as any).scheduler;
   if(typeof scheduler?.yield==='function')await scheduler.yield();
   else await new Promise<void>(resolve=>setTimeout(resolve,0));
+}
+
+async function loadCompatibleResume():Promise<Stage4Rk3ClimateCheckpoint|null>{
+  try{
+    const cp=await loadStage4Rk3Checkpoint();
+    if(!cp)return null;
+    try{
+      assertStage4Rk3CheckpointCompatible(cp,STAGE4_RK3_PRODUCTION_MODEL_SIGNATURE,TARGET_DAYS);
+      return cp;
+    }catch{
+      await clearStage4Rk3Checkpoint();
+      return null;
+    }
+  }catch{
+    // A damaged/obsolete browser store must never change the equations or make
+    // the diagnostic silently accept a bad state.  Discard it and start fresh.
+    try{await clearStage4Rk3Checkpoint();}catch{}
+    return null;
+  }
 }
 
 function point(
@@ -187,18 +214,32 @@ async function oneStepOperatorAttribution(
 runBtn.onclick=()=>void(async()=>{
   runBtn.disabled=true;
   logEl.textContent='';
-  $('status').textContent='Initializing fresh day-0 state';
+  $('status').textContent='Checking resumable climate checkpoint';
   const started=performance.now();
   let finalCheckpoint:Stage4Rk3ClimateCheckpoint|null=null;
   try{
-    const samples:ClimateDaySample[]=[];
+    const resume=await loadCompatibleResume();
+    finalCheckpoint=resume;
+    const resumeDay=resume?resume.state.time/86400:0;
+    const samples:ClimateDaySample[]=resume?resume.samples.map(s=>({...s})):[];
+    $('status').textContent=resume?`Resuming Held–Suarez from day ${resumeDay.toFixed(2)}`:'Initializing fresh day-0 state';
+    if(resume){
+      const last=samples[samples.length-1];
+      $('day').textContent=resumeDay.toFixed(2);
+      if(last){
+        $('trade').textContent=`${last.trade.toFixed(4)} m/s`;
+        $('jet').textContent=`${last.jet.toFixed(4)} m/s`;
+        $('psi').textContent=last.psi.toExponential(4);
+        $('mass').textContent=last.massDrift.toExponential(4);
+      }
+    }
     const progress=(p:Stage4Rk3ClimateProgress)=>{
-      $('status').textContent=`Fresh Held–Suarez day ${p.simulatedDay.toFixed(3)} / 30`;
+      $('status').textContent=`Held–Suarez day ${p.simulatedDay.toFixed(3)} / 30${resume?' (resumed)':''}`;
       $('day').textContent=p.simulatedDay.toFixed(3);
       $('elapsed').textContent=`${(p.elapsedMs/1000).toFixed(1)} s`;
     };
     const climate=await runStage4Rk3Climate(
-      30,
+      TARGET_DAYS,
       s=>{
         samples.push({...s});
         $('day').textContent=s.day.toFixed(2);
@@ -208,7 +249,13 @@ runBtn.onclick=()=>void(async()=>{
         $('mass').textContent=s.massDrift.toExponential(4);
       },
       progress,
-      {onCheckpoint:cp=>{finalCheckpoint=cp;}},
+      {
+        resume,
+        onCheckpoint:async cp=>{
+          finalCheckpoint=cp;
+          await saveStage4Rk3Checkpoint(cp);
+        },
+      },
     );
     if(!finalCheckpoint)throw new Error('fresh climate run produced no final checkpoint');
 
@@ -232,7 +279,8 @@ runBtn.onclick=()=>void(async()=>{
 
     const z=climate.finalZonal;
     const result={
-      model:'Stage4 production RK3 split-explicit; fresh day-0 initial condition',
+      model:'Stage4 production RK3 split-explicit; fresh/resumable day-0 initial condition',
+      resumedFromDay:resumeDay,
       elapsedMs:performance.now()-started,
       climate:{
         passed:climate.passed,
