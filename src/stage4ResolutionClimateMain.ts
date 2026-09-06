@@ -28,4 +28,4 @@ run.onclick=()=>void(async()=>{
     },null,2);
     $('elapsed').textContent=`${((performance.now()-started)/1000).toFixed(1)} s`;$('status').textContent=result.failures.length?'COMPLETE WITH STABILITY FAILURE':'COMPLETE';
   }catch(e){$('status').textContent='ERROR';log.textContent=String(e instanceof Error?e.stack||e.message:e);}finally{run.disabled=false;}
-});
+})();
