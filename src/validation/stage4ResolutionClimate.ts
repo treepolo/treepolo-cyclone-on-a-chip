@@ -48,6 +48,11 @@ export async function runStage4ResolutionClimate(horizontalN:number,days:number,
   if(!Number.isInteger(days)||days<1)throw new Error('days must be a positive integer');
   const h=buildCubedSphere(horizontalN),v=buildStretchedVerticalGrid(NZ,TOP,STRETCH),ref=buildHeldSuarezReference(v),rates=buildModelTopSpongeRates(v),active=Array.from(rates.slice(1,-1)).filter(x=>x>0).length;
   if(active<6)throw new Error(`model-top sponge under-resolved: ${active} active interfaces`);
+  // Keep the production equations and outer dt unchanged. At N16+, use shorter
+  // host submissions so Windows/D3D12 gets a queue completion + browser yield
+  // four times as often; this avoids making 40 full RK3 outer steps one long GPU
+  // submission without changing the simulated trajectory.
+  const batchOuterSteps=horizontalN>=16?10:BATCH;
   const stepsPerQuarter=Math.round(21600/DT),totalOuterSteps=days*Math.round(86400/DT),seed=createHydrostaticState(h,v,ref);addHeldSuarezWavePerturbation(h,v,ref,seed,.05);
   const resume=runOptions.resume??null;if(resume)assertResumeState(resume,h,v,horizontalN,days,stepsPerQuarter,totalOuterSteps);
   const startState=resume?.state??seed,gpu=await GpuStage4Rk3SplitReference.create(h,v,ref,startState,ACOUSTIC_RATIO),samples:ClimateDaySample[]=resume?resume.samples.map(s=>({...s})):[],failures:string[]=[],t0=performance.now(),opts={heldSuarez:true,momentumTransport:true,coriolis:true,divergenceDamping:true,topAbsorber:true} as const;
@@ -56,7 +61,7 @@ export async function runStage4ResolutionClimate(horizontalN:number,days:number,
     onProgress?.({horizontalN,simulatedDay:completedOuterSteps*DT/86400,targetDays:days,completedOuterSteps,totalOuterSteps,elapsedMs:0});
     const firstSegment=completedOuterSteps/stepsPerQuarter+1;
     for(let segment=firstSegment;segment<=days*4;segment++){
-      let left=stepsPerQuarter;while(left>0){const n=Math.min(BATCH,left);gpu.stepBatch(DT,n,opts);await gpu.device.queue.onSubmittedWorkDone();left-=n;completedOuterSteps+=n;onProgress?.({horizontalN,simulatedDay:completedOuterSteps*DT/86400,targetDays:days,completedOuterSteps,totalOuterSteps,elapsedMs:performance.now()-t0});await yieldToBrowser();}
+      let left=stepsPerQuarter;while(left>0){const n=Math.min(batchOuterSteps,left);gpu.stepBatch(DT,n,opts);await gpu.device.queue.onSubmittedWorkDone();left-=n;completedOuterSteps+=n;onProgress?.({horizontalN,simulatedDay:completedOuterSteps*DT/86400,targetDays:days,completedOuterSteps,totalOuterSteps,elapsedMs:performance.now()-t0});await yieldToBrowser();}
       const day=segment/4;finalState=await gpu.downloadState(day*86400);const d=diagnoseState(h,v,finalState);finalZonal=diagnoseZonalMeans(h,v,finalState,ZONAL_BINS);const x=extra(h,v,ref,finalState),s:ClimateDaySample={day,massDrift:(d.dryMass-m0)/m0,maxW:d.maxAbsW,jet:finalZonal.maxUpperMidlatitudeWesterly,trade:finalZonal.meanTropicalLowLevelZonal,psi:finalZonal.maxAbsStreamfunction,nhPsi:finalZonal.nhDominantStreamfunction,shPsi:finalZonal.shDominantStreamfunction,invalid:d.nan||d.minRho<=0||d.minP<=0,...x};samples.push(s);onSample?.(s);
       if(s.invalid){failures.push(`day ${day}: invalid state`);break;}if(Math.abs(s.massDrift)>5e-5){failures.push(`day ${day}: mass drift ${s.massDrift}`);break;}if(!(s.maxW<10)){failures.push(`day ${day}: vertical velocity guard ${s.maxW}`);break;}
       if(runOptions.onCheckpoint)await runOptions.onCheckpoint({schemaVersion:STAGE4_RK3_CHECKPOINT_SCHEMA_VERSION,modelSignature:stage4ResolutionModelSignature(horizontalN),savedAt:Date.now(),targetDays:days,completedOuterSteps,initialDryMass:m0,state:finalState,samples:samples.map(sample=>({...sample}))});
