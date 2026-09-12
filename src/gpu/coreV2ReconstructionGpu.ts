@@ -221,6 +221,8 @@ export class CoreV2GpuReconstruction {
   readonly device: GPUAny;
   readonly staticData: CoreV2GpuReconstructionStaticData;
   private readonly pipeline: GPUAny;
+  private readonly pipelineValidation: Promise<any>;
+  private readonly compilationInfo: Promise<any>;
   private readonly params: GPUAny;
   private readonly neighborMeta: GPUAny;
   private readonly neighborCoeff: GPUAny;
@@ -241,17 +243,28 @@ export class CoreV2GpuReconstruction {
     this.neighborCoeff = upload(device, staticData.neighborCoeff, USAGE.STORAGE, 'core-v2-recon-coeff');
     this.faceDisplacement = upload(device, staticData.faceDisplacement, USAGE.STORAGE, 'core-v2-recon-facedx');
     this.referenceLayer = upload(device, staticData.referenceLayer, USAGE.STORAGE, 'core-v2-recon-reference');
+    this.device.pushErrorScope('validation');
     const module = device.createShaderModule({ label: 'core-v2-reconstruction-module', code: SHADER });
+    this.compilationInfo = module.getCompilationInfo();
     this.pipeline = device.createComputePipeline({
       label: 'core-v2-reconstruction-pipeline',
       layout: 'auto',
       compute: { module, entryPoint: 'main' },
     });
+    this.pipelineValidation = this.device.popErrorScope();
   }
 
   async computeGradients(packedState: Float32Array): Promise<Float32Array> {
     if (packedState.length !== this.staticData.cellCount * 8) {
       throw new Error('Core v2 GPU reconstruction packed-state size mismatch');
+    }
+    const setupError = await this.pipelineValidation;
+    if (setupError) {
+      const info = await this.compilationInfo;
+      const messages = Array.from(info.messages ?? [])
+        .map((message: any) => `${message.type ?? 'message'} ${message.lineNum ?? '?'}:${message.linePos ?? '?'} ${message.message ?? String(message)}`)
+        .join(' | ');
+      throw new Error(`Core v2 GPU reconstruction pipeline error: ${setupError.message}${messages ? `; shader: ${messages}` : ''}`);
     }
     const state = upload(
       this.device,
