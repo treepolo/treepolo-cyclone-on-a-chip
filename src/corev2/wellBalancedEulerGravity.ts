@@ -54,19 +54,47 @@ function subtractBoundaryFlux(
   rate.rhoE[cell] = rate.rhoE[cell]! - outwardFlux.totalEnergy;
 }
 
-function slipWallPressureFlux(pressure: number, outwardVectorArea: Vec3): IntegratedFaceFlux {
+function pressurePerturbationWallFlux(
+  pressure: number,
+  referencePressure: number,
+  outwardVectorArea: Vec3,
+): IntegratedFaceFlux {
+  const pPrime = pressure - referencePressure;
   return {
     mass: 0,
     momentum: [
-      pressure * outwardVectorArea[0],
-      pressure * outwardVectorArea[1],
-      pressure * outwardVectorArea[2],
+      pPrime * outwardVectorArea[0],
+      pPrime * outwardVectorArea[1],
+      pPrime * outwardVectorArea[2],
     ],
     totalEnergy: 0,
   };
 }
 
-function addGravityForce(
+/**
+ * Remove the hydrostatic reference pressure force from momentum only.
+ * The reference pressure force plus reference gravity is an exact discrete zero,
+ * so subtracting both terms is algebraically equivalent to the original Euler +
+ * gravity equation while avoiding cancellation of two Earth-scale forces.
+ * Mass and total-energy fluxes stay untouched.
+ */
+function removeReferencePressureMomentum(
+  flux: IntegratedFaceFlux,
+  vectorArea: Vec3,
+  referencePressure: number,
+): IntegratedFaceFlux {
+  return {
+    mass: flux.mass,
+    momentum: [
+      flux.momentum[0] - referencePressure * vectorArea[0],
+      flux.momentum[1] - referencePressure * vectorArea[1],
+      flux.momentum[2] - referencePressure * vectorArea[2],
+    ],
+    totalEnergy: flux.totalEnergy,
+  };
+}
+
+function addGravityPerturbationForce(
   rate: IntegratedConservativeRate,
   cell: number,
   force: Vec3,
@@ -74,19 +102,19 @@ function addGravityForce(
   rate.momX[cell] = rate.momX[cell]! + force[0];
   rate.momY[cell] = rate.momY[cell]! + force[1];
   rate.momZ[cell] = rate.momZ[cell]! + force[2];
-  // rhoE already contains gravitational potential energy, so gravity has no
-  // separate total-energy source in this conservative formulation.
+  // rhoE already includes gravitational potential energy; no energy source.
 }
 
 /**
  * Second-order conservative Euler + constant-radial-gravity operator with an
  * exactly well-balanced isothermal hydrostatic reference.
  *
- * The reference is only an algebraic split. It never changes the prognostic
- * state by itself. At every face we reconstruct p' = p-p_ref and then add the
- * exact reference face pressure. The direct primitive-state SLAU2 path is used
- * so this pressure is not converted through rhoE-rho*Phi again before the
- * Riemann solve.
+ * The reference is an algebraic zero, not a forcing. The operator reconstructs
+ * p'=p-p_ref, evaluates the all-speed face flux with the full physical pressure,
+ * then removes p_ref*A from the momentum flux while gravity is evaluated from
+ * rho-rho_ref. Since the removed reference pressure and reference gravity are
+ * the exact same discrete hydrostatic balance, the physical operator is
+ * unchanged but the large cancelling background forces never enter the rate.
  */
 export function closedShellWellBalancedEulerGravityRate(
   fields: ConservativeFields,
@@ -139,14 +167,20 @@ export function closedShellWellBalancedEulerGravityRate(
         sideFaceRadialMean(geometry, k),
         planet,
       );
-      const flux = integratedSlau2FluxFromPrimitive(
+      const vectorArea = sideFaceVectorArea(geometry, e, k);
+      const physicalFlux = integratedSlau2FluxFromPrimitive(
         leftPrimitive,
         rightPrimitive,
-        sideFaceVectorArea(geometry, e, k),
+        vectorArea,
         phiFace,
         phiFace,
       );
-      accumulateInternalIntegratedFaceFlux(rate, left, right, flux);
+      accumulateInternalIntegratedFaceFlux(
+        rate,
+        left,
+        right,
+        removeReferencePressureMomentum(physicalFlux, vectorArea, pRef),
+      );
     }
   }
 
@@ -163,54 +197,62 @@ export function closedShellWellBalancedEulerGravityRate(
         fields, reconstruction, stencil, reference, upper, position, pRef,
       );
       const phiFace = geopotentialAtRadius(geometry, geometry.radiusInterface[ki]!, planet);
-      const flux = integratedSlau2FluxFromPrimitive(
+      const vectorArea = radialFaceVectorArea(geometry, c, ki);
+      const physicalFlux = integratedSlau2FluxFromPrimitive(
         lowerPrimitive,
         upperPrimitive,
-        radialFaceVectorArea(geometry, c, ki),
+        vectorArea,
         phiFace,
         phiFace,
       );
-      accumulateInternalIntegratedFaceFlux(rate, lower, upper, flux);
+      accumulateInternalIntegratedFaceFlux(
+        rate,
+        lower,
+        upper,
+        removeReferencePressureMomentum(physicalFlux, vectorArea, pRef),
+      );
     }
   }
 
   for (let c = 0; c < horizontal.cellCount; c++) {
     const bottom = shellCellIndex(c, 0, geometry.nz);
-    const bottomPosition = radialFaceCentroid(geometry, c, 0);
+    const bottomPRef = reference.radialFacePressure[0]!;
     const bottomPrimitive = reconstructHydrostaticPrimitiveAt(
       fields,
       reconstruction,
       stencil,
       reference,
       bottom,
-      bottomPosition,
-      reference.radialFacePressure[0]!,
+      radialFaceCentroid(geometry, c, 0),
+      bottomPRef,
     );
     subtractBoundaryFlux(
       rate,
       bottom,
-      slipWallPressureFlux(
+      pressurePerturbationWallFlux(
         bottomPrimitive.pressure,
+        bottomPRef,
         scale3(radialFaceVectorArea(geometry, c, 0), -1),
       ),
     );
 
     const top = shellCellIndex(c, geometry.nz - 1, geometry.nz);
-    const topPosition = radialFaceCentroid(geometry, c, geometry.nz);
+    const topPRef = reference.radialFacePressure[geometry.nz]!;
     const topPrimitive = reconstructHydrostaticPrimitiveAt(
       fields,
       reconstruction,
       stencil,
       reference,
       top,
-      topPosition,
-      reference.radialFacePressure[geometry.nz]!,
+      radialFaceCentroid(geometry, c, geometry.nz),
+      topPRef,
     );
     subtractBoundaryFlux(
       rate,
       top,
-      slipWallPressureFlux(
+      pressurePerturbationWallFlux(
         topPrimitive.pressure,
+        topPRef,
         radialFaceVectorArea(geometry, c, geometry.nz),
       ),
     );
@@ -219,10 +261,11 @@ export function closedShellWellBalancedEulerGravityRate(
   for (let c = 0; c < horizontal.cellCount; c++) {
     for (let k = 0; k < geometry.nz; k++) {
       const q = shellCellIndex(c, k, geometry.nz);
-      addGravityForce(
+      const densityPerturbation = fields.rho[q]! - reference.cellDensity[k]!;
+      addGravityPerturbationForce(
         rate,
         q,
-        integratedCellGravityForce(geometry, c, k, fields.rho[q]!, planet),
+        integratedCellGravityForce(geometry, c, k, densityPerturbation, planet),
       );
     }
   }
