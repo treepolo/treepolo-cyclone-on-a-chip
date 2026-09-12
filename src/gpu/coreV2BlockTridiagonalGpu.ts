@@ -99,13 +99,18 @@ struct DenseSolveResult{
   ok:u32,
 };
 
+fn finite_f32(x:f32)->bool{
+  let bits=bitcast<u32>(abs(x));
+  return (bits & 0x7f800000u) != 0x7f800000u;
+}
+
 fn dense5_solve(matrixInput:array<f32,25>,rhsInput:array<f32,25>,columnCount:u32)->DenseSolveResult{
   var matrix=matrixInput;
   var rhs=rhsInput;
   var result:DenseSolveResult;
   var matrixScale=0.0;
   for(var i:u32=0u;i<25u;i++){matrixScale=max(matrixScale,abs(matrix[i]));}
-  if(!(matrixScale>0.0) || !isFinite(matrixScale)){
+  if(!(matrixScale>0.0) || !finite_f32(matrixScale)){
     result.matrix=matrix;result.rhs=rhs;result.ok=0u;return result;
   }
   for(var pivotColumn:u32=0u;pivotColumn<5u;pivotColumn++){
@@ -115,7 +120,7 @@ fn dense5_solve(matrixInput:array<f32,25>,rhsInput:array<f32,25>,columnCount:u32
       let magnitude=abs(matrix[row*5u+pivotColumn]);
       if(magnitude>pivotMagnitude){pivotMagnitude=magnitude;pivotRow=row;}
     }
-    if(!(pivotMagnitude>1e-6*matrixScale) || !isFinite(pivotMagnitude)){
+    if(!(pivotMagnitude>1e-6*matrixScale) || !finite_f32(pivotMagnitude)){
       result.matrix=matrix;result.rhs=rhs;result.ok=0u;return result;
     }
     if(pivotRow!=pivotColumn){
@@ -201,8 +206,6 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
     }
   }
 
-  let last=rhs_offset(column,P.nz-1u);
-  for(var i:u32=0u;i<5u;i++){modifiedRhsAndSolution[last+i]=modifiedRhsAndSolution[last+i];}
   for(var kk:i32=i32(P.nz)-2;kk>=0;kk--){
     let k=u32(kk);let bo=block_offset(column,k);let ro=rhs_offset(column,k);let next=rhs_offset(column,k+1u);
     var solved:array<f32,5>;
