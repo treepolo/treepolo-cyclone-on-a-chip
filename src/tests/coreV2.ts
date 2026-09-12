@@ -7,6 +7,8 @@ import {
   shellCellIndex,
   shellRadialFaceIndex,
   shellSideFaceIndex,
+  radialFaceVectorArea,
+  sideFaceVectorArea,
 } from '../corev2/sphericalShellGeometry.js';
 import { norm3 } from '../core/math.js';
 import { assert, near, relative } from './assert.js';
@@ -235,6 +237,48 @@ test('Core v2 spherical-shell side faces are shared geometric objects', () => {
       const left = shellCellIndex(edge.leftCell, k, geometry.nz);
       const right = shellCellIndex(edge.rightCell, k, geometry.nz);
       assert(left !== right, 'extruded side face must separate two 3-D cells');
+    }
+  }
+});
+
+test('Core v2 spherical-shell vector areas close every 3-D control volume', () => {
+  const horizontal = buildCubedSphere(7);
+  const r0 = EARTH.radius;
+  const radii = new Float64Array([r0, r0 + 700, r0 + 2100, r0 + 5000]);
+  const geometry = buildSphericalShellGeometry(horizontal, radii);
+
+  let globalAx = 0;
+  let globalAy = 0;
+  let globalAz = 0;
+  for (let c = 0; c < horizontal.cellCount; c++) {
+    globalAx += geometry.cellVectorAreaUnit[c * 3]!;
+    globalAy += geometry.cellVectorAreaUnit[c * 3 + 1]!;
+    globalAz += geometry.cellVectorAreaUnit[c * 3 + 2]!;
+  }
+  const globalVectorArea = Math.hypot(globalAx, globalAy, globalAz);
+  assert(globalVectorArea < 2e-14, `closed unit sphere vector area=${globalVectorArea}`);
+
+  for (let c = 0; c < horizontal.cellCount; c++) {
+    for (let k = 0; k < geometry.nz; k++) {
+      const top = radialFaceVectorArea(geometry, c, k + 1);
+      const bottom = radialFaceVectorArea(geometry, c, k);
+      let sx = top[0] - bottom[0];
+      let sy = top[1] - bottom[1];
+      let sz = top[2] - bottom[2];
+      let scale = norm3(top) + norm3(bottom);
+
+      for (let s = 0; s < 4; s++) {
+        const edgeId = horizontal.cellEdges[c * 4 + s]!;
+        const sign = horizontal.cellEdgeSigns[c * 4 + s]!;
+        const side = sideFaceVectorArea(geometry, edgeId, k);
+        sx += sign * side[0];
+        sy += sign * side[1];
+        sz += sign * side[2];
+        scale += norm3(side);
+      }
+
+      const residual = Math.hypot(sx, sy, sz) / Math.max(scale, 1);
+      assert(residual < 3e-14, `cell ${c} layer ${k} vector-area closure=${residual}`);
     }
   }
 });
