@@ -176,9 +176,9 @@ fn beta_minus(m:f32)->f32{if(abs(m)<1.0){return .25*(2.0+m)*(m-1.0)*(m-1.0);}ret
 fn base_value(q:u32,v:u32)->f32{
   let a=state[2u*q];let b=state[2u*q+1u];let rho=a.x;
   if(v==0u){return rho;} if(v==1u){return a.y/rho;} if(v==2u){return a.z/rho;} if(v==3u){return a.w/rho;}
-  let k=q-P.nz*(q/P.nz);let ref=refLayer[k];let kinetic=.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;
-  let referenceEnergy=ref.y/(P.gamma-1.0)+ref.x*ref.z;
-  return (P.gamma-1.0)*((b.x-referenceEnergy)-kinetic-(rho-ref.x)*ref.z);
+  let k=q-P.nz*(q/P.nz);let refState=refLayer[k];let kinetic=.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;
+  let referenceEnergy=refState.y/(P.gamma-1.0)+refState.x*refState.z;
+  return (P.gamma-1.0)*((b.x-referenceEnergy)-kinetic-(rho-refState.x)*refState.z);
 }
 fn reconstruct(q:u32,dx:vec3<f32>,pRef:f32)->array<vec4<f32>,2>{
   let rho=base_value(q,0u)+dot(gradient[q*5u].xyz,dx);
