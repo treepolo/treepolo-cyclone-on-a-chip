@@ -2,7 +2,7 @@ import { EARTH, type PlanetConfig } from '../core/constants.js';
 import { scale3, type Vec3 } from '../core/math.js';
 import type { ConservativeFields } from './fields.js';
 import type { HydrostaticReference1D } from './hydrostaticReference.js';
-import { integratedSlau2FluxFromPrimitive } from './slau2Flux.js';
+import { integratedSlau2ReferenceSubtractedFluxFromPrimitive } from './slau2Flux.js';
 import {
   pressurePerturbationFromReference,
   type ConservativeCell,
@@ -106,22 +106,6 @@ interface ColumnFlux {
   totalEnergy: number;
 }
 
-function subtractReferencePressureMomentum(
-  flux: ColumnFlux,
-  vectorArea: Vec3,
-  referencePressure: number,
-): ColumnFlux {
-  return {
-    mass: flux.mass,
-    momentum: [
-      flux.momentum[0] - referencePressure * vectorArea[0],
-      flux.momentum[1] - referencePressure * vectorArea[1],
-      flux.momentum[2] - referencePressure * vectorArea[2],
-    ],
-    totalEnergy: flux.totalEnergy,
-  };
-}
-
 function addFluxLeft(rate: Float64Array, k: number, flux: ColumnFlux): void {
   const i0 = columnStateIndex(k, 0);
   const i1 = columnStateIndex(k, 1);
@@ -180,11 +164,10 @@ function gravityPerturbationForce(
 
 /**
  * Integrated vertical stiff rate for exactly one horizontal atmospheric column.
- * The hydrostatic reference is subtracted algebraically before accumulation:
- * radial momentum flux uses (F_momentum - p_ref A) and gravity uses
- * (rho-rho_ref)g. The removed reference pressure and reference gravity are the
- * same exact discrete zero. Thus the physical equations are unchanged while an
- * exact reference column produces an exact zero stiff residual term-by-term.
+ * The hydrostatic reference is subtracted algebraically inside the radial SLAU2
+ * momentum flux and in gravity. The full physical mass and total-energy fluxes
+ * remain untouched. Thus an exact reference column gives zero stiff momentum
+ * residual without constructing and then subtracting Earth-scale pressure forces.
  *
  * Output ordering is [rho,mx,my,mz,rhoE] repeated by vertical level.
  */
@@ -209,15 +192,14 @@ export function verticalStiffColumnIntegratedRate(
     const lower = hydrostaticPrimitive(column, ki - 1, reference, pRef);
     const upper = hydrostaticPrimitive(column, ki, reference, pRef);
     const phi = faceGeopotential(geometry, ki, planet);
-    const vectorArea = radialFaceVectorArea(geometry, horizontalCell, ki);
-    const physicalFlux = integratedSlau2FluxFromPrimitive(
+    const flux = integratedSlau2ReferenceSubtractedFluxFromPrimitive(
       lower,
       upper,
-      vectorArea,
+      radialFaceVectorArea(geometry, horizontalCell, ki),
+      pRef,
       phi,
       phi,
     );
-    const flux = subtractReferencePressureMomentum(physicalFlux, vectorArea, pRef);
     addFluxLeft(rate, ki - 1, flux);
     addFluxRight(rate, ki, flux);
   }
