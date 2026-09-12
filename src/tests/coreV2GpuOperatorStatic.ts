@@ -79,8 +79,8 @@ test('Core v2 GPU cell gather gives every shared face one minus and one plus inc
       localCount++;
       assert(face < faces.faceCount, `cell ${q} invalid face id ${face}`);
       assert(sign === -1 || sign === 1, `cell ${q} face ${face} invalid sign ${sign}`);
-      if (sign < 0) minus[face]++;
-      else plus[face]++;
+      if (sign < 0) minus[face] = minus[face]! + 1;
+      else plus[face] = plus[face]! + 1;
       const left = faces.faceCells[face * 2]!;
       const right = faces.faceCells[face * 2 + 1]!;
       assert(
@@ -127,7 +127,7 @@ test('Core v2 GPU shared-face gather is globally conservative for arbitrary face
         Math.sin(face * 0.07 + 0.9) * 5e14,
       ];
       for (let v = 0; v < 5; v++) {
-        global[v] += sign * values[v]!;
+        global[v] = global[v]! + sign * values[v]!;
         absolute += Math.abs(values[v]!);
       }
     }
