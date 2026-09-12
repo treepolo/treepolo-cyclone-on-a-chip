@@ -100,11 +100,29 @@ function hydrostaticPrimitive(
   };
 }
 
-function addFluxLeft(rate: Float64Array, k: number, flux: {
+interface ColumnFlux {
   mass: number;
   momentum: Vec3;
   totalEnergy: number;
-}): void {
+}
+
+function subtractReferencePressureMomentum(
+  flux: ColumnFlux,
+  vectorArea: Vec3,
+  referencePressure: number,
+): ColumnFlux {
+  return {
+    mass: flux.mass,
+    momentum: [
+      flux.momentum[0] - referencePressure * vectorArea[0],
+      flux.momentum[1] - referencePressure * vectorArea[1],
+      flux.momentum[2] - referencePressure * vectorArea[2],
+    ],
+    totalEnergy: flux.totalEnergy,
+  };
+}
+
+function addFluxLeft(rate: Float64Array, k: number, flux: ColumnFlux): void {
   rate[columnStateIndex(k, 0)] -= flux.mass;
   rate[columnStateIndex(k, 1)] -= flux.momentum[0];
   rate[columnStateIndex(k, 2)] -= flux.momentum[1];
@@ -112,11 +130,7 @@ function addFluxLeft(rate: Float64Array, k: number, flux: {
   rate[columnStateIndex(k, 4)] -= flux.totalEnergy;
 }
 
-function addFluxRight(rate: Float64Array, k: number, flux: {
-  mass: number;
-  momentum: Vec3;
-  totalEnergy: number;
-}): void {
+function addFluxRight(rate: Float64Array, k: number, flux: ColumnFlux): void {
   rate[columnStateIndex(k, 0)] += flux.mass;
   rate[columnStateIndex(k, 1)] += flux.momentum[0];
   rate[columnStateIndex(k, 2)] += flux.momentum[1];
@@ -134,32 +148,19 @@ function faceGeopotential(
   );
 }
 
-function referenceSidePressureForce(
-  geometry: SphericalShellGeometry,
-  reference: HydrostaticReference1D,
-  horizontalCell: number,
-  k: number,
-): Vec3 {
-  const r0 = geometry.radiusInterface[k]!;
-  const r1 = geometry.radiusInterface[k + 1]!;
-  const coefficient = reference.sideFacePressure[k]! * (r1 * r1 - r0 * r0);
-  return [
-    coefficient * geometry.cellVectorAreaUnit[horizontalCell * 3]!,
-    coefficient * geometry.cellVectorAreaUnit[horizontalCell * 3 + 1]!,
-    coefficient * geometry.cellVectorAreaUnit[horizontalCell * 3 + 2]!,
-  ];
-}
-
-function gravityForce(
+function gravityPerturbationForce(
   geometry: SphericalShellGeometry,
   horizontalCell: number,
   k: number,
-  density: number,
+  densityPerturbation: number,
   planet: PlanetConfig,
 ): Vec3 {
+  if (!Number.isFinite(densityPerturbation)) {
+    throw new Error(`invalid HEVI density perturbation at level ${k}: ${densityPerturbation}`);
+  }
   const r0 = geometry.radiusInterface[k]!;
   const r1 = geometry.radiusInterface[k + 1]!;
-  const scale = -density * planet.gravity * (r1 ** 3 - r0 ** 3) / 3;
+  const scale = -densityPerturbation * planet.gravity * (r1 ** 3 - r0 ** 3) / 3;
   return [
     scale * geometry.cellVectorAreaUnit[horizontalCell * 3]!,
     scale * geometry.cellVectorAreaUnit[horizontalCell * 3 + 1]!,
@@ -169,7 +170,13 @@ function gravityForce(
 
 /**
  * Integrated vertical stiff rate for exactly one horizontal atmospheric column.
- * The output ordering is [rho,mx,my,mz,rhoE] repeated by vertical level.
+ * The hydrostatic reference is subtracted algebraically before accumulation:
+ * radial momentum flux uses (F_momentum - p_ref A) and gravity uses
+ * (rho-rho_ref)g. The removed reference pressure and reference gravity are the
+ * same exact discrete zero. Thus the physical equations are unchanged while an
+ * exact reference column produces an exact zero stiff residual term-by-term.
+ *
+ * Output ordering is [rho,mx,my,mz,rhoE] repeated by vertical level.
  */
 export function verticalStiffColumnIntegratedRate(
   column: ArrayLike<number>,
@@ -192,50 +199,49 @@ export function verticalStiffColumnIntegratedRate(
     const lower = hydrostaticPrimitive(column, ki - 1, reference, pRef);
     const upper = hydrostaticPrimitive(column, ki, reference, pRef);
     const phi = faceGeopotential(geometry, ki, planet);
-    const flux = integratedSlau2FluxFromPrimitive(
+    const vectorArea = radialFaceVectorArea(geometry, horizontalCell, ki);
+    const physicalFlux = integratedSlau2FluxFromPrimitive(
       lower,
       upper,
-      radialFaceVectorArea(geometry, horizontalCell, ki),
+      vectorArea,
       phi,
       phi,
     );
+    const flux = subtractReferencePressureMomentum(physicalFlux, vectorArea, pRef);
     addFluxLeft(rate, ki - 1, flux);
     addFluxRight(rate, ki, flux);
   }
 
-  const bottom = hydrostaticPrimitive(
-    column,
-    0,
-    reference,
-    reference.radialFacePressure[0]!,
-  );
-  const bottomArea = scale3(
-    radialFaceVectorArea(geometry, horizontalCell, 0),
-    -1,
-  );
-  rate[columnStateIndex(0, 1)] -= bottom.pressure * bottomArea[0];
-  rate[columnStateIndex(0, 2)] -= bottom.pressure * bottomArea[1];
-  rate[columnStateIndex(0, 3)] -= bottom.pressure * bottomArea[2];
+  const bottomPRef = reference.radialFacePressure[0]!;
+  const bottom = hydrostaticPrimitive(column, 0, reference, bottomPRef);
+  const bottomArea = scale3(radialFaceVectorArea(geometry, horizontalCell, 0), -1);
+  const bottomPPrime = bottom.pressure - bottomPRef;
+  rate[columnStateIndex(0, 1)] -= bottomPPrime * bottomArea[0];
+  rate[columnStateIndex(0, 2)] -= bottomPPrime * bottomArea[1];
+  rate[columnStateIndex(0, 3)] -= bottomPPrime * bottomArea[2];
 
   const topK = nz - 1;
-  const top = hydrostaticPrimitive(
-    column,
-    topK,
-    reference,
-    reference.radialFacePressure[nz]!,
-  );
+  const topPRef = reference.radialFacePressure[nz]!;
+  const top = hydrostaticPrimitive(column, topK, reference, topPRef);
   const topArea = radialFaceVectorArea(geometry, horizontalCell, nz);
-  rate[columnStateIndex(topK, 1)] -= top.pressure * topArea[0];
-  rate[columnStateIndex(topK, 2)] -= top.pressure * topArea[1];
-  rate[columnStateIndex(topK, 3)] -= top.pressure * topArea[2];
+  const topPPrime = top.pressure - topPRef;
+  rate[columnStateIndex(topK, 1)] -= topPPrime * topArea[0];
+  rate[columnStateIndex(topK, 2)] -= topPPrime * topArea[1];
+  rate[columnStateIndex(topK, 3)] -= topPPrime * topArea[2];
 
   for (let k = 0; k < nz; k++) {
-    const density = column[columnStateIndex(k, 0)]!;
-    const gravity = gravityForce(geometry, horizontalCell, k, density, planet);
-    const side = referenceSidePressureForce(geometry, reference, horizontalCell, k);
-    rate[columnStateIndex(k, 1)] += gravity[0] + side[0];
-    rate[columnStateIndex(k, 2)] += gravity[1] + side[1];
-    rate[columnStateIndex(k, 3)] += gravity[2] + side[2];
+    const densityPerturbation =
+      column[columnStateIndex(k, 0)]! - reference.cellDensity[k]!;
+    const gravity = gravityPerturbationForce(
+      geometry,
+      horizontalCell,
+      k,
+      densityPerturbation,
+      planet,
+    );
+    rate[columnStateIndex(k, 1)] += gravity[0];
+    rate[columnStateIndex(k, 2)] += gravity[1];
+    rate[columnStateIndex(k, 3)] += gravity[2];
   }
 
   return rate;
