@@ -16,8 +16,7 @@ import {
   sideFaceCentroid,
   type LinearReconstructionStencil,
 } from './reconstruction.js';
-import { integratedSlau2Flux } from './slau2Flux.js';
-import { conservedFromPrimitive } from './state.js';
+import { integratedSlau2FluxFromPrimitive } from './slau2Flux.js';
 import {
   radialFaceVectorArea,
   shellCellIndex,
@@ -85,9 +84,9 @@ function addGravityForce(
  *
  * The reference is only an algebraic split. It never changes the prognostic
  * state by itself. At every face we reconstruct p' = p-p_ref and then add the
- * exact reference face pressure. Consequently an exact hydrostatic state gives
- * equal left/right face pressures, zero SLAU2 mass/energy flux, and a pressure
- * force that cancels the cell-integrated gravity source to roundoff.
+ * exact reference face pressure. The direct primitive-state SLAU2 path is used
+ * so this pressure is not converted through rhoE-rho*Phi again before the
+ * Riemann solve.
  */
 export function closedShellWellBalancedEulerGravityRate(
   fields: ConservativeFields,
@@ -122,7 +121,6 @@ export function closedShellWellBalancedEulerGravityRate(
   const reconstruction = buildHydrostaticReconstruction(fields, stencil, reference);
   const horizontal = geometry.horizontal;
 
-  // Horizontal shared faces.
   for (let e = 0; e < horizontal.edgeCount; e++) {
     const edge = horizontal.edges[e]!;
     for (let k = 0; k < geometry.nz; k++) {
@@ -131,31 +129,19 @@ export function closedShellWellBalancedEulerGravityRate(
       const position = sideFaceCentroid(geometry, e, k);
       const pRef = reference.sideFacePressure[k]!;
       const leftPrimitive = reconstructHydrostaticPrimitiveAt(
-        fields,
-        reconstruction,
-        stencil,
-        reference,
-        left,
-        position,
-        pRef,
+        fields, reconstruction, stencil, reference, left, position, pRef,
       );
       const rightPrimitive = reconstructHydrostaticPrimitiveAt(
-        fields,
-        reconstruction,
-        stencil,
-        reference,
-        right,
-        position,
-        pRef,
+        fields, reconstruction, stencil, reference, right, position, pRef,
       );
       const phiFace = geopotentialAtRadius(
         geometry,
         sideFaceRadialMean(geometry, k),
         planet,
       );
-      const flux = integratedSlau2Flux(
-        conservedFromPrimitive(leftPrimitive, phiFace),
-        conservedFromPrimitive(rightPrimitive, phiFace),
+      const flux = integratedSlau2FluxFromPrimitive(
+        leftPrimitive,
+        rightPrimitive,
         sideFaceVectorArea(geometry, e, k),
         phiFace,
         phiFace,
@@ -164,7 +150,6 @@ export function closedShellWellBalancedEulerGravityRate(
     }
   }
 
-  // Internal radial shared faces.
   for (let c = 0; c < horizontal.cellCount; c++) {
     for (let ki = 1; ki < geometry.nz; ki++) {
       const lower = shellCellIndex(c, ki - 1, geometry.nz);
@@ -172,27 +157,15 @@ export function closedShellWellBalancedEulerGravityRate(
       const position = radialFaceCentroid(geometry, c, ki);
       const pRef = reference.radialFacePressure[ki]!;
       const lowerPrimitive = reconstructHydrostaticPrimitiveAt(
-        fields,
-        reconstruction,
-        stencil,
-        reference,
-        lower,
-        position,
-        pRef,
+        fields, reconstruction, stencil, reference, lower, position, pRef,
       );
       const upperPrimitive = reconstructHydrostaticPrimitiveAt(
-        fields,
-        reconstruction,
-        stencil,
-        reference,
-        upper,
-        position,
-        pRef,
+        fields, reconstruction, stencil, reference, upper, position, pRef,
       );
       const phiFace = geopotentialAtRadius(geometry, geometry.radiusInterface[ki]!, planet);
-      const flux = integratedSlau2Flux(
-        conservedFromPrimitive(lowerPrimitive, phiFace),
-        conservedFromPrimitive(upperPrimitive, phiFace),
+      const flux = integratedSlau2FluxFromPrimitive(
+        lowerPrimitive,
+        upperPrimitive,
         radialFaceVectorArea(geometry, c, ki),
         phiFace,
         phiFace,
@@ -201,7 +174,6 @@ export function closedShellWellBalancedEulerGravityRate(
     }
   }
 
-  // Stationary impermeable bottom and top boundaries.
   for (let c = 0; c < horizontal.cellCount; c++) {
     const bottom = shellCellIndex(c, 0, geometry.nz);
     const bottomPosition = radialFaceCentroid(geometry, c, 0);
@@ -244,8 +216,6 @@ export function closedShellWellBalancedEulerGravityRate(
     );
   }
 
-  // Gravity source. With cell-average density as the finite-volume state, this
-  // is the exact volume integral of -rho*g*rHat for the piecewise-constant cell.
   for (let c = 0; c < horizontal.cellCount; c++) {
     for (let k = 0; k < geometry.nz; k++) {
       const q = shellCellIndex(c, k, geometry.nz);
@@ -257,8 +227,6 @@ export function closedShellWellBalancedEulerGravityRate(
     }
   }
 
-  // Catch invalid arithmetic at the operator boundary, before a timestep can
-  // contaminate the prognostic state.
   for (let q = 0; q < cellCount; q++) {
     const magnitude = Math.max(
       Math.abs(rate.rho[q]!),
@@ -275,7 +243,6 @@ export function closedShellWellBalancedEulerGravityRate(
   return rate;
 }
 
-/** Diagnostic norm used by hydrostatic-balance gates. */
 export function integratedMomentumRateNorm(
   rate: IntegratedConservativeRate,
   cell: number,
