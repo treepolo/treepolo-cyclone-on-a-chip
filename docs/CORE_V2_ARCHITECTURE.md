@@ -19,15 +19,18 @@
 8. **全球幾何採真正三維球殼有限體積。** 水平 cubed-sphere 控制面向徑向擠出；每格體積、每個面積與向量面積直接由幾何積分建立，而不是把平面公式硬套到球面。
 9. **正式 Euler 面通量採 SLAU2 all-speed flux。** 它不需要 freestream/reference Mach 的人工調整參數；相同左右狀態必須精確退化成物理 Euler flux。
 10. **正式空間重建採 compact weighted least-squares + Barth–Jespersen limiter。** 每格最多六個直接鄰居；重建以真正三維體積中心與面中心為幾何基準。限制器沒有可調係數，且密度與壓力的面值不得超出鄰近格心極值。
-11. **Base core 不含下列項目：**
+11. **正式時間架構採 conservative HEVI（水平顯式、垂直隱式）。** 完整可壓縮 Euler 物理保留；最短垂直網格造成的聲學／重力波剛性由每個大氣柱各自的隱式解處理，水平傳輸保持顯式。這是單一 production 演算法，不另外做「慢參考核心」。
+12. **HEVI 不使用全域壓力 Poisson/Krylov 解。** 每個水平柱形成固定寬度的 block-tridiagonal 系統，工作量隨垂直層數線性增加，柱與柱可以獨立在消費級 GPU 上平行執行。
+13. **不沿用 Stage 4 的 acoustic substep / HEVI off-centering / divergence damping 組合。** Core v2 的垂直隱式步必須從守恆 Euler＋重力方程重新推導；穩定性不能靠額外 damping 係數兜底。
+14. **Base core 不含下列項目：**
    - Held–Suarez 強迫
    - 近地面 Rayleigh drag
    - divergence damping
    - model-top sponge
    - 全域質量／角動量／能量 fixer
    - 人工指定的環流或風向
-12. 上述外部物理或邊界機制只能在 base core 的守恆、波動、平衡與收斂測試通過後，作為明確可開關的模組加入。
-13. **Core v2 不以 Stage 4 的宏觀結果作為調參目標。** 不得因為信風方向、噴流強度等結果不合期待，就反向調 numerical coefficient。
+15. 上述外部物理或邊界機制只能在 base core 的守恆、波動、平衡與收斂測試通過後，作為明確可開關的模組加入。
+16. **Core v2 不以 Stage 4 的宏觀結果作為調參目標。** 不得因為信風方向、噴流強度等結果不合期待，就反向調 numerical coefficient。
 
 ## 2. 已落地的核心結構
 
@@ -64,16 +67,21 @@
   - 對 `dm/dt = -2 Omega × m` 做解析旋轉
   - `rho` 與 `rho E` 不變
   - 動量長度只允許 roundoff 誤差，因此 Coriolis 不可偷偷做功
+- `src/corev2/blockTridiagonal5.ts`
+  - 每個垂直柱使用 5×5 block-tridiagonal 線性系統
+  - block Thomas elimination，工作量 O(nz)
+  - 不需要全域壓力解，這是 production HEVI 的柱內線性代數基礎
 
 ## 3. 現在尚未完成、而且必須完成的核心工作
 
 以下不是可選項：
 
-1. **桌機 production 時間積分／聲學壓力處理。** 必須保留完整可壓縮 Euler 物理，同時不能讓全球大氣計算被最短垂直尺度的聲學 CFL 無意義地拖垮；方法本身也必須適合單機 GPU。
+1. **完成 conservative HEVI 垂直方程。** 已經確定時間架構，不再選型；現在要從 `[rho, rho ux, rho uy, rho uz, rhoE]` 的垂直 Euler flux 與重力項推導 block Jacobian／殘差，確保垂直隱式更新只計算一次壓力與質量／能量交換。
 2. **重力與靜力平衡閉合。** 動量中的重力、壓力梯度與 `rho E` 中的 geopotential 必須使用同一離散能量帳；靜力平衡不得靠 damping 維持。
-3. **GPU production kernel。** GPU 與 CPU 不得成為兩套不同的數學模型。
-4. **封閉系統長時間 gate。** 質量、總能量、角動量、靜力／地轉平衡與解析波動必須做時間步與網格收斂。
-5. 上述項目通過後，才重新加入乾大氣理想化 forcing 並做氣候驗收。
+3. **把完整 HEVI 時間步和水平二階 SLAU2 operator 接合。** 水平顯式、垂直隱式的 split 必須沒有重複通量，也不能因 split 本身創造質量或總能量。
+4. **GPU production kernel。** GPU 與 CPU 不得成為兩套不同的數學模型；垂直柱解直接映射到 GPU 平行 column solve。
+5. **封閉系統長時間 gate。** 質量、總能量、角動量、靜力／地轉平衡與解析波動必須做時間步與網格收斂。
+6. 上述項目通過後，才重新加入乾大氣理想化 forcing 並做氣候驗收。
 
 在這些項目完成前，不重新啟動 Held–Suarez 氣候調參或把宏觀風場當成修數值算子的目標。
 
@@ -93,6 +101,7 @@ Core v2 現在至少要求：
 - least-squares stencil 對任意 Cartesian 線性場恢復正確梯度；
 - limited reconstruction 的面密度／壓力保持在鄰近格心 bounds 內；
 - 二階 shared-face operator 在封閉球殼中不得創造全域質量或總能量；
-- 二階路徑的均勻靜止狀態逐格保持靜止。
+- 二階路徑的均勻靜止狀態逐格保持靜止；
+- 5×5 block-tridiagonal column solver 對單層、深柱與 pivoting 系統恢復已知解，並拒絕 singular block。
 
 這些 gate 會留在 production CI 裡，不因後續架構重寫而刪除。
