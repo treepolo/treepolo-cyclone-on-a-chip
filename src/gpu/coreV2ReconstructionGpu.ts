@@ -265,6 +265,7 @@ export class CoreV2GpuReconstruction {
       USAGE.STORAGE | USAGE.COPY_SRC,
       'core-v2-reconstruction-output',
     );
+    this.device.pushErrorScope('validation');
     const bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -285,6 +286,12 @@ export class CoreV2GpuReconstruction {
     pass.end();
     this.device.queue.submit([encoder.finish()]);
     await this.device.queue.onSubmittedWorkDone();
+    const validationError = await this.device.popErrorScope();
+    if (validationError) {
+      state.destroy();
+      output.destroy();
+      throw new Error(`Core v2 GPU reconstruction validation error: ${validationError.message}`);
+    }
     const result = await readback(
       this.device,
       output,
