@@ -29,20 +29,21 @@ function betaMinus(mach: number): number {
   return mach >= 0 ? 0 : 1;
 }
 
-/**
- * Parameter-free SLAU2 numerical flux evaluated directly from primitive face
- * states. This is also the path used by the hydrostatic well-balanced operator,
- * so a face pressure reconstructed exactly as p_ref is never converted through
- * rhoE-rho*Phi before entering the Riemann solver.
- */
-export function slau2FluxFromPrimitive(
+interface Slau2ScalarFluxes {
+  massFlux: number;
+  pressureFlux: number;
+  pressurePerturbationFlux: number;
+  upwind: PrimitiveCell;
+  upwindSpeed2: number;
+}
+
+function slau2ScalarFluxes(
   pl: PrimitiveCell,
   pr: PrimitiveCell,
   unitNormal: Vec3,
-  leftGeopotential = 0,
-  rightGeopotential = 0,
-  gas: AtmosphereConfig = DRY_AIR,
-): FaceFlux {
+  pressureReference: number,
+  gas: AtmosphereConfig,
+): Slau2ScalarFluxes {
   const normalLength = norm3(unitNormal);
   if (Math.abs(normalLength - 1) > 1e-12) {
     throw new Error(`face normal must be unit length; got ${normalLength}`);
@@ -50,12 +51,14 @@ export function slau2FluxFromPrimitive(
   if (!(pl.rho > 0) || !(pr.rho > 0) || !(pl.pressure > 0) || !(pr.pressure > 0)) {
     throw new Error('SLAU2 primitive states require positive density and pressure');
   }
+  if (!Number.isFinite(pressureReference)) {
+    throw new Error(`invalid SLAU2 pressure reference: ${pressureReference}`);
+  }
 
   const unl = dot3(pl.velocity, unitNormal);
   const unr = dot3(pr.velocity, unitNormal);
   const speed2l = dot3(pl.velocity, pl.velocity);
   const speed2r = dot3(pr.velocity, pr.velocity);
-
   const al = soundSpeed(pl, gas);
   const ar = soundSpeed(pr, gas);
   const aFace = 0.5 * (al + ar);
@@ -68,7 +71,6 @@ export function slau2FluxFromPrimitive(
   const velocityRms = Math.sqrt(0.5 * (speed2l + speed2r));
   const machHat = Math.min(1, velocityRms / aFace);
   const chi = (1 - machHat) * (1 - machHat);
-
   const expansionSwitch =
     -Math.max(Math.min(ml, 0), -1) * Math.min(Math.max(mr, 0), 1);
   const weightedAbsNormalVelocity =
@@ -80,47 +82,115 @@ export function slau2FluxFromPrimitive(
     (1 - expansionSwitch) * weightedAbsNormalVelocity +
     expansionSwitch * Math.abs(unr);
 
+  // Use pressure perturbations for differences so an exact common reference
+  // produces a bitwise-zero pressure jump instead of subtracting two ~1e5 Pa
+  // numbers after unrelated arithmetic.
+  const pPrimeLeft = pl.pressure - pressureReference;
+  const pPrimeRight = pr.pressure - pressureReference;
+  const pressureDifference = pPrimeRight - pPrimeLeft;
   const massFlux = 0.5 * (
     pl.rho * (unl + absNormalLeft) +
     pr.rho * (unr - absNormalRight) -
-    (chi / aFace) * (pr.pressure - pl.pressure)
+    (chi / aFace) * pressureDifference
   );
 
   const bp = betaPlus(ml);
   const bm = betaMinus(mr);
   const rhoMean = 0.5 * (pl.rho + pr.rho);
-  const pressureFlux =
-    0.5 * (pl.pressure + pr.pressure) +
-    0.5 * (bp - bm) * (pl.pressure - pr.pressure) +
-    velocityRms * (bp + bm - 1) * aFace * rhoMean;
+  const velocityPressureTerm = velocityRms * (bp + bm - 1) * aFace * rhoMean;
+  const pressurePerturbationFlux =
+    0.5 * (pPrimeLeft + pPrimeRight) +
+    0.5 * (bp - bm) * (pPrimeLeft - pPrimeRight) +
+    velocityPressureTerm;
+  const pressureFlux = pressureReference + pressurePerturbationFlux;
 
-  if (!Number.isFinite(massFlux) || !Number.isFinite(pressureFlux)) {
+  if (
+    !Number.isFinite(massFlux) ||
+    !Number.isFinite(pressureFlux) ||
+    !Number.isFinite(pressurePerturbationFlux)
+  ) {
     throw new Error('non-finite SLAU2 interface flux');
   }
 
-  const upwind = massFlux >= 0 ? pl : pr;
-  const upwindSpeed2 = massFlux >= 0 ? speed2l : speed2r;
-  const phi = massFlux >= 0 ? leftGeopotential : rightGeopotential;
-  const totalEnthalpy =
-    gas.gamma / (gas.gamma - 1) * upwind.pressure / upwind.rho +
-    0.5 * upwindSpeed2 +
-    phi;
-
+  const useLeft = massFlux >= 0;
   return {
-    mass: massFlux,
+    massFlux,
+    pressureFlux,
+    pressurePerturbationFlux,
+    upwind: useLeft ? pl : pr,
+    upwindSpeed2: useLeft ? speed2l : speed2r,
+  };
+}
+
+function totalEnthalpy(
+  primitive: PrimitiveCell,
+  speed2: number,
+  geopotential: number,
+  gas: AtmosphereConfig,
+): number {
+  return gas.gamma / (gas.gamma - 1) * primitive.pressure / primitive.rho +
+    0.5 * speed2 + geopotential;
+}
+
+/** Parameter-free physical SLAU2 numerical flux from primitive face states. */
+export function slau2FluxFromPrimitive(
+  pl: PrimitiveCell,
+  pr: PrimitiveCell,
+  unitNormal: Vec3,
+  leftGeopotential = 0,
+  rightGeopotential = 0,
+  gas: AtmosphereConfig = DRY_AIR,
+): FaceFlux {
+  const scalar = slau2ScalarFluxes(pl, pr, unitNormal, 0, gas);
+  const phi = scalar.upwind === pl ? leftGeopotential : rightGeopotential;
+  const hTotal = totalEnthalpy(scalar.upwind, scalar.upwindSpeed2, phi, gas);
+  return {
+    mass: scalar.massFlux,
     momentum: [
-      massFlux * upwind.velocity[0] + pressureFlux * unitNormal[0],
-      massFlux * upwind.velocity[1] + pressureFlux * unitNormal[1],
-      massFlux * upwind.velocity[2] + pressureFlux * unitNormal[2],
+      scalar.massFlux * scalar.upwind.velocity[0] + scalar.pressureFlux * unitNormal[0],
+      scalar.massFlux * scalar.upwind.velocity[1] + scalar.pressureFlux * unitNormal[1],
+      scalar.massFlux * scalar.upwind.velocity[2] + scalar.pressureFlux * unitNormal[2],
     ],
-    totalEnergy: massFlux * totalEnthalpy,
+    totalEnergy: scalar.massFlux * hTotal,
   };
 }
 
 /**
- * Conservative-state convenience wrapper. Identical to the direct primitive
- * path after EOS conversion.
+ * SLAU2 flux with only the common hydrostatic reference-pressure momentum flux
+ * removed algebraically. Mass and total-energy fluxes remain the full physical
+ * flux. This is exactly F - [0,p_ref n,0], but computes the pressure part from
+ * p'=p-p_ref directly so an exact reference state gives zero momentum flux
+ * without subtracting two huge face forces.
  */
+export function slau2ReferenceSubtractedFluxFromPrimitive(
+  pl: PrimitiveCell,
+  pr: PrimitiveCell,
+  unitNormal: Vec3,
+  pressureReference: number,
+  leftGeopotential = 0,
+  rightGeopotential = 0,
+  gas: AtmosphereConfig = DRY_AIR,
+): FaceFlux {
+  const scalar = slau2ScalarFluxes(
+    pl,
+    pr,
+    unitNormal,
+    pressureReference,
+    gas,
+  );
+  const phi = scalar.upwind === pl ? leftGeopotential : rightGeopotential;
+  const hTotal = totalEnthalpy(scalar.upwind, scalar.upwindSpeed2, phi, gas);
+  return {
+    mass: scalar.massFlux,
+    momentum: [
+      scalar.massFlux * scalar.upwind.velocity[0] + scalar.pressurePerturbationFlux * unitNormal[0],
+      scalar.massFlux * scalar.upwind.velocity[1] + scalar.pressurePerturbationFlux * unitNormal[1],
+      scalar.massFlux * scalar.upwind.velocity[2] + scalar.pressurePerturbationFlux * unitNormal[2],
+    ],
+    totalEnergy: scalar.massFlux * hTotal,
+  };
+}
+
 export function slau2Flux(
   left: ConservativeCell,
   right: ConservativeCell,
@@ -151,7 +221,21 @@ function integrateFlux(flux: FaceFlux, area: number): IntegratedFaceFlux {
   };
 }
 
-/** Face-integrated SLAU2 flux for primitive states and a geometric vector area. */
+function vectorAreaGeometry(vectorArea: Vec3): { area: number; unitNormal: Vec3 } {
+  const area = norm3(vectorArea);
+  if (!(area > 0) || !Number.isFinite(area)) {
+    throw new Error(`invalid face vector area magnitude: ${area}`);
+  }
+  return {
+    area,
+    unitNormal: [
+      vectorArea[0] / area,
+      vectorArea[1] / area,
+      vectorArea[2] / area,
+    ],
+  };
+}
+
 export function integratedSlau2FluxFromPrimitive(
   left: PrimitiveCell,
   right: PrimitiveCell,
@@ -160,29 +244,44 @@ export function integratedSlau2FluxFromPrimitive(
   rightGeopotential = 0,
   gas: AtmosphereConfig = DRY_AIR,
 ): IntegratedFaceFlux {
-  const area = norm3(vectorArea);
-  if (!(area > 0) || !Number.isFinite(area)) {
-    throw new Error(`invalid face vector area magnitude: ${area}`);
-  }
-  const unitNormal: Vec3 = [
-    vectorArea[0] / area,
-    vectorArea[1] / area,
-    vectorArea[2] / area,
-  ];
+  const geometry = vectorAreaGeometry(vectorArea);
   return integrateFlux(
     slau2FluxFromPrimitive(
       left,
       right,
-      unitNormal,
+      geometry.unitNormal,
       leftGeopotential,
       rightGeopotential,
       gas,
     ),
-    area,
+    geometry.area,
   );
 }
 
-/** Face-integrated SLAU2 flux for conservative states and a geometric vector area. */
+export function integratedSlau2ReferenceSubtractedFluxFromPrimitive(
+  left: PrimitiveCell,
+  right: PrimitiveCell,
+  vectorArea: Vec3,
+  pressureReference: number,
+  leftGeopotential = 0,
+  rightGeopotential = 0,
+  gas: AtmosphereConfig = DRY_AIR,
+): IntegratedFaceFlux {
+  const geometry = vectorAreaGeometry(vectorArea);
+  return integrateFlux(
+    slau2ReferenceSubtractedFluxFromPrimitive(
+      left,
+      right,
+      geometry.unitNormal,
+      pressureReference,
+      leftGeopotential,
+      rightGeopotential,
+      gas,
+    ),
+    geometry.area,
+  );
+}
+
 export function integratedSlau2Flux(
   left: ConservativeCell,
   right: ConservativeCell,
@@ -191,24 +290,16 @@ export function integratedSlau2Flux(
   rightGeopotential = 0,
   gas: AtmosphereConfig = DRY_AIR,
 ): IntegratedFaceFlux {
-  const area = norm3(vectorArea);
-  if (!(area > 0) || !Number.isFinite(area)) {
-    throw new Error(`invalid face vector area magnitude: ${area}`);
-  }
-  const unitNormal: Vec3 = [
-    vectorArea[0] / area,
-    vectorArea[1] / area,
-    vectorArea[2] / area,
-  ];
+  const geometry = vectorAreaGeometry(vectorArea);
   return integrateFlux(
     slau2Flux(
       left,
       right,
-      unitNormal,
+      geometry.unitNormal,
       leftGeopotential,
       rightGeopotential,
       gas,
     ),
-    area,
+    geometry.area,
   );
 }
