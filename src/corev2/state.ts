@@ -47,6 +47,65 @@ export function pressureFromConserved(
   return pressure;
 }
 
+/**
+ * Algebraically identical pressure perturbation evaluated relative to a fixed
+ * hydrostatic reference:
+ *
+ * p-p_ref = (gamma-1) [(rhoE-rhoE_ref) - K - (rho-rho_ref) Phi].
+ *
+ * This form avoids subtracting the full rho*Phi from rhoE before subtracting
+ * two nearly equal hydrostatic pressures. In particular an exactly constructed
+ * reference state gives a bitwise-zero pressure perturbation, which prevents
+ * roundoff-sized hydrostatic pressure jumps from being amplified by an
+ * all-speed Riemann mass flux on Earth-sized faces.
+ */
+export function pressurePerturbationFromReference(
+  state: ConservativeCell,
+  referenceDensity: number,
+  referencePressure: number,
+  geopotential: number,
+  gas: AtmosphereConfig = DRY_AIR,
+): number {
+  if (!(referenceDensity > 0) || !Number.isFinite(referenceDensity)) {
+    throw new Error(`invalid reference density: ${referenceDensity}`);
+  }
+  if (!(referencePressure > 0) || !Number.isFinite(referencePressure)) {
+    throw new Error(`invalid reference pressure: ${referencePressure}`);
+  }
+  const kinetic = kineticEnergyDensity(state);
+  const referenceEnergy =
+    referencePressure / (gas.gamma - 1) + referenceDensity * geopotential;
+  const internalPerturbation =
+    (state.rhoE - referenceEnergy) -
+    kinetic -
+    (state.rho - referenceDensity) * geopotential;
+  const pressurePerturbation = (gas.gamma - 1) * internalPerturbation;
+  if (!Number.isFinite(pressurePerturbation)) {
+    throw new Error(`invalid pressure perturbation: ${pressurePerturbation}`);
+  }
+  return pressurePerturbation;
+}
+
+export function pressureFromConservedRelativeToReference(
+  state: ConservativeCell,
+  referenceDensity: number,
+  referencePressure: number,
+  geopotential: number,
+  gas: AtmosphereConfig = DRY_AIR,
+): number {
+  const pressure = referencePressure + pressurePerturbationFromReference(
+    state,
+    referenceDensity,
+    referencePressure,
+    geopotential,
+    gas,
+  );
+  if (!(pressure > 0) || !Number.isFinite(pressure)) {
+    throw new Error(`non-positive or invalid reference-relative pressure: ${pressure}`);
+  }
+  return pressure;
+}
+
 export function primitiveFromConserved(
   state: ConservativeCell,
   geopotential = 0,
