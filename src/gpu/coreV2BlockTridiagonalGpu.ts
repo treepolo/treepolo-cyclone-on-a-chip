@@ -219,19 +219,33 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){
 export class CoreV2GpuBlockTridiagonal5 {
   private readonly device: GPUAny;
   private readonly pipeline: GPUAny;
+  private readonly pipelineValidation: Promise<any>;
+  private readonly compilationInfo: Promise<any>;
 
   constructor(device: GPUAny) {
     this.device = device;
+    this.device.pushErrorScope('validation');
     const module = device.createShaderModule({ label: 'core-v2-block5-module', code: SHADER });
+    this.compilationInfo = module.getCompilationInfo();
     this.pipeline = device.createComputePipeline({
       label: 'core-v2-block5-pipeline',
       layout: 'auto',
       compute: { module, entryPoint: 'main' },
     });
+    this.pipelineValidation = this.device.popErrorScope();
   }
 
   async solve(batch: CoreV2GpuBlockTridiagonalBatch): Promise<CoreV2GpuBlockTridiagonalResult> {
     validate(batch);
+    const setupError = await this.pipelineValidation;
+    if (setupError) {
+      const info = await this.compilationInfo;
+      const messages = Array.from(info.messages ?? [])
+        .map((message: any) => `${message.type ?? 'message'} ${message.lineNum ?? '?'}:${message.linePos ?? '?'} ${message.message ?? String(message)}`)
+        .join(' | ');
+      throw new Error(`Core v2 GPU block5 pipeline error: ${setupError.message}${messages ? `; shader: ${messages}` : ''}`);
+    }
+
     const raw = new ArrayBuffer(16);
     const u = new Uint32Array(raw);
     u[0] = batch.columnCount;
@@ -244,6 +258,8 @@ export class CoreV2GpuBlockTridiagonal5 {
     const modifiedUpper = empty(this.device, batch.upper.byteLength, USAGE.STORAGE, 'core-v2-block5-modified-upper');
     const solution = empty(this.device, batch.rhs.byteLength, USAGE.STORAGE | USAGE.COPY_SRC, 'core-v2-block5-solution');
     const status = empty(this.device, batch.columnCount * 4, USAGE.STORAGE | USAGE.COPY_SRC, 'core-v2-block5-status');
+
+    this.device.pushErrorScope('validation');
     const bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -265,6 +281,12 @@ export class CoreV2GpuBlockTridiagonal5 {
     pass.end();
     this.device.queue.submit([encoder.finish()]);
     await this.device.queue.onSubmittedWorkDone();
+    const validationError = await this.device.popErrorScope();
+    if (validationError) {
+      params.destroy();lower.destroy();diagonal.destroy();upper.destroy();rhs.destroy();modifiedUpper.destroy();solution.destroy();status.destroy();
+      throw new Error(`Core v2 GPU block5 dispatch validation error: ${validationError.message}`);
+    }
+
     const [solved, statusOut] = await Promise.all([
       readF32(this.device, solution, batch.rhs.length),
       readU32(this.device, status, batch.columnCount),
