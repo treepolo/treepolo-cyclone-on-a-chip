@@ -10,12 +10,12 @@ import {
 } from '../corev2/heviSplit.js';
 import {
   buildIsothermalHydrostaticReference,
-  integratedCellGravityForce,
 } from '../corev2/hydrostaticReference.js';
 import { buildLinearReconstructionStencil } from '../corev2/reconstruction.js';
 import { conservedFromPrimitive } from '../corev2/state.js';
 import {
   buildSphericalShellGeometry,
+  radialFaceVectorArea,
   shellCellIndex,
 } from '../corev2/sphericalShellGeometry.js';
 import { closedShellWellBalancedEulerGravityRate } from '../corev2/wellBalancedEulerGravity.js';
@@ -59,7 +59,18 @@ function rateMagnitude(rate: ReturnType<typeof closedShellVerticalStiffRateFirst
   );
 }
 
-test('Core v2 HEVI vertical stiff operator is exactly hydrostatic well-balanced', () => {
+function pressureAreaScale(
+  geometry: ReturnType<typeof buildSphericalShellGeometry>,
+  reference: ReturnType<typeof buildIsothermalHydrostaticReference>,
+  c: number,
+  k: number,
+): number {
+  const bottom = reference.radialFacePressure[k]! * norm3(radialFaceVectorArea(geometry, c, k));
+  const top = reference.radialFacePressure[k + 1]! * norm3(radialFaceVectorArea(geometry, c, k + 1));
+  return Math.max(bottom, top, 1);
+}
+
+test('Core v2 HEVI vertical stiff operator is hydrostatic well-balanced without large-force cancellation', () => {
   const horizontal = buildCubedSphere(5);
   const geometry = buildSphericalShellGeometry(horizontal, new Float64Array([
     EARTH.radius,
@@ -76,20 +87,23 @@ test('Core v2 HEVI vertical stiff operator is exactly hydrostatic well-balanced'
 
   let worstMass = 0;
   let worstEnergy = 0;
-  let worstMomentum = 0;
+  let worstMomentumRelative = 0;
   for (let c = 0; c < horizontal.cellCount; c++) {
     for (let k = 0; k < geometry.nz; k++) {
       const q = shellCellIndex(c, k, geometry.nz);
       worstMass = Math.max(worstMass, Math.abs(rate.rho[q]!));
       worstEnergy = Math.max(worstEnergy, Math.abs(rate.rhoE[q]!));
-      const gravity = integratedCellGravityForce(geometry, c, k, fields.rho[q]!);
       const momentum = norm3([rate.momX[q]!, rate.momY[q]!, rate.momZ[q]!]);
-      worstMomentum = Math.max(worstMomentum, momentum / Math.max(norm3(gravity), 1));
+      worstMomentumRelative = Math.max(
+        worstMomentumRelative,
+        momentum / pressureAreaScale(geometry, reference, c, k),
+      );
     }
   }
   assert(worstMass === 0, `HEVI hydrostatic mass rate must be exact zero; got ${worstMass}`);
   assert(worstEnergy === 0, `HEVI hydrostatic energy rate must be exact zero; got ${worstEnergy}`);
-  assert(worstMomentum < 8e-10, `HEVI hydrostatic relative momentum residual=${worstMomentum}`);
+  assert(worstMomentumRelative < 3e-15,
+    `HEVI hydrostatic reference-subtracted momentum residual=${worstMomentumRelative}`);
 });
 
 test('Core v2 HEVI split recombines to the full second-order Euler+gravity operator', () => {
@@ -147,7 +161,7 @@ test('Core v2 HEVI split recombines to the full second-order Euler+gravity opera
   assert(worstRelative < 3e-15, `HEVI split recombination relative error=${worstRelative}`);
 });
 
-test('Core v2 HEVI vertical stiff operator is column-local', () => {
+test('Core v2 HEVI vertical stiff operator is strictly column-local', () => {
   const horizontal = buildCubedSphere(4);
   const geometry = buildSphericalShellGeometry(horizontal, new Float64Array([
     EARTH.radius,
@@ -172,19 +186,24 @@ test('Core v2 HEVI vertical stiff operator is column-local', () => {
   fields.rhoE[q] = state.rhoE;
 
   const rate = closedShellVerticalStiffRateFirstOrder(fields, geometry, reference);
-  let outsideWorst = 0;
+  let outsideRelative = 0;
   let insideWorst = 0;
   for (let c = 0; c < horizontal.cellCount; c++) {
     for (let level = 0; level < geometry.nz; level++) {
       const cell = shellCellIndex(c, level, geometry.nz);
-      if (c === perturbedColumn) insideWorst = Math.max(insideWorst, rateMagnitude(rate, cell));
-      else outsideWorst = Math.max(outsideWorst, rateMagnitude(rate, cell));
+      if (c === perturbedColumn) {
+        insideWorst = Math.max(insideWorst, rateMagnitude(rate, cell));
+      } else {
+        outsideRelative = Math.max(
+          outsideRelative,
+          rateMagnitude(rate, cell) / pressureAreaScale(geometry, reference, c, level),
+        );
+      }
     }
   }
   assert(insideWorst > 0, 'perturbed column must produce a nonzero stiff rate');
-  // Other columns remain at hydrostatic reference; only roundoff in the local
-  // pressure/gravity force cancellation is allowed there.
-  assert(outsideWorst < 1e8, `unexpected cross-column HEVI coupling magnitude=${outsideWorst}`);
+  assert(outsideRelative < 3e-15,
+    `HEVI vertical residual leaked into untouched columns: relative=${outsideRelative}`);
 });
 
 test('Core v2 HEVI vertical stiff operator conserves global mass and total energy in a closed column set', () => {
