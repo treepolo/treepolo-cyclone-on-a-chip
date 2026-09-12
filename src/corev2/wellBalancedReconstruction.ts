@@ -3,32 +3,72 @@ import type { ConservativeFields } from './fields.js';
 import type { HydrostaticReference1D } from './hydrostaticReference.js';
 import {
   MAX_RECONSTRUCTION_NEIGHBORS,
-  computeLimitedPrimitiveGradients,
   radialFaceCentroid,
   sideFaceCentroid,
   type LinearReconstructionStencil,
   type PrimitiveGradients,
 } from './reconstruction.js';
-import { primitiveFromConserved, type PrimitiveCell } from './state.js';
+import {
+  pressurePerturbationFromReference,
+  type ConservativeCell,
+  type PrimitiveCell,
+} from './state.js';
 
 export interface HydrostaticReconstruction {
   primitive: PrimitiveGradients;
   pressurePerturbX: Float64Array;
   pressurePerturbY: Float64Array;
   pressurePerturbZ: Float64Array;
+  pressurePerturb: Float64Array;
   geopotential: Float64Array;
 }
 
-function primitiveAtCell(
-  fields: ConservativeFields,
-  cell: number,
-  geopotential: ArrayLike<number>,
-): PrimitiveCell {
-  return primitiveFromConserved({
+interface StableCellPrimitive {
+  rho: number;
+  velocity: Vec3;
+  pressurePerturbation: number;
+}
+
+function readState(fields: ConservativeFields, cell: number): ConservativeCell {
+  return {
     rho: fields.rho[cell]!,
     momentum: [fields.momX[cell]!, fields.momY[cell]!, fields.momZ[cell]!],
     rhoE: fields.rhoE[cell]!,
-  }, geopotential[cell]!);
+  };
+}
+
+function stableCellPrimitive(
+  fields: ConservativeFields,
+  cell: number,
+  reference: HydrostaticReference1D,
+  geopotential: ArrayLike<number>,
+  nz: number,
+): StableCellPrimitive {
+  const state = readState(fields, cell);
+  if (!(state.rho > 0) || !Number.isFinite(state.rho)) {
+    throw new Error(`invalid hydrostatic-reconstruction density at cell ${cell}`);
+  }
+  const k = cell % nz;
+  const invRho = 1 / state.rho;
+  const pressurePerturbation = pressurePerturbationFromReference(
+    state,
+    reference.cellDensity[k]!,
+    reference.cellPressure[k]!,
+    geopotential[cell]!,
+  );
+  const pressure = reference.cellPressure[k]! + pressurePerturbation;
+  if (!(pressure > 0) || !Number.isFinite(pressure)) {
+    throw new Error(`invalid hydrostatic-reconstruction pressure at cell ${cell}: ${pressure}`);
+  }
+  return {
+    rho: state.rho,
+    velocity: [
+      state.momentum[0] * invRho,
+      state.momentum[1] * invRho,
+      state.momentum[2] * invRho,
+    ],
+    pressurePerturbation,
+  };
 }
 
 function packedCellPosition(stencil: LinearReconstructionStencil, cell: number): Vec3 {
@@ -53,24 +93,44 @@ function facePositions(stencil: LinearReconstructionStencil, cell: number): Vec3
   return out;
 }
 
-function cellReferencePressure(
-  reference: HydrostaticReference1D,
-  cell: number,
-  nz: number,
-): number {
-  return reference.cellPressure[cell % nz]!;
+function allocatePrimitiveGradients(cellCount: number): PrimitiveGradients {
+  const a = (): Float64Array => new Float64Array(cellCount);
+  return {
+    rhoX:a(),rhoY:a(),rhoZ:a(),
+    uxX:a(),uxY:a(),uxZ:a(),
+    uyX:a(),uyY:a(),uyZ:a(),
+    uzX:a(),uzY:a(),uzZ:a(),
+    pX:a(),pY:a(),pZ:a(),
+  };
+}
+
+function gradientArrays(
+  out: PrimitiveGradients,
+  variable: number,
+): readonly [Float64Array, Float64Array, Float64Array] {
+  if (variable === 0) return [out.rhoX, out.rhoY, out.rhoZ];
+  if (variable === 1) return [out.uxX, out.uxY, out.uxZ];
+  if (variable === 2) return [out.uyX, out.uyY, out.uyZ];
+  if (variable === 3) return [out.uzX, out.uzY, out.uzZ];
+  return [out.pX, out.pY, out.pZ];
+}
+
+function variableOf(cell: StableCellPrimitive, variable: number): number {
+  if (variable === 0) return cell.rho;
+  if (variable === 1) return cell.velocity[0];
+  if (variable === 2) return cell.velocity[1];
+  if (variable === 3) return cell.velocity[2];
+  return cell.pressurePerturbation;
 }
 
 /**
- * Build the same limited primitive reconstruction used by the production Euler
- * operator, but replace the pressure slope by the slope of
+ * Build a cancellation-free hydrostatic perturbation reconstruction.
  *
- *     p' = p - p_ref.
- *
- * This is the key well-balanced change: an exact hydrostatic reference has
- * p'=0 in every cell, so both sides of every face reconstruct the same exact
- * reference face pressure. The Riemann solver therefore sees no spurious
- * hydrostatic pressure jump and cannot manufacture vertical mass flux from it.
+ * All five reconstructed quantities are evaluated without first forming the
+ * absolute pressure as rhoE-K-rho*Phi. The pressure variable seen by the WLS
+ * stencil is p'=p-p_ref, diagnosed with the reference-relative energy identity.
+ * Therefore an exactly initialized hydrostatic reference has p'=0 bit-for-bit
+ * and the Riemann solver cannot turn energy/geopotential roundoff into mass flux.
  */
 export function buildHydrostaticReconstruction(
   fields: ConservativeFields,
@@ -89,6 +149,7 @@ export function buildHydrostaticReconstruction(
     throw new Error('Core v2 hydrostatic reconstruction field/stencil size mismatch');
   }
   if (
+    reference.cellDensity.length !== geometry.nz ||
     reference.cellPressure.length !== geometry.nz ||
     reference.cellGeopotential.length !== geometry.nz
   ) {
@@ -99,54 +160,59 @@ export function buildHydrostaticReconstruction(
   for (let q = 0; q < cellCount; q++) {
     geopotential[q] = reference.cellGeopotential[q % geometry.nz]!;
   }
-  const primitive = computeLimitedPrimitiveGradients(fields, stencil, geopotential);
-  const px = new Float64Array(cellCount);
-  const py = new Float64Array(cellCount);
-  const pz = new Float64Array(cellCount);
-  const pPerturb = new Float64Array(cellCount);
+
+  const cells: StableCellPrimitive[] = new Array(cellCount);
+  const pressurePerturb = new Float64Array(cellCount);
   for (let q = 0; q < cellCount; q++) {
-    pPerturb[q] = primitiveAtCell(fields, q, geopotential).pressure -
-      cellReferencePressure(reference, q, geometry.nz);
+    const cell = stableCellPrimitive(fields, q, reference, geopotential, geometry.nz);
+    cells[q] = cell;
+    pressurePerturb[q] = cell.pressurePerturbation;
   }
 
+  const primitive = allocatePrimitiveGradients(cellCount);
   for (let q = 0; q < cellCount; q++) {
-    const q0 = pPerturb[q]!;
     const count = stencil.neighborCount[q]!;
-    let gx = 0;
-    let gy = 0;
-    let gz = 0;
-    let qMin = q0;
-    let qMax = q0;
-    for (let j = 0; j < count; j++) {
-      const slot = q * MAX_RECONSTRUCTION_NEIGHBORS + j;
-      const neighbor = stencil.neighborCell[slot]!;
-      const qn = pPerturb[neighbor]!;
-      const delta = qn - q0;
-      gx += stencil.coeffX[slot]! * delta;
-      gy += stencil.coeffY[slot]! * delta;
-      gz += stencil.coeffZ[slot]! * delta;
-      qMin = Math.min(qMin, qn);
-      qMax = Math.max(qMax, qn);
-    }
-
     const x0 = packedCellPosition(stencil, q);
-    let limiter = 1;
-    for (const xf of facePositions(stencil, q)) {
-      const delta = gx * (xf[0] - x0[0]) + gy * (xf[1] - x0[1]) + gz * (xf[2] - x0[2]);
-      if (delta > 0) limiter = Math.min(limiter, (qMax - q0) / delta);
-      else if (delta < 0) limiter = Math.min(limiter, (qMin - q0) / delta);
+    const faces = facePositions(stencil, q);
+    for (let variable = 0; variable < 5; variable++) {
+      const q0 = variableOf(cells[q]!, variable);
+      let gx = 0;
+      let gy = 0;
+      let gz = 0;
+      let qMin = q0;
+      let qMax = q0;
+      for (let j = 0; j < count; j++) {
+        const slot = q * MAX_RECONSTRUCTION_NEIGHBORS + j;
+        const neighbor = stencil.neighborCell[slot]!;
+        const qn = variableOf(cells[neighbor]!, variable);
+        const delta = qn - q0;
+        gx += stencil.coeffX[slot]! * delta;
+        gy += stencil.coeffY[slot]! * delta;
+        gz += stencil.coeffZ[slot]! * delta;
+        qMin = Math.min(qMin, qn);
+        qMax = Math.max(qMax, qn);
+      }
+
+      let limiter = 1;
+      for (const xf of faces) {
+        const delta = gx * (xf[0] - x0[0]) + gy * (xf[1] - x0[1]) + gz * (xf[2] - x0[2]);
+        if (delta > 0) limiter = Math.min(limiter, (qMax - q0) / delta);
+        else if (delta < 0) limiter = Math.min(limiter, (qMin - q0) / delta);
+      }
+      limiter = Math.max(0, Math.min(1, limiter));
+      const [ox, oy, oz] = gradientArrays(primitive, variable);
+      ox[q] = limiter * gx;
+      oy[q] = limiter * gy;
+      oz[q] = limiter * gz;
     }
-    limiter = Math.max(0, Math.min(1, limiter));
-    px[q] = limiter * gx;
-    py[q] = limiter * gy;
-    pz[q] = limiter * gz;
   }
 
   return {
     primitive,
-    pressurePerturbX: px,
-    pressurePerturbY: py,
-    pressurePerturbZ: pz,
+    pressurePerturbX: primitive.pX,
+    pressurePerturbY: primitive.pY,
+    pressurePerturbZ: primitive.pZ,
+    pressurePerturb,
     geopotential,
   };
 }
@@ -162,7 +228,13 @@ export function reconstructHydrostaticPrimitiveAt(
   referenceFacePressure: number,
 ): PrimitiveCell {
   const geometry = stencil.geometry;
-  const base = primitiveAtCell(fields, cell, reconstruction.geopotential);
+  const state = readState(fields, cell);
+  const invRho = 1 / state.rho;
+  const baseVelocity: Vec3 = [
+    state.momentum[0] * invRho,
+    state.momentum[1] * invRho,
+    state.momentum[2] * invRho,
+  ];
   const x0 = packedCellPosition(stencil, cell);
   const dx = position[0] - x0[0];
   const dy = position[1] - x0[1];
@@ -175,15 +247,13 @@ export function reconstructHydrostaticPrimitiveAt(
   ): number => value + gx[cell]! * dx + gy[cell]! * dy + gz[cell]! * dz;
 
   const rho = apply(
-    base.rho,
+    state.rho,
     reconstruction.primitive.rhoX,
     reconstruction.primitive.rhoY,
     reconstruction.primitive.rhoZ,
   );
-  const basePressurePerturbation =
-    base.pressure - cellReferencePressure(reference, cell, geometry.nz);
   const pressure = referenceFacePressure + apply(
-    basePressurePerturbation,
+    reconstruction.pressurePerturb[cell]!,
     reconstruction.pressurePerturbX,
     reconstruction.pressurePerturbY,
     reconstruction.pressurePerturbZ,
@@ -195,9 +265,9 @@ export function reconstructHydrostaticPrimitiveAt(
   return {
     rho,
     velocity: [
-      apply(base.velocity[0], reconstruction.primitive.uxX, reconstruction.primitive.uxY, reconstruction.primitive.uxZ),
-      apply(base.velocity[1], reconstruction.primitive.uyX, reconstruction.primitive.uyY, reconstruction.primitive.uyZ),
-      apply(base.velocity[2], reconstruction.primitive.uzX, reconstruction.primitive.uzY, reconstruction.primitive.uzZ),
+      apply(baseVelocity[0], reconstruction.primitive.uxX, reconstruction.primitive.uxY, reconstruction.primitive.uxZ),
+      apply(baseVelocity[1], reconstruction.primitive.uyX, reconstruction.primitive.uyY, reconstruction.primitive.uyZ),
+      apply(baseVelocity[2], reconstruction.primitive.uzX, reconstruction.primitive.uzY, reconstruction.primitive.uzZ),
     ],
     pressure,
   };
