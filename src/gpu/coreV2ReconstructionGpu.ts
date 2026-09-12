@@ -176,10 +176,10 @@ fn primitive_value(q:u32,variable:u32)->f32 {
   if(variable==2u){return a.z/rho;}
   if(variable==3u){return a.w/rho;}
   let k=q-P.nz*(q/P.nz);
-  let ref=refLayer[k];
+  let refState=refLayer[k];
   let kinetic=0.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;
-  let referenceEnergy=ref.y/(P.gamma-1.0)+ref.x*ref.z;
-  let internalPerturbation=(b.x-referenceEnergy)-kinetic-(rho-ref.x)*ref.z;
+  let referenceEnergy=refState.y/(P.gamma-1.0)+refState.x*refState.z;
+  let internalPerturbation=(b.x-referenceEnergy)-kinetic-(rho-refState.x)*refState.z;
   return (P.gamma-1.0)*internalPerturbation;
 }
 
