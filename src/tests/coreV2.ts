@@ -25,7 +25,7 @@ import {
   createIntegratedRate,
   integratedTotals,
 } from '../corev2/finiteVolume.js';
-import { physicalEulerFlux } from '../corev2/eulerFlux.js';
+import { integratedPhysicalEulerFlux, physicalEulerFlux } from '../corev2/eulerFlux.js';
 import { applyExactCoriolis } from '../corev2/rotation.js';
 
 interface Test {
@@ -279,6 +279,60 @@ test('Core v2 spherical-shell vector areas close every 3-D control volume', () =
 
       const residual = Math.hypot(sx, sy, sz) / Math.max(scale, 1);
       assert(residual < 3e-14, `cell ${c} layer ${k} vector-area closure=${residual}`);
+    }
+  }
+});
+
+test('Core v2 exact vector-area geometry preserves any uniform Euler state cell by cell', () => {
+  const horizontal = buildCubedSphere(6);
+  const r0 = EARTH.radius;
+  const radii = new Float64Array([r0, r0 + 900, r0 + 2600]);
+  const geometry = buildSphericalShellGeometry(horizontal, radii);
+  const state = conservedFromPrimitive({
+    rho: 0.95,
+    velocity: [73, -21, 14],
+    pressure: 76000,
+  });
+
+  for (let c = 0; c < horizontal.cellCount; c++) {
+    for (let k = 0; k < geometry.nz; k++) {
+      let mass = 0;
+      let mx = 0;
+      let my = 0;
+      let mz = 0;
+      let energy = 0;
+      let scale = 0;
+
+      const addFlux = (vectorArea: readonly [number, number, number]): void => {
+        const flux = integratedPhysicalEulerFlux(state, vectorArea);
+        mass += flux.mass;
+        mx += flux.momentum[0];
+        my += flux.momentum[1];
+        mz += flux.momentum[2];
+        energy += flux.totalEnergy;
+        scale +=
+          Math.abs(flux.mass) +
+          Math.abs(flux.momentum[0]) +
+          Math.abs(flux.momentum[1]) +
+          Math.abs(flux.momentum[2]) +
+          Math.abs(flux.totalEnergy);
+      };
+
+      addFlux(radialFaceVectorArea(geometry, c, k + 1));
+      const bottom = radialFaceVectorArea(geometry, c, k);
+      addFlux([-bottom[0], -bottom[1], -bottom[2]]);
+
+      for (let s = 0; s < 4; s++) {
+        const edgeId = horizontal.cellEdges[c * 4 + s]!;
+        const sign = horizontal.cellEdgeSigns[c * 4 + s]!;
+        const side = sideFaceVectorArea(geometry, edgeId, k);
+        addFlux([sign * side[0], sign * side[1], sign * side[2]]);
+      }
+
+      const residual =
+        (Math.abs(mass) + Math.abs(mx) + Math.abs(my) + Math.abs(mz) + Math.abs(energy)) /
+        Math.max(scale, 1);
+      assert(residual < 6e-14, `uniform-state finite-volume residual c=${c} k=${k}: ${residual}`);
     }
   }
 });

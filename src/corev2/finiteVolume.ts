@@ -14,6 +14,15 @@ export interface FaceFlux {
   totalEnergy: number;
 }
 
+export interface IntegratedFaceFlux {
+  /** Face-integrated mass rate [kg s^-1]. */
+  mass: number;
+  /** Face-integrated Cartesian momentum rate [N]. */
+  momentum: Vec3;
+  /** Face-integrated total-energy rate [W]. */
+  totalEnergy: number;
+}
+
 /**
  * Stores cell-integrated rates, not density tendencies.
  * Each internal face is accumulated once and with exactly opposite signs into
@@ -34,12 +43,11 @@ export function zeroIntegratedRate(rate: IntegratedConservativeRate): void {
   rate.rhoE.fill(0);
 }
 
-export function accumulateInternalFaceFlux(
+export function accumulateInternalIntegratedFaceFlux(
   rate: IntegratedConservativeRate,
   leftCell: number,
   rightCell: number,
-  area: number,
-  flux: FaceFlux,
+  flux: IntegratedFaceFlux,
 ): void {
   const n = cellCountOf(rate);
   if (
@@ -51,28 +59,40 @@ export function accumulateInternalFaceFlux(
   ) {
     throw new Error(`invalid internal face cells: ${leftCell}, ${rightCell}`);
   }
+
+  rate.rho[leftCell] = rate.rho[leftCell]! - flux.mass;
+  rate.rho[rightCell] = rate.rho[rightCell]! + flux.mass;
+
+  rate.momX[leftCell] = rate.momX[leftCell]! - flux.momentum[0];
+  rate.momX[rightCell] = rate.momX[rightCell]! + flux.momentum[0];
+  rate.momY[leftCell] = rate.momY[leftCell]! - flux.momentum[1];
+  rate.momY[rightCell] = rate.momY[rightCell]! + flux.momentum[1];
+  rate.momZ[leftCell] = rate.momZ[leftCell]! - flux.momentum[2];
+  rate.momZ[rightCell] = rate.momZ[rightCell]! + flux.momentum[2];
+
+  rate.rhoE[leftCell] = rate.rhoE[leftCell]! - flux.totalEnergy;
+  rate.rhoE[rightCell] = rate.rhoE[rightCell]! + flux.totalEnergy;
+}
+
+export function accumulateInternalFaceFlux(
+  rate: IntegratedConservativeRate,
+  leftCell: number,
+  rightCell: number,
+  area: number,
+  flux: FaceFlux,
+): void {
   if (!(area > 0) || !Number.isFinite(area)) {
     throw new Error(`invalid face area: ${area}`);
   }
-
-  const dm = area * flux.mass;
-  const dmx = area * flux.momentum[0];
-  const dmy = area * flux.momentum[1];
-  const dmz = area * flux.momentum[2];
-  const dE = area * flux.totalEnergy;
-
-  rate.rho[leftCell] = rate.rho[leftCell]! - dm;
-  rate.rho[rightCell] = rate.rho[rightCell]! + dm;
-
-  rate.momX[leftCell] = rate.momX[leftCell]! - dmx;
-  rate.momX[rightCell] = rate.momX[rightCell]! + dmx;
-  rate.momY[leftCell] = rate.momY[leftCell]! - dmy;
-  rate.momY[rightCell] = rate.momY[rightCell]! + dmy;
-  rate.momZ[leftCell] = rate.momZ[leftCell]! - dmz;
-  rate.momZ[rightCell] = rate.momZ[rightCell]! + dmz;
-
-  rate.rhoE[leftCell] = rate.rhoE[leftCell]! - dE;
-  rate.rhoE[rightCell] = rate.rhoE[rightCell]! + dE;
+  accumulateInternalIntegratedFaceFlux(rate, leftCell, rightCell, {
+    mass: area * flux.mass,
+    momentum: [
+      area * flux.momentum[0],
+      area * flux.momentum[1],
+      area * flux.momentum[2],
+    ],
+    totalEnergy: area * flux.totalEnergy,
+  });
 }
 
 export function advanceFromIntegratedRate(
