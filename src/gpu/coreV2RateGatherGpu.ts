@@ -98,7 +98,7 @@ struct Params{cellCount:u32,nz:u32,_a:u32,_b:u32,gamma:f32,_pad0:f32,_pad1:f32,_
 @group(0)@binding(9)var<storage,read>topArea:array<vec4<f32>>;
 @group(0)@binding(10)var<storage,read>refLayer:array<vec4<f32>>;
 @group(0)@binding(11)var<storage,read_write>rate:array<vec4<f32>>;
-fn pprime(q:u32)->f32{let a=state[2u*q];let b=state[2u*q+1u];let rho=a.x;let k=q-P.nz*(q/P.nz);let ref=refLayer[k];let ke=.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;let eref=ref.y/(P.gamma-1.0)+ref.x*ref.z;return(P.gamma-1.0)*((b.x-eref)-ke-(rho-ref.x)*ref.z);}
+fn pprime(q:u32)->f32{let a=state[2u*q];let b=state[2u*q+1u];let rho=a.x;let k=q-P.nz*(q/P.nz);let refState=refLayer[k];let ke=.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;let eref=refState.y/(P.gamma-1.0)+refState.x*refState.z;return(P.gamma-1.0)*((b.x-eref)-ke-(rho-refState.x)*refState.z);}
 @compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){
  let q=gid.x;if(q>=P.cellCount){return;}var a=vec4<f32>(0.0);var e=0.0;
  for(var s:u32=0u;s<6u;s++){let v=pairs[q*3u+s/2u];let fid=select(v.x,v.z,(s&1u)==1u);let sign=select(v.y,v.w,(s&1u)==1u);if(fid>=0){let f=faceFlux[2u*u32(fid)];let fe=faceFlux[2u*u32(fid)+1u].x;let sf=f32(sign);a+=sf*f;e+=sf*fe;}}
