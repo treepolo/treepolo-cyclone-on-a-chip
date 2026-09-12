@@ -1,6 +1,13 @@
 declare const process: { exitCode?: number };
 
 import { EARTH } from '../core/constants.js';
+import { buildCubedSphere } from '../grid/cubedSphere.js';
+import {
+  buildSphericalShellGeometry,
+  shellCellIndex,
+  shellRadialFaceIndex,
+  shellSideFaceIndex,
+} from '../corev2/sphericalShellGeometry.js';
 import { norm3 } from '../core/math.js';
 import { assert, near, relative } from './assert.js';
 import {
@@ -189,6 +196,47 @@ test('Core v2 rejects a conservative state with non-positive internal energy', (
     threw = true;
   }
   assert(threw, 'invalid total energy must not silently produce a state');
+});
+
+test('Core v2 spherical-shell control volumes close exactly to the analytic shell volume', () => {
+  const horizontal = buildCubedSphere(8);
+  const r0 = EARTH.radius;
+  const radii = new Float64Array([r0, r0 + 12000, r0 + 40000]);
+  const geometry = buildSphericalShellGeometry(horizontal, radii);
+
+  let volume = 0;
+  for (const v of geometry.cellVolume) volume += v;
+  const expected = 4 * Math.PI * (radii[2]! ** 3 - radii[0]! ** 3) / 3;
+  relative(volume, expected, 3e-13, 'global spherical-shell volume');
+
+  for (let ki = 0; ki < radii.length; ki++) {
+    let area = 0;
+    for (let c = 0; c < horizontal.cellCount; c++) {
+      area += geometry.radialFaceArea[shellRadialFaceIndex(c, ki, geometry.nz)]!;
+    }
+    relative(area, 4 * Math.PI * radii[ki]! ** 2, 3e-13, `global radial area k=${ki}`);
+  }
+});
+
+test('Core v2 spherical-shell side faces are shared geometric objects', () => {
+  const horizontal = buildCubedSphere(5);
+  const r0 = EARTH.radius;
+  const radii = new Float64Array([r0, r0 + 1000, r0 + 3000]);
+  const geometry = buildSphericalShellGeometry(horizontal, radii);
+
+  for (let e = 0; e < horizontal.edgeCount; e++) {
+    const edge = horizontal.edges[e]!;
+    assert(edge.leftCell !== edge.rightCell, 'side face needs two distinct cells');
+    const n = edge.normal;
+    relative(norm3(n), 1, 3e-15, 'side-face unit normal');
+    for (let k = 0; k < geometry.nz; k++) {
+      const area = geometry.sideFaceArea[shellSideFaceIndex(e, k, geometry.nz)]!;
+      assert(area > 0 && Number.isFinite(area), 'side-face area must be positive finite');
+      const left = shellCellIndex(edge.leftCell, k, geometry.nz);
+      const right = shellCellIndex(edge.rightCell, k, geometry.nz);
+      assert(left !== right, 'extruded side face must separate two 3-D cells');
+    }
+  }
 });
 
 let passed = 0;
