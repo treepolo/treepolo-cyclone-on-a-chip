@@ -110,8 +110,39 @@ fn pprime(q:u32)->f32{let a=state[2u*q];let b=state[2u*q+1u];let rho=a.x;let k=q
 `;
 
 export class CoreV2GpuRateGather{
- private readonly device:GPUAny;readonly staticData:CoreV2GpuRateStaticData;private readonly pipeline:GPUAny;private readonly buffers:GPUAny[]=[];
- constructor(device:GPUAny,d:CoreV2GpuRateStaticData){this.device=device;this.staticData=d;const raw=new ArrayBuffer(32),u=new Uint32Array(raw),f=new Float32Array(raw);u[0]=d.cellCount;u[1]=d.nz;f[4]=DRY_AIR.gamma;const arrays:[ArrayBufferView,string][]=[[new Uint8Array(raw),'params'],[d.cellFacePairs,'pairs'],[d.gravityCoefficient,'gravity'],[d.bottomDxReferencePressure,'bdx'],[d.bottomOutwardArea,'barea'],[d.topDxReferencePressure,'tdx'],[d.topOutwardArea,'tarea'],[d.referenceLayer,'reference']];for(let i=0;i<arrays.length;i++)this.buffers.push(upload(device,arrays[i]![0],i===0?USAGE.UNIFORM:USAGE.STORAGE,`core-v2-rate-${arrays[i]![1]}`));const module=device.createShaderModule({label:'core-v2-rate-gather-module',code:SHADER});this.pipeline=device.createComputePipeline({label:'core-v2-rate-gather-pipeline',layout:'auto',compute:{module,entryPoint:'main'}});}
- async compute(stateData:Float32Array,gradients:Float32Array,fluxes:Float32Array):Promise<Float32Array>{const d=this.staticData;if(stateData.length!==d.cellCount*8||gradients.length!==d.cellCount*20)throw new Error('Core v2 GPU rate input size mismatch');const state=upload(this.device,stateData,USAGE.STORAGE,'rate-state'),grad=upload(this.device,gradients,USAGE.STORAGE,'rate-grad'),flux=upload(this.device,fluxes,USAGE.STORAGE,'rate-flux'),out=empty(this.device,d.cellCount*8*4,USAGE.STORAGE|USAGE.COPY_SRC,'rate-out');const b=this.buffers;const bg=this.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b[0]}},{binding:1,resource:{buffer:state}},{binding:2,resource:{buffer:grad}},{binding:3,resource:{buffer:flux}},{binding:4,resource:{buffer:b[1]}},{binding:5,resource:{buffer:b[2]}},{binding:6,resource:{buffer:b[3]}},{binding:7,resource:{buffer:b[4]}},{binding:8,resource:{buffer:b[5]}},{binding:9,resource:{buffer:b[6]}},{binding:10,resource:{buffer:b[7]}},{binding:11,resource:{buffer:out}}]});const enc=this.device.createCommandEncoder(),pass=enc.beginComputePass();pass.setPipeline(this.pipeline);pass.setBindGroup(0,bg);pass.dispatchWorkgroups(Math.ceil(d.cellCount/128));pass.end();this.device.queue.submit([enc.finish()]);await this.device.queue.onSubmittedWorkDone();const result=await readback(this.device,out,d.cellCount*8);state.destroy();grad.destroy();flux.destroy();out.destroy();return result;}
+ private readonly device:GPUAny;
+ readonly staticData:CoreV2GpuRateStaticData;
+ private readonly pipeline:GPUAny;
+ private readonly pipelineValidation:Promise<any>;
+ private readonly compilationInfo:Promise<any>;
+ private readonly buffers:GPUAny[]=[];
+ constructor(device:GPUAny,d:CoreV2GpuRateStaticData){
+  this.device=device;this.staticData=d;
+  const raw=new ArrayBuffer(32),u=new Uint32Array(raw),f=new Float32Array(raw);u[0]=d.cellCount;u[1]=d.nz;f[4]=DRY_AIR.gamma;
+  const arrays:[ArrayBufferView,string][]=[[new Uint8Array(raw),'params'],[d.cellFacePairs,'pairs'],[d.gravityCoefficient,'gravity'],[d.bottomDxReferencePressure,'bdx'],[d.bottomOutwardArea,'barea'],[d.topDxReferencePressure,'tdx'],[d.topOutwardArea,'tarea'],[d.referenceLayer,'reference']];
+  for(let i=0;i<arrays.length;i++)this.buffers.push(upload(device,arrays[i]![0],i===0?USAGE.UNIFORM:USAGE.STORAGE,`core-v2-rate-${arrays[i]![1]}`));
+  this.device.pushErrorScope('validation');
+  const module=device.createShaderModule({label:'core-v2-rate-gather-module',code:SHADER});
+  this.compilationInfo=module.getCompilationInfo();
+  this.pipeline=device.createComputePipeline({label:'core-v2-rate-gather-pipeline',layout:'auto',compute:{module,entryPoint:'main'}});
+  this.pipelineValidation=this.device.popErrorScope();
+ }
+ async compute(stateData:Float32Array,gradients:Float32Array,fluxes:Float32Array):Promise<Float32Array>{
+  const d=this.staticData;
+  if(stateData.length!==d.cellCount*8||gradients.length!==d.cellCount*20)throw new Error('Core v2 GPU rate input size mismatch');
+  const setupError=await this.pipelineValidation;
+  if(setupError){
+   const info=await this.compilationInfo;
+   const messages=Array.from(info.messages??[]).map((message:any)=>`${message.type??'message'} ${message.lineNum??'?'}:${message.linePos??'?'} ${message.message??String(message)}`).join(' | ');
+   throw new Error(`Core v2 GPU rate-gather pipeline error: ${setupError.message}${messages?`; shader: ${messages}`:''}`);
+  }
+  const state=upload(this.device,stateData,USAGE.STORAGE,'rate-state'),grad=upload(this.device,gradients,USAGE.STORAGE,'rate-grad'),flux=upload(this.device,fluxes,USAGE.STORAGE,'rate-flux'),out=empty(this.device,d.cellCount*8*4,USAGE.STORAGE|USAGE.COPY_SRC,'rate-out');
+  this.device.pushErrorScope('validation');
+  const b=this.buffers;const bg=this.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b[0]}},{binding:1,resource:{buffer:state}},{binding:2,resource:{buffer:grad}},{binding:3,resource:{buffer:flux}},{binding:4,resource:{buffer:b[1]}},{binding:5,resource:{buffer:b[2]}},{binding:6,resource:{buffer:b[3]}},{binding:7,resource:{buffer:b[4]}},{binding:8,resource:{buffer:b[5]}},{binding:9,resource:{buffer:b[6]}},{binding:10,resource:{buffer:b[7]}},{binding:11,resource:{buffer:out}}]});
+  const enc=this.device.createCommandEncoder(),pass=enc.beginComputePass();pass.setPipeline(this.pipeline);pass.setBindGroup(0,bg);pass.dispatchWorkgroups(Math.ceil(d.cellCount/128));pass.end();this.device.queue.submit([enc.finish()]);await this.device.queue.onSubmittedWorkDone();
+  const validationError=await this.device.popErrorScope();
+  if(validationError){state.destroy();grad.destroy();flux.destroy();out.destroy();throw new Error(`Core v2 GPU rate-gather validation error: ${validationError.message}`);}
+  const result=await readback(this.device,out,d.cellCount*8);state.destroy();grad.destroy();flux.destroy();out.destroy();return result;
+ }
  destroy():void{for(const b of this.buffers)b.destroy();}
 }
