@@ -11,6 +11,7 @@ import {
   sideFaceVectorArea,
   type SphericalShellGeometry,
 } from '../corev2/sphericalShellGeometry.js';
+import { coreV2ReferenceTotalEnergyF32 } from './coreV2ReferenceF32.js';
 
 export const CORE_V2_GPU_FACE_FLUX_FLOATS = 8;
 
@@ -53,7 +54,7 @@ export interface CoreV2GpuInternalFaceStaticData {
   rightDxGeopotential: Float32Array;
   /** vec4: exact finite-volume vector area xyz, unused. */
   vectorArea: Float32Array;
-  /** vec4 per layer: rho_ref, p_ref, Phi_ref, unused. */
+  /** vec4 per layer: rho_ref, p_ref, Phi_ref, rhoE_ref. */
   referenceLayer: Float32Array;
 }
 
@@ -87,9 +88,13 @@ export function buildCoreV2GpuInternalFaceStaticData(
   const vectorArea = new Float32Array(faceCount * 4);
   const referenceLayer = new Float32Array(geometry.nz * 4);
   for (let k = 0; k < geometry.nz; k++) {
-    referenceLayer[k * 4] = reference.cellDensity[k]!;
-    referenceLayer[k * 4 + 1] = reference.cellPressure[k]!;
-    referenceLayer[k * 4 + 2] = reference.cellGeopotential[k]!;
+    const density = reference.cellDensity[k]!;
+    const pressure = reference.cellPressure[k]!;
+    const geopotential = reference.cellGeopotential[k]!;
+    referenceLayer[k * 4] = density;
+    referenceLayer[k * 4 + 1] = pressure;
+    referenceLayer[k * 4 + 2] = geopotential;
+    referenceLayer[k * 4 + 3] = coreV2ReferenceTotalEnergyF32(density, pressure, geopotential);
   }
 
   const centroid = (q: number): readonly [number, number, number] => [
@@ -177,8 +182,7 @@ fn base_value(q:u32,v:u32)->f32{
   let a=state[2u*q];let b=state[2u*q+1u];let rho=a.x;
   if(v==0u){return rho;} if(v==1u){return a.y/rho;} if(v==2u){return a.z/rho;} if(v==3u){return a.w/rho;}
   let k=q-P.nz*(q/P.nz);let refState=refLayer[k];let kinetic=.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;
-  let referenceEnergy=refState.y/(P.gamma-1.0)+refState.x*refState.z;
-  return (P.gamma-1.0)*((b.x-referenceEnergy)-kinetic-(rho-refState.x)*refState.z);
+  return (P.gamma-1.0)*((b.x-refState.w)-kinetic-(rho-refState.x)*refState.z);
 }
 fn reconstruct(q:u32,dx:vec3<f32>,pRef:f32)->array<vec4<f32>,2>{
   let rho=base_value(q,0u)+dot(gradient[q*5u].xyz,dx);
