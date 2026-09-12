@@ -123,19 +123,29 @@ function subtractReferencePressureMomentum(
 }
 
 function addFluxLeft(rate: Float64Array, k: number, flux: ColumnFlux): void {
-  rate[columnStateIndex(k, 0)] -= flux.mass;
-  rate[columnStateIndex(k, 1)] -= flux.momentum[0];
-  rate[columnStateIndex(k, 2)] -= flux.momentum[1];
-  rate[columnStateIndex(k, 3)] -= flux.momentum[2];
-  rate[columnStateIndex(k, 4)] -= flux.totalEnergy;
+  const i0 = columnStateIndex(k, 0);
+  const i1 = columnStateIndex(k, 1);
+  const i2 = columnStateIndex(k, 2);
+  const i3 = columnStateIndex(k, 3);
+  const i4 = columnStateIndex(k, 4);
+  rate[i0] = rate[i0]! - flux.mass;
+  rate[i1] = rate[i1]! - flux.momentum[0];
+  rate[i2] = rate[i2]! - flux.momentum[1];
+  rate[i3] = rate[i3]! - flux.momentum[2];
+  rate[i4] = rate[i4]! - flux.totalEnergy;
 }
 
 function addFluxRight(rate: Float64Array, k: number, flux: ColumnFlux): void {
-  rate[columnStateIndex(k, 0)] += flux.mass;
-  rate[columnStateIndex(k, 1)] += flux.momentum[0];
-  rate[columnStateIndex(k, 2)] += flux.momentum[1];
-  rate[columnStateIndex(k, 3)] += flux.momentum[2];
-  rate[columnStateIndex(k, 4)] += flux.totalEnergy;
+  const i0 = columnStateIndex(k, 0);
+  const i1 = columnStateIndex(k, 1);
+  const i2 = columnStateIndex(k, 2);
+  const i3 = columnStateIndex(k, 3);
+  const i4 = columnStateIndex(k, 4);
+  rate[i0] = rate[i0]! + flux.mass;
+  rate[i1] = rate[i1]! + flux.momentum[0];
+  rate[i2] = rate[i2]! + flux.momentum[1];
+  rate[i3] = rate[i3]! + flux.momentum[2];
+  rate[i4] = rate[i4]! + flux.totalEnergy;
 }
 
 function faceGeopotential(
@@ -216,18 +226,24 @@ export function verticalStiffColumnIntegratedRate(
   const bottom = hydrostaticPrimitive(column, 0, reference, bottomPRef);
   const bottomArea = scale3(radialFaceVectorArea(geometry, horizontalCell, 0), -1);
   const bottomPPrime = bottom.pressure - bottomPRef;
-  rate[columnStateIndex(0, 1)] -= bottomPPrime * bottomArea[0];
-  rate[columnStateIndex(0, 2)] -= bottomPPrime * bottomArea[1];
-  rate[columnStateIndex(0, 3)] -= bottomPPrime * bottomArea[2];
+  const b1 = columnStateIndex(0, 1);
+  const b2 = columnStateIndex(0, 2);
+  const b3 = columnStateIndex(0, 3);
+  rate[b1] = rate[b1]! - bottomPPrime * bottomArea[0];
+  rate[b2] = rate[b2]! - bottomPPrime * bottomArea[1];
+  rate[b3] = rate[b3]! - bottomPPrime * bottomArea[2];
 
   const topK = nz - 1;
   const topPRef = reference.radialFacePressure[nz]!;
   const top = hydrostaticPrimitive(column, topK, reference, topPRef);
   const topArea = radialFaceVectorArea(geometry, horizontalCell, nz);
   const topPPrime = top.pressure - topPRef;
-  rate[columnStateIndex(topK, 1)] -= topPPrime * topArea[0];
-  rate[columnStateIndex(topK, 2)] -= topPPrime * topArea[1];
-  rate[columnStateIndex(topK, 3)] -= topPPrime * topArea[2];
+  const t1 = columnStateIndex(topK, 1);
+  const t2 = columnStateIndex(topK, 2);
+  const t3 = columnStateIndex(topK, 3);
+  rate[t1] = rate[t1]! - topPPrime * topArea[0];
+  rate[t2] = rate[t2]! - topPPrime * topArea[1];
+  rate[t3] = rate[t3]! - topPPrime * topArea[2];
 
   for (let k = 0; k < nz; k++) {
     const densityPerturbation =
@@ -239,9 +255,12 @@ export function verticalStiffColumnIntegratedRate(
       densityPerturbation,
       planet,
     );
-    rate[columnStateIndex(k, 1)] += gravity[0];
-    rate[columnStateIndex(k, 2)] += gravity[1];
-    rate[columnStateIndex(k, 3)] += gravity[2];
+    const i1 = columnStateIndex(k, 1);
+    const i2 = columnStateIndex(k, 2);
+    const i3 = columnStateIndex(k, 3);
+    rate[i1] = rate[i1]! + gravity[0];
+    rate[i2] = rate[i2]! + gravity[1];
+    rate[i3] = rate[i3]! + gravity[2];
   }
 
   return rate;
