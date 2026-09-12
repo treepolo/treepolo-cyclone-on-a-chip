@@ -85,7 +85,7 @@ export function buildCoreV2GpuRateStaticData(
 }
 
 const SHADER=/* wgsl */`
-struct Params{cellCount:u32,nz:u32,_a:u32,_b:u32,gamma:f32,_pad:vec3<f32>};
+struct Params{cellCount:u32,nz:u32,_a:u32,_b:u32,gamma:f32,_pad0:f32,_pad1:f32,_pad2:f32};
 @group(0)@binding(0)var<uniform>P:Params;
 @group(0)@binding(1)var<storage,read>state:array<vec4<f32>>;
 @group(0)@binding(2)var<storage,read>gradient:array<vec4<f32>>;
