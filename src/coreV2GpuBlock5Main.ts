@@ -28,6 +28,9 @@ function buildBatch(columnCount: number, nz: number): CoreV2GpuBlockTridiagonalB
           upper[ij] = Math.fround(k + 1 === nz ? 0 : 0.022 * Math.sin(0.3 * (r + 2) * (j + 1) + k));
         }
       }
+      // Deliberately force a row pivot in a subset of blocks. This makes some
+      // systems moderately ill-conditioned, so the correct f32 quality metric
+      // is a scaled backward residual rather than an absolute |Ax-b| cutoff.
       if ((c + k) % 5 === 0) {
         const base = block * 25;
         diagonal[base] = 0;
@@ -68,20 +71,43 @@ function relative(actual: ArrayLike<number>, expected: ArrayLike<number>): numbe
   return Math.sqrt(n / Math.max(d, 1e-30));
 }
 
-function maxResidual(batch: CoreV2GpuBlockTridiagonalBatch, x: Float32Array): number {
+/**
+ * Maximum componentwise backward residual
+ *
+ *   |Ax-b| / ( |b| + |A||x| )
+ *
+ * evaluated in JS f64 from the original f32 matrix and GPU f32 solution.
+ * This remains meaningful for the deliberately pivot-stressed blocks whose
+ * solution magnitude can be O(1e3); an absolute residual does not.
+ */
+function maxScaledResidual(batch: CoreV2GpuBlockTridiagonalBatch, x: Float32Array): number {
   let worst = 0;
   for (let c = 0; c < batch.columnCount; c++) {
     for (let k = 0; k < batch.nz; k++) {
       const block = c * batch.nz + k;
       for (let r = 0; r < 5; r++) {
         let value = 0;
+        let scale = Math.abs(batch.rhs[block * 5 + r]!);
         for (let j = 0; j < 5; j++) {
-          value += batch.diagonal[block * 25 + r * 5 + j]! * x[block * 5 + j]!;
-          if (k > 0) value += batch.lower[block * 25 + r * 5 + j]! * x[(block - 1) * 5 + j]!;
-          if (k + 1 < batch.nz) value += batch.upper[block * 25 + r * 5 + j]! * x[(block + 1) * 5 + j]!;
+          const d = batch.diagonal[block * 25 + r * 5 + j]!;
+          const xc = x[block * 5 + j]!;
+          value += d * xc;
+          scale += Math.abs(d * xc);
+          if (k > 0) {
+            const a = batch.lower[block * 25 + r * 5 + j]!;
+            const xl = x[(block - 1) * 5 + j]!;
+            value += a * xl;
+            scale += Math.abs(a * xl);
+          }
+          if (k + 1 < batch.nz) {
+            const a = batch.upper[block * 25 + r * 5 + j]!;
+            const xu = x[(block + 1) * 5 + j]!;
+            value += a * xu;
+            scale += Math.abs(a * xu);
+          }
         }
         const residual = Math.abs(value - batch.rhs[block * 5 + r]!);
-        worst = Math.max(worst, residual);
+        worst = Math.max(worst, residual / Math.max(scale, 1e-30));
       }
     }
   }
@@ -103,7 +129,7 @@ async function run(): Promise<void> {
   let badStatus = 0;
   for (const status of result.status) if (status !== 0) badStatus++;
   const error = relative(result.solution, expected);
-  const residual = maxResidual(batch, result.solution);
+  const residual = maxScaledResidual(batch, result.solution);
   $('relative').textContent = error.toExponential(6);
   $('residual').textContent = residual.toExponential(6);
   $('statusCount').textContent = String(badStatus);
@@ -121,11 +147,11 @@ async function run(): Promise<void> {
   $('singular').textContent = singularDetected ? 'YES' : 'NO';
   $('adapter').textContent = JSON.stringify(adapter.info ?? {}, null, 2);
 
-  const pass = badStatus === 0 && error < 2e-4 && residual < 2e-4 && singularDetected;
+  const pass = badStatus === 0 && error < 2e-4 && residual < 2e-6 && singularDetected;
   $('status').textContent = pass ? 'GATE PASS' : 'GATE FAIL';
   $('status').className = pass ? 'ok' : 'bad';
   if (!pass) {
-    throw new Error(`Core v2 GPU block5 gate: status=${badStatus} rel=${error} residual=${residual} singular=${singularDetected}`);
+    throw new Error(`Core v2 GPU block5 gate: status=${badStatus} rel=${error} scaledResidual=${residual} singular=${singularDetected}`);
   }
 }
 
