@@ -16,7 +16,7 @@ import {
   sideFaceCentroid,
   type LinearReconstructionStencil,
 } from './reconstruction.js';
-import { integratedSlau2FluxFromPrimitive } from './slau2Flux.js';
+import { integratedSlau2ReferenceSubtractedFluxFromPrimitive } from './slau2Flux.js';
 import {
   radialFaceVectorArea,
   shellCellIndex,
@@ -71,22 +71,6 @@ function pressurePerturbationWallFlux(
   };
 }
 
-function removeReferencePressureMomentum(
-  flux: IntegratedFaceFlux,
-  vectorArea: Vec3,
-  referencePressure: number,
-): IntegratedFaceFlux {
-  return {
-    mass: flux.mass,
-    momentum: [
-      flux.momentum[0] - referencePressure * vectorArea[0],
-      flux.momentum[1] - referencePressure * vectorArea[1],
-      flux.momentum[2] - referencePressure * vectorArea[2],
-    ],
-    totalEnergy: flux.totalEnergy,
-  };
-}
-
 function addGravityPerturbationForce(
   rate: IntegratedConservativeRate,
   cell: number,
@@ -102,11 +86,11 @@ function addGravityPerturbationForce(
  * exactly well-balanced isothermal hydrostatic reference.
  *
  * The reference is an algebraic zero, not a forcing. The operator reconstructs
- * p'=p-p_ref, evaluates the all-speed face flux with the full physical pressure,
- * then removes p_ref*A from the momentum flux while gravity is evaluated from
+ * p'=p-p_ref and evaluates the all-speed face flux with the common reference
+ * pressure removed inside the Riemann flux itself. Gravity is evaluated from
  * rho-rho_ref. The removed reference pressure and reference gravity are the
  * same exact discrete hydrostatic balance, so the physical operator is
- * unchanged while the large cancelling background forces never enter the rate.
+ * unchanged while large Earth-scale forces are never formed and subtracted.
  */
 export function closedShellWellBalancedEulerGravityRate(
   fields: ConservativeFields,
@@ -155,16 +139,15 @@ export function closedShellWellBalancedEulerGravityRate(
         sideFaceRadialMean(geometry, k),
         planet,
       );
-      const vectorArea = sideFaceVectorArea(geometry, e, k);
-      const physicalFlux = integratedSlau2FluxFromPrimitive(
-        leftPrimitive, rightPrimitive, vectorArea, phiFace, phiFace,
+      const flux = integratedSlau2ReferenceSubtractedFluxFromPrimitive(
+        leftPrimitive,
+        rightPrimitive,
+        sideFaceVectorArea(geometry, e, k),
+        pRef,
+        phiFace,
+        phiFace,
       );
-      accumulateInternalIntegratedFaceFlux(
-        rate,
-        left,
-        right,
-        removeReferencePressureMomentum(physicalFlux, vectorArea, pRef),
-      );
+      accumulateInternalIntegratedFaceFlux(rate, left, right, flux);
     }
   }
 
@@ -181,16 +164,15 @@ export function closedShellWellBalancedEulerGravityRate(
         fields, reconstruction, stencil, reference, upper, position, pRef,
       );
       const phiFace = geopotentialAtRadius(geometry, geometry.radiusInterface[ki]!, planet);
-      const vectorArea = radialFaceVectorArea(geometry, c, ki);
-      const physicalFlux = integratedSlau2FluxFromPrimitive(
-        lowerPrimitive, upperPrimitive, vectorArea, phiFace, phiFace,
+      const flux = integratedSlau2ReferenceSubtractedFluxFromPrimitive(
+        lowerPrimitive,
+        upperPrimitive,
+        radialFaceVectorArea(geometry, c, ki),
+        pRef,
+        phiFace,
+        phiFace,
       );
-      accumulateInternalIntegratedFaceFlux(
-        rate,
-        lower,
-        upper,
-        removeReferencePressureMomentum(physicalFlux, vectorArea, pRef),
-      );
+      accumulateInternalIntegratedFaceFlux(rate, lower, upper, flux);
     }
   }
 
