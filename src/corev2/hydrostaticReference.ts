@@ -38,8 +38,8 @@ function volumeMeanRadius(r0: number, r1: number): number {
  * toward this profile and therefore is not a climate forcing.
  *
  * For p(r)=p_s exp[-g(r-R)/(R_d T)], the conical side-face pressure is the
- * exact area mean  int(p r dr) / int(r dr), while the cell density is the
- * exact volume mean int(rho r^2 dr) / int(r^2 dr). With these definitions the
+ * exact area mean int(p r dr) / int(r dr), while the cell density is the exact
+ * volume mean int(rho r^2 dr) / int(r^2 dr). With these definitions the
  * finite-volume pressure surface integral and gravity volume integral cancel
  * to roundoff in every spherical-shell cell.
  */
@@ -114,9 +114,30 @@ export function buildIsothermalHydrostaticReference(
   };
 }
 
+function integratedSignedDensityGravityForce(
+  geometry: SphericalShellGeometry,
+  horizontalCell: number,
+  k: number,
+  densityLike: number,
+  planet: PlanetConfig,
+): Vec3 {
+  if (!Number.isFinite(densityLike)) {
+    throw new Error(`invalid density-like value for gravity force: ${densityLike}`);
+  }
+  const r0 = geometry.radiusInterface[k]!;
+  const r1 = geometry.radiusInterface[k + 1]!;
+  const radialIntegral = (r1 ** 3 - r0 ** 3) / 3;
+  const scale = -densityLike * planet.gravity * radialIntegral;
+  return [
+    scale * geometry.cellVectorAreaUnit[horizontalCell * 3]!,
+    scale * geometry.cellVectorAreaUnit[horizontalCell * 3 + 1]!,
+    scale * geometry.cellVectorAreaUnit[horizontalCell * 3 + 2]!,
+  ];
+}
+
 /**
- * Exact integrated gravity force for a piecewise-constant cell density under
- * constant radial gravity. Returned vector points inward.
+ * Exact integrated gravity force for a piecewise-constant physical density.
+ * Returned vector points inward.
  */
 export function integratedCellGravityForce(
   geometry: SphericalShellGeometry,
@@ -128,15 +149,35 @@ export function integratedCellGravityForce(
   if (!(density >= 0) || !Number.isFinite(density)) {
     throw new Error(`invalid density for gravity force: ${density}`);
   }
-  const r0 = geometry.radiusInterface[k]!;
-  const r1 = geometry.radiusInterface[k + 1]!;
-  const radialIntegral = (r1 ** 3 - r0 ** 3) / 3;
-  const scale = -density * planet.gravity * radialIntegral;
-  return [
-    scale * geometry.cellVectorAreaUnit[horizontalCell * 3]!,
-    scale * geometry.cellVectorAreaUnit[horizontalCell * 3 + 1]!,
-    scale * geometry.cellVectorAreaUnit[horizontalCell * 3 + 2]!,
-  ];
+  return integratedSignedDensityGravityForce(
+    geometry,
+    horizontalCell,
+    k,
+    density,
+    planet,
+  );
+}
+
+/**
+ * Exact integrated gravity contribution of a signed density perturbation
+ * rho' = rho-rho_ref. A negative perturbation is physically valid here; this
+ * helper exists so the physical-density API above can keep rejecting negative
+ * density while the well-balanced algebra remains explicit.
+ */
+export function integratedCellGravityPerturbationForce(
+  geometry: SphericalShellGeometry,
+  horizontalCell: number,
+  k: number,
+  densityPerturbation: number,
+  planet: PlanetConfig = EARTH,
+): Vec3 {
+  return integratedSignedDensityGravityForce(
+    geometry,
+    horizontalCell,
+    k,
+    densityPerturbation,
+    planet,
+  );
 }
 
 /**
@@ -155,8 +196,6 @@ export function integratedReferencePressureForce(
   const pBottom = reference.radialFacePressure[k]!;
   const pTop = reference.radialFacePressure[k + 1]!;
   const pSide = reference.sideFacePressure[k]!;
-  // Sum outward pressure-area vectors is proportional to the exact angular
-  // vector area. The side vector sum equals -(r1^2-r0^2) A_omega.
   const surfaceCoefficient =
     pTop * r1 * r1 -
     pBottom * r0 * r0 -
