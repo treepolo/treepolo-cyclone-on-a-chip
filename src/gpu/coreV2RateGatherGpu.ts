@@ -7,6 +7,7 @@ import {
   type SphericalShellGeometry,
 } from '../corev2/sphericalShellGeometry.js';
 import type { CoreV2GpuInternalFaceStaticData } from './coreV2FaceFluxGpu.js';
+import { coreV2ReferenceTotalEnergyF32 } from './coreV2ReferenceF32.js';
 
 export const CORE_V2_GPU_RATE_FLOATS_PER_CELL = 8;
 
@@ -28,7 +29,7 @@ export interface CoreV2GpuRateStaticData {
   gravityCoefficient:Float32Array;
   /** Four vec4 per horizontal cell: bottom dx+p_ref, bottom area, top dx+p_ref, top area. */
   boundaryStatic:Float32Array;
-  /** vec4 per layer: rho_ref,p_ref,Phi_ref,unused. */
+  /** vec4 per layer: rho_ref,p_ref,Phi_ref,rhoE_ref. */
   referenceLayer:Float32Array;
 }
 
@@ -54,7 +55,8 @@ export function buildCoreV2GpuRateStaticData(
   const gravityCoefficient=new Float32Array(cellCount*4);
   const referenceLayer=new Float32Array(nz*4);
   for(let k=0;k<nz;k++){
-    referenceLayer[k*4]=reference.cellDensity[k]!;referenceLayer[k*4+1]=reference.cellPressure[k]!;referenceLayer[k*4+2]=reference.cellGeopotential[k]!;
+    const density=reference.cellDensity[k]!,pressure=reference.cellPressure[k]!,geopotential=reference.cellGeopotential[k]!;
+    referenceLayer[k*4]=density;referenceLayer[k*4+1]=pressure;referenceLayer[k*4+2]=geopotential;referenceLayer[k*4+3]=coreV2ReferenceTotalEnergyF32(density,pressure,geopotential);
   }
   for(let c=0;c<hc;c++)for(let k=0;k<nz;k++){
     const q=shellCellIndex(c,k,nz),r0=geometry.radiusInterface[k]!,r1=geometry.radiusInterface[k+1]!;
@@ -89,7 +91,7 @@ struct Params{cellCount:u32,nz:u32,_a:u32,_b:u32,gamma:f32,_pad0:f32,_pad1:f32,_
 @group(0)@binding(6)var<storage,read>boundaryStatic:array<vec4<f32>>;
 @group(0)@binding(7)var<storage,read>refLayer:array<vec4<f32>>;
 @group(0)@binding(8)var<storage,read_write>rate:array<vec4<f32>>;
-fn pprime(q:u32)->f32{let a=state[2u*q];let b=state[2u*q+1u];let rho=a.x;let k=q-P.nz*(q/P.nz);let refState=refLayer[k];let ke=.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;let eref=refState.y/(P.gamma-1.0)+refState.x*refState.z;return(P.gamma-1.0)*((b.x-eref)-ke-(rho-refState.x)*refState.z);}
+fn pprime(q:u32)->f32{let a=state[2u*q];let b=state[2u*q+1u];let rho=a.x;let k=q-P.nz*(q/P.nz);let refState=refLayer[k];let ke=.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;return(P.gamma-1.0)*((b.x-refState.w)-ke-(rho-refState.x)*refState.z);}
 @compute @workgroup_size(128)fn main(@builtin(global_invocation_id)gid:vec3<u32>){
  let q=gid.x;if(q>=P.cellCount){return;}var a=vec4<f32>(0.0);var e=0.0;
  for(var s:u32=0u;s<6u;s++){let v=pairs[q*3u+s/2u];let fid=select(v.x,v.z,(s&1u)==1u);let sign=select(v.y,v.w,(s&1u)==1u);if(fid>=0){let f=faceFlux[2u*u32(fid)];let fe=faceFlux[2u*u32(fid)+1u].x;let sf=f32(sign);a+=sf*f;e+=sf*fe;}}
