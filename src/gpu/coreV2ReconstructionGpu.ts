@@ -7,6 +7,7 @@ import {
   type LinearReconstructionStencil,
 } from '../corev2/reconstruction.js';
 import type { SphericalShellGeometry } from '../corev2/sphericalShellGeometry.js';
+import { coreV2ReferenceTotalEnergyF32 } from './coreV2ReferenceF32.js';
 
 export const CORE_V2_GPU_GRADIENT_FLOATS_PER_CELL = 20;
 
@@ -58,7 +59,7 @@ export interface CoreV2GpuReconstructionStaticData {
   neighborCoeff: Float32Array;
   /** Six vec4<f32> per cell: face-centroid minus cell-centroid. */
   faceDisplacement: Float32Array;
-  /** One vec4<f32> per vertical layer: rho_ref, p_ref, Phi_ref, unused. */
+  /** One vec4<f32> per vertical layer: rho_ref, p_ref, Phi_ref, rhoE_ref. */
   referenceLayer: Float32Array;
 }
 
@@ -88,9 +89,13 @@ export function buildCoreV2GpuReconstructionStaticData(
   const referenceLayer = new Float32Array(geometry.nz * 4);
 
   for (let k = 0; k < geometry.nz; k++) {
-    referenceLayer[k * 4] = reference.cellDensity[k]!;
-    referenceLayer[k * 4 + 1] = reference.cellPressure[k]!;
-    referenceLayer[k * 4 + 2] = reference.cellGeopotential[k]!;
+    const density = reference.cellDensity[k]!;
+    const pressure = reference.cellPressure[k]!;
+    const geopotential = reference.cellGeopotential[k]!;
+    referenceLayer[k * 4] = density;
+    referenceLayer[k * 4 + 1] = pressure;
+    referenceLayer[k * 4 + 2] = geopotential;
+    referenceLayer[k * 4 + 3] = coreV2ReferenceTotalEnergyF32(density, pressure, geopotential);
   }
 
   for (let q = 0; q < cellCount; q++) {
@@ -178,8 +183,7 @@ fn primitive_value(q:u32,variable:u32)->f32 {
   let k=q-P.nz*(q/P.nz);
   let refState=refLayer[k];
   let kinetic=0.5*(a.y*a.y+a.z*a.z+a.w*a.w)/rho;
-  let referenceEnergy=refState.y/(P.gamma-1.0)+refState.x*refState.z;
-  let internalPerturbation=(b.x-referenceEnergy)-kinetic-(rho-refState.x)*refState.z;
+  let internalPerturbation=(b.x-refState.w)-kinetic-(rho-refState.x)*refState.z;
   return (P.gamma-1.0)*internalPerturbation;
 }
 
