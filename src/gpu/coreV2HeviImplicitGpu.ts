@@ -319,6 +319,5 @@ export class CoreV2GpuHeviImplicitStage {
   destroy(): void {
     this.vertical.destroy();
     this.jacobian.destroy();
-    this.blockSolver.destroy();
   }
 }
