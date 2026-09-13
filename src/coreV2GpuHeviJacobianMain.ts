@@ -163,7 +163,7 @@ async function run(): Promise<void> {
   if (!adapter) throw new Error('WebGPU adapter unavailable');
   const device = await adapter.requestDevice();
 
-  const horizontal = buildCubedSphere(1);
+  const horizontal = buildCubedSphere(2);
   const geometry = buildSphericalShellGeometry(horizontal, new Float64Array([
     EARTH.radius,
     EARTH.radius + 180,
