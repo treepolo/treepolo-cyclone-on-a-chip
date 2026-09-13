@@ -21,6 +21,7 @@ import { coreV2ReferenceTotalEnergyF32 } from './gpu/coreV2ReferenceF32.js';
 
 const PACKED = 8;
 const PHYSICAL = 5;
+const STEPS = 4;
 const f32 = Math.fround;
 const $ = (id: string): HTMLElement => {
   const node = document.getElementById(id);
@@ -113,13 +114,21 @@ function unpack(state: Float32Array) {
   return fields;
 }
 
+type Comparison = {
+  stateRelative: number;
+  incrementRelative: number;
+  scaledRms: number;
+  maxScaled: number;
+  nonFinite: number;
+};
+
 function compare(
   gpu: Float32Array,
   cpuFields: ReturnType<typeof createConservativeFields>,
   initial: Float32Array,
   geometry: SphericalShellGeometry,
   reference: HydrostaticReference1D,
-): { stateRelative: number; incrementRelative: number; scaledRms: number; maxScaled: number; nonFinite: number } {
+): Comparison {
   let stateNum = 0;
   let stateDen = 0;
   let incrementNum = 0;
@@ -228,62 +237,93 @@ async function run(): Promise<void> {
     }
 
     const initial = disturbedPacked(geometry, reference);
-    const cpu = heviImexSsp2Step(unpack(initial), dt, geometry, stencil, reference);
     const before = integratedMassEnergy(initial, geometry);
-    const gpu = await gpuStepper.step(initial, dt);
-    const after = integratedMassEnergy(gpu.packedState, geometry);
-    const comparison = compare(gpu.packedState, cpu.fields, initial, geometry, reference);
+    let cpuFields = unpack(initial);
+    let gpuState = initial.slice();
+    let firstComparison: Comparison | null = null;
+    let worstStage1Iterations = 0;
+    let worstStage2Iterations = 0;
+    let worstStage1Residual = 0;
+    let worstStage2Residual = 0;
+    let totalStage1Halvings = 0;
+    let totalStage2Halvings = 0;
+    let allPositive = true;
+
+    for (let step = 0; step < STEPS; step++) {
+      cpuFields = heviImexSsp2Step(cpuFields, dt, geometry, stencil, reference).fields;
+      const gpu = await gpuStepper.step(gpuState, dt);
+      gpuState = gpu.packedState;
+      if (step === 0) firstComparison = compare(gpuState, cpuFields, initial, geometry, reference);
+      worstStage1Iterations = Math.max(worstStage1Iterations, gpu.diagnostics.stage1Iterations);
+      worstStage2Iterations = Math.max(worstStage2Iterations, gpu.diagnostics.stage2Iterations);
+      worstStage1Residual = Math.max(worstStage1Residual, gpu.diagnostics.stage1Residual);
+      worstStage2Residual = Math.max(worstStage2Residual, gpu.diagnostics.stage2Residual);
+      totalStage1Halvings += gpu.diagnostics.stage1LineSearchHalvings;
+      totalStage2Halvings += gpu.diagnostics.stage2LineSearchHalvings;
+      allPositive = allPositive && positive(gpuState, geometry, reference);
+    }
+    if (!firstComparison) throw new Error('Core v2 GPU IMEX multistep gate did not execute');
+
+    const finalComparison = compare(gpuState, cpuFields, initial, geometry, reference);
+    const after = integratedMassEnergy(gpuState, geometry);
     const massDrift = Math.abs(after.mass - before.mass) / Math.max(Math.abs(before.mass), 1);
     const energyDrift = Math.abs(after.energy - before.energy) / Math.max(Math.abs(before.energy), 1);
-    const isPositive = positive(gpu.packedState, geometry, reference);
 
     $('cfl').textContent = acousticCfl.toFixed(3);
     $('hydro').textContent = hydroMaxScaled.toExponential(6);
-    $('stateRelative').textContent = comparison.stateRelative.toExponential(6);
-    $('incrementRelative').textContent = comparison.incrementRelative.toExponential(6);
-    $('scaledRms').textContent = comparison.scaledRms.toExponential(6);
-    $('maxScaled').textContent = comparison.maxScaled.toExponential(6);
+    $('stateRelative').textContent = finalComparison.stateRelative.toExponential(6);
+    $('incrementRelative').textContent = finalComparison.incrementRelative.toExponential(6);
+    $('scaledRms').textContent = finalComparison.scaledRms.toExponential(6);
+    $('maxScaled').textContent = finalComparison.maxScaled.toExponential(6);
     $('massDrift').textContent = massDrift.toExponential(6);
     $('energyDrift').textContent = energyDrift.toExponential(6);
-    $('stage1').textContent = `${gpu.diagnostics.stage1Iterations} / ${gpu.diagnostics.stage1Residual.toExponential(3)}`;
-    $('stage2').textContent = `${gpu.diagnostics.stage2Iterations} / ${gpu.diagnostics.stage2Residual.toExponential(3)}`;
-    $('halvings').textContent = `${gpu.diagnostics.stage1LineSearchHalvings} / ${gpu.diagnostics.stage2LineSearchHalvings}`;
-    $('positive').textContent = String(isPositive);
+    $('stage1').textContent = `${worstStage1Iterations} / ${worstStage1Residual.toExponential(3)}`;
+    $('stage2').textContent = `${worstStage2Iterations} / ${worstStage2Residual.toExponential(3)}`;
+    $('halvings').textContent = `${totalStage1Halvings} / ${totalStage2Halvings}`;
+    $('positive').textContent = String(allPositive);
     $('adapter').textContent = JSON.stringify(adapter.info ?? {}, null, 2);
 
     const pass =
       acousticCfl > 50 &&
       hydroMaxScaled < 2e-6 &&
-      comparison.nonFinite === 0 &&
-      isPositive &&
-      comparison.stateRelative < 2e-5 &&
-      comparison.incrementRelative < 2e-2 &&
-      comparison.scaledRms < 2e-4 &&
-      comparison.maxScaled < 1e-3 &&
-      massDrift < 2e-6 &&
-      energyDrift < 2e-6;
+      firstComparison.nonFinite === 0 &&
+      finalComparison.nonFinite === 0 &&
+      allPositive &&
+      firstComparison.stateRelative < 2e-5 &&
+      firstComparison.incrementRelative < 2e-2 &&
+      finalComparison.stateRelative < 5e-5 &&
+      finalComparison.incrementRelative < 3e-2 &&
+      finalComparison.scaledRms < 4e-4 &&
+      finalComparison.maxScaled < 2e-3 &&
+      worstStage1Residual <= 2e-5 &&
+      worstStage2Residual <= 2e-5 &&
+      massDrift < 3e-6 &&
+      energyDrift < 3e-6;
 
     const summary = [
+      `steps=${STEPS}`,
       `acousticCfl=${acousticCfl}`,
       `hydroMaxScaled=${hydroMaxScaled}`,
-      `stateRel=${comparison.stateRelative}`,
-      `incrementRel=${comparison.incrementRelative}`,
-      `scaledRms=${comparison.scaledRms}`,
-      `maxScaled=${comparison.maxScaled}`,
+      `oneStateRel=${firstComparison.stateRelative}`,
+      `oneIncrementRel=${firstComparison.incrementRelative}`,
+      `fourStateRel=${finalComparison.stateRelative}`,
+      `fourIncrementRel=${finalComparison.incrementRelative}`,
+      `fourScaledRms=${finalComparison.scaledRms}`,
+      `fourMaxScaled=${finalComparison.maxScaled}`,
       `massDrift=${massDrift}`,
       `energyDrift=${energyDrift}`,
-      `stage1Iter=${gpu.diagnostics.stage1Iterations}`,
-      `stage1Residual=${gpu.diagnostics.stage1Residual}`,
-      `stage2Iter=${gpu.diagnostics.stage2Iterations}`,
-      `stage2Residual=${gpu.diagnostics.stage2Residual}`,
-      `halvings=${gpu.diagnostics.stage1LineSearchHalvings}/${gpu.diagnostics.stage2LineSearchHalvings}`,
-      `positive=${isPositive}`,
+      `worstStage1Iter=${worstStage1Iterations}`,
+      `worstStage1Residual=${worstStage1Residual}`,
+      `worstStage2Iter=${worstStage2Iterations}`,
+      `worstStage2Residual=${worstStage2Residual}`,
+      `halvings=${totalStage1Halvings}/${totalStage2Halvings}`,
+      `positive=${allPositive}`,
     ].join(' ');
     console.log(`CORE_V2_GPU_HEVI_IMEX ${summary}`);
     $('log').textContent = summary;
     $('status').textContent = pass ? 'GATE PASS' : 'GATE FAIL';
     $('status').className = pass ? 'ok' : 'bad';
-    if (!pass) throw new Error(`Core v2 GPU IMEX-HEVI gate failed: ${summary}`);
+    if (!pass) throw new Error(`Core v2 GPU IMEX-HEVI multistep gate failed: ${summary}`);
   } finally {
     gpuStepper.destroy();
   }
