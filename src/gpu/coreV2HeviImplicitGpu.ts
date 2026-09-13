@@ -70,6 +70,11 @@ interface ResidualEvaluation {
   norm: number;
 }
 
+interface EquilibratedNewtonSystem {
+  batch: CoreV2GpuBlockTridiagonalBatch;
+  correctionScale: Float32Array;
+}
+
 /**
  * Correctness-first GPU implementation of one nonlinear diagonally implicit
  * Core v2 HEVI stage
@@ -158,11 +163,24 @@ export class CoreV2GpuHeviImplicitStage {
     return { value: out, norm };
   }
 
+  /**
+   * Equilibrate the physical Newton system before solving it in Float32.
+   *
+   * Raw conserved variables mix density, three momentum components and total
+   * energy, so I-alphaDt*dV/dY can contain entries separated by many orders of
+   * magnitude. Let D be a diagonal matrix of the same physical component
+   * scales used by the nonlinear residual. With deltaY=D*z, solve
+   *
+   *   D^-1 A D z = D^-1 rhs,
+   *
+   * then recover deltaY. This is algebraically the identical Newton step but
+   * gives the f32 pivot test a dimensionless, well-scaled 5x5 block.
+   */
   private assembleNewtonSystem(
     jacobian: Float32Array,
     residual: Float32Array,
     alphaDt: number,
-  ): CoreV2GpuBlockTridiagonalBatch {
+  ): EquilibratedNewtonSystem {
     const columnCount = this.geometry.horizontal.cellCount;
     const nz = this.geometry.nz;
     const blocks = columnCount * nz;
@@ -177,26 +195,53 @@ export class CoreV2GpuHeviImplicitStage {
     const diagonal = new Float32Array(blocks * BLOCK2);
     const upper = new Float32Array(blocks * BLOCK2);
     const rhs = new Float32Array(blocks * BLOCK);
+    const correctionScale = new Float32Array(blocks * BLOCK);
     const alpha = f32(alphaDt);
 
     for (let q = 0; q < blocks; q++) {
+      const k = q % nz;
       const jBase = q * CORE_V2_GPU_HEVI_JACOBIAN_FLOATS_PER_CELL;
       const blockBase = q * BLOCK2;
       for (let row = 0; row < BLOCK; row++) {
-        rhs[q * BLOCK + row] = f32(-residual[q * BLOCK + row]!);
+        const rowScale = f32(componentScale(this.reference, k, row));
+        rhs[q * BLOCK + row] = f32(-residual[q * BLOCK + row]! / rowScale);
+        correctionScale[q * BLOCK + row] = rowScale;
         for (let col = 0; col < BLOCK; col++) {
           const i = row * BLOCK + col;
-          lower[blockBase + i] = f32(-f32(alpha * jacobian[jBase + i]!));
-          diagonal[blockBase + i] = f32(
+          const diagonalColumnScale = f32(componentScale(this.reference, k, col));
+          const lowerColumnScale = f32(componentScale(this.reference, Math.max(0, k - 1), col));
+          const upperColumnScale = f32(componentScale(this.reference, Math.min(nz - 1, k + 1), col));
+
+          const rawLower = f32(-f32(alpha * jacobian[jBase + i]!));
+          const rawDiagonal = f32(
             (row === col ? 1 : 0) - f32(alpha * jacobian[jBase + BLOCK2 + i]!),
           );
-          upper[blockBase + i] = f32(
-            -f32(alpha * jacobian[jBase + 2 * BLOCK2 + i]!),
-          );
+          const rawUpper = f32(-f32(alpha * jacobian[jBase + 2 * BLOCK2 + i]!));
+
+          lower[blockBase + i] = f32(f32(rawLower * lowerColumnScale) / rowScale);
+          diagonal[blockBase + i] = f32(f32(rawDiagonal * diagonalColumnScale) / rowScale);
+          upper[blockBase + i] = f32(f32(rawUpper * upperColumnScale) / rowScale);
         }
       }
     }
-    return { columnCount, nz, lower, diagonal, upper, rhs };
+    return {
+      batch: { columnCount, nz, lower, diagonal, upper, rhs },
+      correctionScale,
+    };
+  }
+
+  private physicalCorrection(
+    normalized: Float32Array,
+    correctionScale: Float32Array,
+  ): Float32Array {
+    if (normalized.length !== correctionScale.length) {
+      throw new Error('Core v2 GPU implicit HEVI normalized correction size mismatch');
+    }
+    const out = new Float32Array(normalized.length);
+    for (let i = 0; i < normalized.length; i++) {
+      out[i] = f32(normalized[i]! * correctionScale[i]!);
+    }
+    return out;
   }
 
   private candidate(
@@ -261,12 +306,16 @@ export class CoreV2GpuHeviImplicitStage {
     for (let iteration = 1; iteration <= CORE_V2_GPU_HEVI_NEWTON_MAX_ITERATIONS; iteration++) {
       const j = await this.jacobian.computeTendencyJacobian(state);
       const system = this.assembleNewtonSystem(j, current.value, alphaDt);
-      const linear = await this.blockSolver.solve(system);
+      const linear = await this.blockSolver.solve(system.batch);
       let failedColumns = 0;
-      for (const status of linear.status) if (status !== 0) failedColumns++;
+      const statusCounts = [0, 0, 0, 0];
+      for (const status of linear.status) {
+        if (status < statusCounts.length) statusCounts[status] = statusCounts[status]! + 1;
+        if (status !== 0) failedColumns++;
+      }
       if (failedColumns > 0) {
         throw new Error(
-          `Core v2 GPU implicit HEVI block solve failed in ${failedColumns} columns`,
+          `Core v2 GPU implicit HEVI block solve failed in ${failedColumns} columns; status=${statusCounts.join('/')}`,
         );
       }
       for (const value of linear.solution) {
@@ -274,12 +323,13 @@ export class CoreV2GpuHeviImplicitStage {
           throw new Error('Core v2 GPU implicit HEVI block solve returned non-finite correction');
         }
       }
+      const delta = this.physicalCorrection(linear.solution, system.correctionScale);
 
       let acceptedState: Float32Array | null = null;
       let acceptedResidual: ResidualEvaluation | null = null;
       let lambda = 1;
       for (let half = 0; half <= CORE_V2_GPU_HEVI_LINE_SEARCH_MAX_HALVINGS; half++) {
-        const trial = this.candidate(state, linear.solution, lambda);
+        const trial = this.candidate(state, delta, lambda);
         if (trial) {
           const trialResidual = await this.residual(trial, base, alphaDt);
           if (Number.isFinite(trialResidual.norm) && trialResidual.norm < current.norm) {
