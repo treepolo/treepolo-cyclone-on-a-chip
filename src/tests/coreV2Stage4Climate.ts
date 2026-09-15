@@ -14,7 +14,7 @@ import { buildSphericalShellGeometry } from '../corev2/sphericalShellGeometry.js
 import { assert } from './assert.js';
 
 const DAY = 86400;
-const DT = 120;
+const DT = 60;
 const DAYS = 2;
 
 function finite(value: number, label: string): void {
@@ -36,17 +36,23 @@ let maxNewton1 = 0;
 let maxNewton2 = 0;
 
 for (let step = 0; step < steps; step++) {
-  const result = rotatingHeldSuarezStep(
-    fields,
-    DT,
-    geometry,
-    stencil,
-    reference,
-    EARTH,
-  );
-  fields = result.fields;
-  maxNewton1 = Math.max(maxNewton1, result.diagnostics.maxNewtonIterationsStage1);
-  maxNewton2 = Math.max(maxNewton2, result.diagnostics.maxNewtonIterationsStage2);
+  try {
+    const result = rotatingHeldSuarezStep(
+      fields,
+      DT,
+      geometry,
+      stencil,
+      reference,
+      EARTH,
+    );
+    fields = result.fields;
+    maxNewton1 = Math.max(maxNewton1, result.diagnostics.maxNewtonIterationsStage1);
+    maxNewton2 = Math.max(maxNewton2, result.diagnostics.maxNewtonIterationsStage2);
+  } catch (error) {
+    throw new Error(
+      `Stage 4 climate integration failed at step ${step}/${steps} (day=${step * DT / DAY}): ${String(error)}`,
+    );
+  }
 }
 
 const finalBudget = closedSystemBudget(fields, geometry, reference);
