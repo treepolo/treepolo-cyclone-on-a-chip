@@ -1,6 +1,7 @@
 import { EARTH, type PlanetConfig } from '../core/constants.js';
 import { applyHeldSuarezForcingPackedF32 } from '../corev2/heldSuarezForcing.js';
 import type { HydrostaticReference1D } from '../corev2/hydrostaticReference.js';
+import { applyCoreV2ModelTopSpongePackedF32 } from '../corev2/modelTopSponge.js';
 import type { LinearReconstructionStencil } from '../corev2/reconstruction.js';
 import type { SphericalShellGeometry } from '../corev2/sphericalShellGeometry.js';
 import { CoreV2GpuFoundation } from './coreV2GpuFoundation.js';
@@ -22,8 +23,9 @@ export interface CoreV2GpuRotatingDryResult {
  * The current Core v2 GPU path is intentionally still host-visible between
  * sub-operators, so this wrapper reuses the already hardware-gated exact
  * Coriolis kernel and IMEX-HEVI timestep instead of introducing another shader
- * architecture. Held-Suarez forcing is applied to the host-visible packed f32
- * state until a later performance pass makes the whole timestep buffer-resident.
+ * architecture. Held-Suarez forcing and the thin model-top radial absorber are
+ * applied to the host-visible packed f32 state until a later performance pass
+ * makes the whole timestep buffer-resident.
  */
 export class CoreV2GpuRotatingDryCore {
   private readonly geometry: SphericalShellGeometry;
@@ -52,6 +54,16 @@ export class CoreV2GpuRotatingDryCore {
     );
   }
 
+  private applyStage4Forcing(state: Float32Array, dt: number): void {
+    applyHeldSuarezForcingPackedF32(
+      state,
+      dt,
+      this.geometry,
+      this.reference,
+    );
+    applyCoreV2ModelTopSpongePackedF32(state, dt, this.geometry);
+  }
+
   async step(
     packedState: Float32Array,
     dt: number,
@@ -61,12 +73,7 @@ export class CoreV2GpuRotatingDryCore {
     }
 
     const forcedInput = packedState.slice();
-    applyHeldSuarezForcingPackedF32(
-      forcedInput,
-      0.5 * dt,
-      this.geometry,
-      this.reference,
-    );
+    this.applyStage4Forcing(forcedInput, 0.5 * dt);
 
     const omega: readonly [number, number, number] = [0, 0, this.planet.omega];
     const rotatedInput = await this.foundation.applyExactCoriolis(
@@ -81,12 +88,7 @@ export class CoreV2GpuRotatingDryCore {
       0.5 * dt,
     );
 
-    applyHeldSuarezForcingPackedF32(
-      rotatedOutput,
-      0.5 * dt,
-      this.geometry,
-      this.reference,
-    );
+    this.applyStage4Forcing(rotatedOutput, 0.5 * dt);
 
     return {
       packedState: rotatedOutput,
