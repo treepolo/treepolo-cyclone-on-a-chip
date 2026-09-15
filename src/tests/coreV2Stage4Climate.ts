@@ -14,7 +14,7 @@ import { buildSphericalShellGeometry } from '../corev2/sphericalShellGeometry.js
 import { assert } from './assert.js';
 
 const DAY = 86400;
-const DT = 180;
+const DT = 120;
 const DAYS = 2;
 
 function finite(value: number, label: string): void {
