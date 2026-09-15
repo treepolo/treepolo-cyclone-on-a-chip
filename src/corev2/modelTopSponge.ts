@@ -8,10 +8,15 @@ export interface ModelTopSpongeConfig {
   maxRate: number;
 }
 
-/** Thin radial-velocity absorber used only near the rigid model lid. */
+/**
+ * Thin radial-velocity absorber used only near the rigid model lid.
+ * The split cell-centered implementation uses a minutes-scale peak damping
+ * time; substantially stronger interface-implicit rates create a sharp
+ * vertical discontinuity when applied here as a separate source step.
+ */
 export const CORE_V2_MODEL_TOP_SPONGE: ModelTopSpongeConfig = {
   startFraction: 0.75,
-  maxRate: 0.2,
+  maxRate: 1 / 300,
 };
 
 export function coreV2ModelTopSpongeRate(
