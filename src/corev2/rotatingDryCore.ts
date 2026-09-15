@@ -6,6 +6,7 @@ import {
 } from './fields.js';
 import { applyHeldSuarezForcing } from './heldSuarezForcing.js';
 import type { HydrostaticReference1D } from './hydrostaticReference.js';
+import { applyCoreV2ModelTopSponge } from './modelTopSponge.js';
 import type { LinearReconstructionStencil } from './reconstruction.js';
 import {
   rotatingHeviImexSsp2Step,
@@ -24,17 +25,28 @@ function cloneFields(fields: ConservativeFields): ConservativeFields {
   return out;
 }
 
+function applyStage4Forcing(
+  fields: ConservativeFields,
+  dt: number,
+  geometry: SphericalShellGeometry,
+  reference: HydrostaticReference1D,
+): void {
+  applyHeldSuarezForcing(fields, dt, geometry, reference);
+  applyCoreV2ModelTopSponge(fields, dt, geometry);
+}
+
 /**
  * Stage-4 dry global timestep.
  *
- * Held-Suarez forcing is Strang-split around the already second-order rotating
- * conservative HEVI dynamics:
+ * Physical/climate forcing and the thin model-top wave absorber are Strang-split
+ * around the already second-order rotating conservative HEVI dynamics:
  *
  *   F(dt/2) -> C(dt/2) -> H(dt) -> C(dt/2) -> F(dt/2)
  *
- * F is Newtonian thermal relaxation plus near-surface tangential Rayleigh drag,
- * C is exact Coriolis rotation, and H is the conservative Euler+gravity HEVI
- * advance. No numerical damping, sponge, or global fixer is introduced here.
+ * F contains Held-Suarez thermal relaxation, near-surface tangential Rayleigh
+ * drag, and radial-only damping in the upper quarter of the domain to prevent
+ * gravity/acoustic waves reflecting from the rigid model lid. C is exact
+ * Coriolis rotation and H is the conservative Euler+gravity HEVI advance.
  */
 export function rotatingHeldSuarezStep(
   fields: ConservativeFields,
@@ -48,7 +60,7 @@ export function rotatingHeldSuarezStep(
     throw new Error(`invalid Core v2 rotating dry-core timestep: ${dt}`);
   }
   const work = cloneFields(fields);
-  applyHeldSuarezForcing(work, 0.5 * dt, geometry, reference);
+  applyStage4Forcing(work, 0.5 * dt, geometry, reference);
   const result = rotatingHeviImexSsp2Step(
     work,
     dt,
@@ -57,6 +69,6 @@ export function rotatingHeldSuarezStep(
     reference,
     planet,
   );
-  applyHeldSuarezForcing(result.fields, 0.5 * dt, geometry, reference);
+  applyStage4Forcing(result.fields, 0.5 * dt, geometry, reference);
   return result;
 }
