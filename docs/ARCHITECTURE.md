@@ -51,7 +51,7 @@ The hydrostatic approximation is a scale-justified approximation of the real equ
 
 每一步都要先通過量化驗收才進下一步（沿用 `VALIDATION_PLAN.md` 精神）。
 
-### R1 乾大氣氣候 / Dry climate — **進行中 / in progress**
+### R1 乾大氣氣候 / Dry climate — **完成 / done**（結果見 / results: `RESULTS_R1_DRY.md`）
 - Held–Suarez (1994) 強迫，T21 / T42 長期積分（200 天 spin-up + 300–500 天平均）。
 - 驗收：緯向平均 [u]、[T]、經圈流函數 ψ、渦動通量與 HS94 / 文獻 dry-core 比較（噴流強度與位置、熱帶地面東風、中緯地面西風、Hadley 與 Ferrel 胞）。
 - Jablonowski–Williamson 斜壓波（確定性溫帶氣旋、鋒面發展）。

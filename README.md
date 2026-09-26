@@ -10,8 +10,8 @@ v0.1 是一次**完整重新設計**（原因與路線圖見 [`docs/ARCHITECTURE
 
 - ✅ 全球譜動力核心：靜力原始方程、球諧轉換、σ 座標（Simmons–Burridge 能量／角動量守恆）、半隱式 leapfrog。
 - ✅ 基礎驗收：轉換恆等式達機器精度；靜止大氣保持靜止；20 天無強迫積分能量漂移 ~3e-7、質量 ~8e-7。
-- ✅ Held–Suarez 乾大氣氣候（T21 / T42）：由靜止等溫大氣自行發展出噴流、斜壓渦旋、Hadley 與 Ferrel 胞。
-- ✅ Jablonowski–Williamson 斜壓波：1 m/s 小擾動自行發展成溫帶氣旋與鋒面。
+- ✅ Held–Suarez 乾大氣氣候（T42，300 日平均）：由靜止大氣自行發展出三胞環流（Hadley／Ferrel／極地胞）、33 m/s @ 43° 的渦動驅動噴流、信風與中緯西風，與 HS94 參考氣候一致（[`docs/RESULTS_R1_DRY.md`](docs/RESULTS_R1_DRY.md)）。
+- ✅ Jablonowski–Williamson 斜壓波：1 m/s 小擾動在第 9 日自行發展成 949 hPa 的溫帶氣旋與冷暖鋒。
 - ✅ 瀏覽器 3D 地球：模式在 Web Worker 中即時積分，顯示溫度／風／渦度／氣壓、風場示蹤粒子與緯向平均剖面。
 - ⏭ 下一步：水汽與降水、灰體輻射、地表通量（濕水球）→ 海陸與季節（季風）→ GPU → 區域非靜力巢狀模式（颱風內核、超大胞、龍捲）。
 
