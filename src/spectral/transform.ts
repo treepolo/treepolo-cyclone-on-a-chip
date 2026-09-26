@@ -43,6 +43,8 @@ export class SpectralTransform {
   private readonly rowR: Float64Array;
   private readonly rowI: Float64Array;
   private readonly scratchPsi: SpectralField;
+  private readonly symR: Float64Array; private readonly symI: Float64Array;
+  private readonly antR: Float64Array; private readonly antI: Float64Array;
   private readonly scratchChi: SpectralField;
 
   constructor(trunc: number, nlon?: number) {
@@ -103,6 +105,8 @@ export class SpectralTransform {
     this.rowR = new Float64Array(T + 1);
     this.rowI = new Float64Array(T + 1);
     this.scratchPsi = this.newSpec();
+    this.symR = new Float64Array(hlf); this.symI = new Float64Array(hlf);
+    this.antR = new Float64Array(hlf); this.antI = new Float64Array(hlf);
     this.scratchChi = this.newSpec();
   }
 
@@ -178,21 +182,24 @@ export class SpectralTransform {
     const L = kind === 'P' ? this.P : this.H;
     const parityShift = kind === 'P' ? 0 : 1;
     const w = this.weight;
+    const sr = this.symR, si = this.symI, ar = this.antR, ai = this.antI;
     for (let m = 0; m <= T; m++) {
+      // weighted symmetric / antisymmetric Fourier coefficients for this m
+      for (let j = 0; j < hlf; j++) {
+        const oN = j * (T + 1) + m, oS = (nlat - 1 - j) * (T + 1) + m, wj = w[j]!;
+        sr[j] = (fr[oN]! + fr[oS]!) * wj; si[j] = (fi[oN]! + fi[oS]!) * wj;
+        ar[j] = (fr[oN]! - fr[oS]!) * wj; ai[j] = (fi[oN]! - fi[oS]!) * wj;
+      }
       const s0 = this.mStart[m]!;
       for (let nn = m; nn <= T; nn++) {
-        const idx = s0 + nn - m;
+        const idx = s0 + nn - m, base = idx * hlf;
         const useSym = (((nn - m) + parityShift) & 1) === 0;
-        let ar = 0, ai = 0;
-        for (let j = 0; j < hlf; j++) {
-          const oN = j * (T + 1) + m, oS = (nlat - 1 - j) * (T + 1) + m;
-          const lw = L[idx * hlf + j]! * w[j]!;
-          if (useSym) { ar += (fr[oN]! + fr[oS]!) * lw; ai += (fi[oN]! + fi[oS]!) * lw; }
-          else { ar += (fr[oN]! - fr[oS]!) * lw; ai += (fi[oN]! - fi[oS]!) * lw; }
-        }
-        if (imDeriv) { const t = ar; ar = -m * ai; ai = m * t; }
-        ore[idx] = ore[idx]! + scale * ar;
-        oim[idx] = oim[idx]! + scale * ai;
+        const xr = useSym ? sr : ar, xi = useSym ? si : ai;
+        let accR = 0, accI = 0;
+        for (let j = 0; j < hlf; j++) { const l = L[base + j]!; accR += xr[j]! * l; accI += xi[j]! * l; }
+        if (imDeriv) { const t = accR; accR = -m * accI; accI = m * t; }
+        ore[idx] = ore[idx]! + scale * accR;
+        oim[idx] = oim[idx]! + scale * accI;
       }
     }
   }

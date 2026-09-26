@@ -19,8 +19,8 @@ export const HS94 = {
 
 export function heldSuarezTeq(sinLat: number, p: number, air: DryAir): number {
   const c2 = 1 - sinLat * sinLat;
-  const pr = p / air.pRef;
-  const t = (HS94.T0 - HS94.deltaTy * sinLat * sinLat - HS94.deltaThetaZ * Math.log(pr) * c2) * Math.pow(pr, air.kappa);
+  const lnp = Math.log(p / air.pRef);
+  const t = (HS94.T0 - HS94.deltaTy * sinLat * sinLat - HS94.deltaThetaZ * lnp * c2) * Math.exp(air.kappa * lnp);
   return Math.max(HS94.Tmin, t);
 }
 

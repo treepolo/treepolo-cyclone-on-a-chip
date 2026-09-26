@@ -30,11 +30,16 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <div class="muted">全球譜模式：靜力原始方程、σ 座標、半隱式時間積分。天氣系統只由物理方程演化，沒有任何「生成天氣」的程式。 / Global spectral model: hydrostatic primitive equations, σ coordinate, semi-implicit time stepping. Weather emerges only from the equations; nothing generates weather directly.</div>
 
 <h2>實驗 / Experiment</h2>
-<label for="preset">乾大氣 Held–Suarez 基準 / Dry Held–Suarez benchmark</label>
+<label for="preset">實驗設定 / Experiment preset</label>
 <select id="preset">
+<optgroup label="乾大氣氣候 Held–Suarez / Dry climate (Held–Suarez)">
 <option value="T21L20">T21 L20（快速 / fast）</option>
 <option value="T42L20" selected>T42 L20（標準 / standard）</option>
 <option value="T63L20">T63 L20（精細 / fine）</option>
+</optgroup>
+<optgroup label="斜壓波 / Baroclinic wave (Jablonowski–Williamson)">
+<option value="JW_T42">T42 L26：溫帶氣旋與鋒面自行生成 / extratropical cyclone and fronts develop</option>
+</optgroup>
 </select>
 <div class="controls"><button id="run">執行 / Run</button><button id="resetAvg">重設平均 / Reset average</button></div>
 <label for="speed">每輪步數（速度）/ Steps per tick (speed)</label>

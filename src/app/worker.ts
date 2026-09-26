@@ -4,6 +4,7 @@ import { DAY, EARTH } from '../core/constants.js';
 import { Dycore } from '../model/dycore.js';
 import { HS_PRESETS, createHeldSuarez } from '../model/presets.js';
 import { ZonalMeanAccumulator } from '../model/diagnostics.js';
+import { createJablonowski } from '../model/jablonowski.js';
 import type { FieldId, FromWorker, ToWorker } from './protocol.js';
 
 let model: Dycore | null = null;
@@ -22,9 +23,16 @@ self.onmessage = (ev: MessageEvent<ToWorker>): void => {
   const m = ev.data;
   try {
     if (m.type === 'init') {
-      const cfg = HS_PRESETS[m.preset];
-      if (!cfg) throw new Error(`unknown preset ${m.preset}`);
-      model = createHeldSuarez(cfg);
+      let cfg: { trunc: number; dt: number };
+      if (m.preset === 'JW_T42') {
+        cfg = { trunc: 42, dt: 900 };
+        model = createJablonowski({ trunc: 42, levels: 26, dt: 900, perturb: true });
+      } else {
+        const hs = HS_PRESETS[m.preset];
+        if (!hs) throw new Error(`unknown preset ${m.preset}`);
+        cfg = hs;
+        model = createHeldSuarez(hs);
+      }
       acc = new ZonalMeanAccumulator(model.tr.nlat, model.tr.nlon, model.K);
       accFrom = 0;
       ps0 = model.meanSurfacePressure();

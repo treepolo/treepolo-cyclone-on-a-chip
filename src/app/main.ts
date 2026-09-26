@@ -148,6 +148,10 @@ function init(): void {
   running = false; syncRun();
   const p = $<HTMLSelectElement>('preset').value;
   $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : '900';
+  if (p === 'JW_T42') {
+    $<HTMLSelectElement>('field').value = 'ps';
+    log('斜壓波：第 6–10 日可見氣旋加深與鋒面 / Baroclinic wave: cyclones deepen and fronts form around days 6–10');
+  }
   log(`建立模式中 / Building model: ${p}`);
   send({ type: 'init', preset: p });
   send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
