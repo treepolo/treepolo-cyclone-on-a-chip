@@ -1,67 +1,58 @@
-# treepolo Cyclone on a Chip
+# treepolo Cyclone on a Chip / 晶片上的旋風
 
-個人用的全球三維大氣物理模擬器。計算域是具有實際厚度的 3D spherical atmosphere，正式動力核心直接計算垂直速度與對流；長期目標是讓三胞環流、西風帶、Rossby 波與槽脊、鋒面、溫帶氣旋、濕對流、暖心熱帶氣旋與季風等現象由物理方程自然演化，而非用規則直接生成天氣系統。
+個人用的 3D 地球大氣物理模擬器。目標是用**真實物理單位與方程式**，讓三胞環流、噴流、氣團、鋒面、溫帶氣旋、高層冷心低壓、季風、熱帶氣旋（颱風眼、眼牆、雙眼牆與眼牆置換）、中尺度對流系統、龍捲風等現象**由方程自然演化**，而不是寫程式直接生成天氣。
 
-## 目前進度
+A personal 3D planetary atmosphere simulator. Weather must emerge from real equations in SI units; nothing in the code generates a weather system directly.
 
-- Stage 1：技術研究與核心選型 — 完成。
-- Stage 2：風險 prototype + 完整物理／數值／資料／驗證規格 — 完成。
-- Stage 3：最小三維 dry non-rotating core — **完成**。CPU Float64 7/7、真機 WebGPU pipeline/smoke、1000-step hydrostatic-rest / conservation / CPU-vs-GPU agreement 全部通過。
-- Stage 4：旋轉全球乾大氣 — **實作與除錯中，尚未封關。** Rotation、Coriolis、3-D momentum transport、Held–Suarez forcing、model-top sponge 與 acoustic-divergence damping 已實作。短期 GPU/CPU agreement 曾通過；30-day gate 暴露 long-run acoustic/divergence instability，最新修正需重新驗收。
+## 目前狀態 / Status（v0.1）
 
-Stage 2：`docs/STAGE2_COMPLETE_SPEC.md`  
-Stage 3：`docs/STAGE3_IMPLEMENTATION.md`  
-Stage 4：`docs/STAGE4_IMPLEMENTATION.md`  
-Stage 4 long-run failure log：`docs/STAGE4_LONGRUN_FAILURE_20260904.md`
+v0.1 是一次**完整重新設計**（原因與路線圖見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)）：
+
+- ✅ 全球譜動力核心：靜力原始方程、球諧轉換、σ 座標（Simmons–Burridge 能量／角動量守恆）、半隱式 leapfrog。
+- ✅ 基礎驗收：轉換恆等式達機器精度；靜止大氣保持靜止；20 天無強迫積分能量漂移 ~3e-7、質量 ~8e-7。
+- ✅ Held–Suarez 乾大氣氣候（T21 / T42）：由靜止等溫大氣自行發展出噴流、斜壓渦旋、Hadley 與 Ferrel 胞。
+- ✅ Jablonowski–Williamson 斜壓波：1 m/s 小擾動自行發展成溫帶氣旋與鋒面。
+- ✅ 瀏覽器 3D 地球：模式在 Web Worker 中即時積分，顯示溫度／風／渦度／氣壓、風場示蹤粒子與緯向平均剖面。
+- ⏭ 下一步：水汽與降水、灰體輻射、地表通量（濕水球）→ 海陸與季節（季風）→ GPU → 區域非靜力巢狀模式（颱風內核、超大胞、龍捲）。
 
 ## 執行 / Run
 
 ```bash
 npm install
-npm test
-npm run serve
+npm test          # 轉換與動力核心驗收 / transform + dycore regressions
+npm run serve     # http://127.0.0.1:5173/
 ```
 
-Stage 3 Debug Viewer：`http://127.0.0.1:5173/`  
-Stage 4 Validation：`http://127.0.0.1:5173/stage4.html`
-
-Stage 4 頁面啟動時會建立並執行 rotating + acoustic-divergence-filter + model-top-sponge WebGPU smoke。通過後依序執行：
-
-1. `執行一致性驗證 / Run agreement validation`
-2. `執行 30 日驗證 / Run 30-day validation`
-
-最新 acoustic filter 加入後，請先確認 `npm test` 顯示 Stage 3 `7/7` 與 Stage 4 `6/6`，再跑真機 gate。真機結果未通過以前，Stage 4 不標記 COMPLETE。
-
-使用者介面依 `docs/UI_SPEC.md` 固定採繁體中文 + English 同時顯示，不使用語言切換作為主要介面模式。
-
-## Stage 3 final GPU result
-
-Windows + Chrome，`6 × 8 × 8 × 32` debug grid，`dt = 0.25 s`，1000 steps：
-
-- GPU dry-mass drift：`4.341e-7`。
-- GPU resting-atmosphere max `|w|`：`9.828e-4 m/s`。
-- `rhoD` CPU/GPU relative L2：`1.605e-6`。
-- `rhoThetaM` CPU/GPU relative L2：`8.172e-7`。
-- max `|Δu| = 0`。
-- max `|Δw| = 9.828e-4 m/s`。
-- 無 NaN、負密度或負壓力錯誤。
-
-所有數值均通過事前鎖定的 Stage 3 gate。`max |w|` 已接近目前 gate，因此後續長時間積分持續保留 hydrostatic/balance residual regression。
-
-## Stage 2 prototypes
+長期氣候積分 / Long climate runs (Node, writes `results/<preset>/`)：
 
 ```bash
-python prototypes/stage2_reference.py
-python prototypes/stage2_reference.py --full
+npm run climate -- T42L20 200 300     # preset, spin-up days, averaging days
+node dist/tools/runJablonowski.js 42 26 900 10
 ```
 
-P1 WebGPU 裝置 benchmark：由本機 HTTP server 開啟 `prototypes/p1_webgpu.html`，詳細方式見 `prototypes/README.md`。
+輸出包含 `summary.txt`、`climate.json` 與緯向平均 [u]、[T]、ψ、渦動通量的 SVG 圖。
 
-## 核心硬限制
+## 程式結構 / Layout
 
-- 真正 3D、有厚度的大氣球殼。
-- fully compressible、non-hydrostatic atmosphere。
-- 天氣系統不可硬編生成。
-- Eulerian field 才是物理狀態；可見粒子只作 Lagrangian tracer / visualization。
-- mass / water transport 使用 conservative finite-volume flux。
-- 每一層物理在加入下一層以前都要通過 quantitative benchmark。
+| 路徑 / Path | 內容 / Contents |
+|---|---|
+| `src/spectral/` | Gaussian 緯度、實數 FFT、球諧轉換（純量、梯度、ζ/D ↔ U/V） |
+| `src/model/dycore.ts` | 靜力原始方程譜動力核心 |
+| `src/model/vertical.ts` | σ 座標與 Simmons–Burridge 垂直離散 |
+| `src/model/heldSuarez.ts` | Held–Suarez (1994) 強迫 |
+| `src/model/jablonowski.ts` | Jablonowski–Williamson (2006) 斜壓波初始場 |
+| `src/model/diagnostics.ts` | 緯向平均、經圈流函數、渦動通量 |
+| `src/app/` | 瀏覽器介面：WebGL2 地球、Web Worker 模式、剖面圖 |
+| `src/tools/` | Node 長期積分與 SVG 繪圖 |
+| `src/tests/` | 驗收測試 |
+| `docs/` | 架構與路線圖、物理規格、驗收計畫、UI 規格 |
+
+## 核心硬限制 / Hard constraints
+
+- 真實物理方程與 SI 單位；參數化必須有文獻依據與物理單位。
+- 天氣系統不可硬編生成；只能設定初始場、邊界條件、地表條件與物理源項。
+- Eulerian 場是唯一物理狀態；畫面上的粒子只是無質量示蹤粒子。
+- 每層物理先通過量化驗收才加入下一層；不以加強阻尼掩蓋錯誤。
+- 介面繁體中文 + English 同時顯示（[`docs/UI_SPEC.md`](docs/UI_SPEC.md)）。
+
+舊版（v0.0.x，立方球全可壓縮 WebGPU 核心）保存在 git 歷史，最後一個舊版 commit 為 `3cc0c9e`。

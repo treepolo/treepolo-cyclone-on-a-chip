@@ -3,48 +3,76 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>晶片上的旋風 / Cyclone on a Chip — 階段 3 / Stage 3</title>
+<title>晶片上的旋風 / Cyclone on a Chip</title>
 <style>
-html,body{margin:0;height:100%;background:#05070a;color:#dbe5ef;font-family:ui-monospace,SFMono-Regular,Consolas,"Noto Sans TC","Microsoft JhengHei",monospace}body{display:grid;grid-template-columns:minmax(0,1fr) 380px}canvas{width:100%;height:100%;display:block}.panel{padding:14px;border-left:1px solid #26303b;overflow:auto;background:#0a0e13}.panel h1{font-size:16px;margin:0 0 10px}.panel h2{font-size:13px;margin:16px 0 6px}.row{display:flex;justify-content:space-between;gap:12px;font-size:12px;line-height:1.55}.row span:first-child{min-width:0}.row span:last-child{text-align:right}.muted{color:#8da0b3}.ok{color:#91d6a7}.bad{color:#ff9a9a}button,select,input{font:inherit;background:#101821;color:#dbe5ef;border:1px solid #334354;padding:5px 7px}button:disabled{opacity:.45;cursor:not-allowed}.controls{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:#05070a;padding:8px;border:1px solid #1d2833;min-height:100px;overflow-wrap:anywhere}.validation{border:1px solid #26303b;padding:9px;margin-top:8px;background:#070b10}.validation progress{width:100%;height:12px;margin:7px 0}.small{font-size:11px;line-height:1.4}@media(max-width:760px){body{grid-template-columns:1fr;grid-template-rows:62vh 38vh}.panel{border-left:0;border-top:1px solid #26303b}}
+:root{--bg:#05070a;--panel:#0a0e13;--line:#26303b;--fg:#dbe5ef;--muted:#8da0b3}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+body{display:grid;grid-template-columns:minmax(0,1fr) 400px}
+#globe{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+.panel{padding:14px 16px;border-left:1px solid var(--line);overflow:auto;background:var(--panel);font-size:13px}
+h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:16px 0 6px;color:#b8c6d4}
+.muted{color:var(--muted);font-size:12px;line-height:1.5}
+.row{display:flex;justify-content:space-between;gap:10px;line-height:1.7}.row span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+button,select,input{font:inherit;background:#101821;color:var(--fg);border:1px solid #334354;padding:5px 8px;border-radius:4px}
+label{display:block;margin:6px 0 2px;color:#b8c6d4}
+select,input[type=range]{width:100%;box-sizing:border-box}
+.controls{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#070b10;border:1px solid #1d2833}
+.log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:var(--bg);padding:8px;border:1px solid #1d2833;max-height:120px;overflow:auto}
+#legend{font-size:12px;color:var(--muted)}
+@media(max-width:820px){body{grid-template-columns:1fr;grid-template-rows:60vh auto}.panel{border-left:0;border-top:1px solid var(--line)}}
 </style>
 </head>
 <body>
-<canvas id="view"></canvas>
+<canvas id="globe"></canvas>
 <section class="panel">
-<h1>晶片上的旋風 / Cyclone on a Chip — 階段 3 / Stage 3</h1>
-<div class="muted">乾燥 / 非旋轉 / 平坦地表除錯核心 / Dry / non-rotating / flat-surface debug core</div>
-<div class="controls"><button id="reset">重設 / Reset</button><button id="bubble">熱泡 / Thermal bubble</button><button id="step">單步 / Step</button><button id="run">執行 / Run</button></div>
-<div class="row"><span>WebGPU 狀態 / Status</span><span id="gpu">檢查中 / Checking</span></div>
-<div class="row"><span>網格 / Grid</span><span id="grid"></span></div>
-<div class="row"><span>網格單元 / Cells</span><span id="cells"></span></div>
-<div class="row"><span>大氣頂 / Atmosphere top</span><span>40 km</span></div>
+<h1>晶片上的旋風 / Cyclone on a Chip</h1>
+<div class="muted">全球譜模式：靜力原始方程、σ 座標、半隱式時間積分。天氣系統只由物理方程演化，沒有任何「生成天氣」的程式。 / Global spectral model: hydrostatic primitive equations, σ coordinate, semi-implicit time stepping. Weather emerges only from the equations; nothing generates weather directly.</div>
+
+<h2>實驗 / Experiment</h2>
+<label for="preset">乾大氣 Held–Suarez 基準 / Dry Held–Suarez benchmark</label>
+<select id="preset">
+<option value="T21L20">T21 L20（快速 / fast）</option>
+<option value="T42L20" selected>T42 L20（標準 / standard）</option>
+<option value="T63L20">T63 L20（精細 / fine）</option>
+</select>
+<div class="controls"><button id="run">執行 / Run</button><button id="resetAvg">重設平均 / Reset average</button></div>
+<label for="speed">每輪步數（速度）/ Steps per tick (speed)</label>
+<input id="speed" type="range" min="1" max="24" value="6" />
+
+<h2>顯示 / Display</h2>
+<label for="field">場 / Field</label>
+<select id="field">
+<option value="T">溫度 / Temperature</option>
+<option value="u">緯向風 / Zonal wind u</option>
+<option value="v">經向風 / Meridional wind v</option>
+<option value="speed">風速 / Wind speed</option>
+<option value="vor">相對渦度 / Relative vorticity</option>
+<option value="div">輻散 / Divergence</option>
+<option value="ps">地面氣壓 / Surface pressure</option>
+</select>
+<label for="level">垂直層 / Model level <span id="levelLabel" class="muted"></span></label>
+<input id="level" type="range" min="0" max="19" value="19" />
+<label><input id="tracers" type="checkbox" checked /> 風場示蹤粒子（無質量，只作顯示）/ Wind tracers (massless, display only)</label>
+<div id="legend"></div>
+
 <h2>診斷 / Diagnostics</h2>
-<div class="row"><span>乾空氣質量漂移 / Dry mass drift</span><span id="mass">—</span></div>
-<div class="row"><span>最大 |w| / Max |w|</span><span id="wmax">—</span></div>
-<div class="row"><span>最低 ρ / Min ρ</span><span id="rhomin">—</span></div>
-<div class="row"><span>最低 p / Min p</span><span id="pmin">—</span></div>
-<div class="row"><span>模擬時間 / Sim time</span><span id="time">0 s</span></div>
+<div class="row"><span>網格 / Grid</span><span id="grid">—</span></div>
+<div class="row"><span>模式日 / Model day</span><span id="day">0</span></div>
+<div class="row"><span>速度 / Speed</span><span id="rate" data-dt="1200">—</span><span id="dt" hidden></span></div>
+<div class="row"><span>最大風速 / Max wind</span><span id="maxwind">—</span></div>
+<div class="row"><span>全球平均地面氣壓漂移 / Mean ps drift</span><span id="psdrift">—</span></div>
 
-<h2>GPU 多步驗證 / GPU Multi-step Validation</h2>
-<div class="validation">
-<div class="controls"><button id="gpuValidate" disabled>執行 1000 步驗證 / Run 1000-step validation</button></div>
-<div class="row"><span>驗證狀態 / Validation status</span><span id="gpuValidationStatus">等待 smoke / Waiting for smoke</span></div>
-<progress id="gpuValidationProgress" value="0" max="1000"></progress>
-<div id="gpuValidationProgressText" class="muted small">0 / 1,000 steps</div>
-<div class="row"><span>GPU 質量漂移 / GPU mass drift</span><span id="gpuLongMass">—</span></div>
-<div class="row"><span>GPU 最大 |w| / GPU max |w|</span><span id="gpuLongW">—</span></div>
-<div class="row"><span>ρ 相對 L2 / ρ relative L2</span><span id="gpuRhoL2">—</span></div>
-<div class="row"><span>ρθ 相對 L2 / ρθ relative L2</span><span id="gpuRhoThetaL2">—</span></div>
-<div class="row"><span>最大 |Δu| / Max |Δu|</span><span id="gpuUDiff">—</span></div>
-<div class="row"><span>最大 |Δw| / Max |Δw|</span><span id="gpuWDiff">—</span></div>
-<div class="row"><span>驗證耗時 / Validation elapsed</span><span id="gpuValidationElapsed">—</span></div>
-<div class="muted small" style="margin-top:7px">以完全靜止的靜力大氣同時跑 CPU Float64 與 GPU Float32，檢查 1、10、100、250、500、1000 步。 / Runs the same resting hydrostatic atmosphere on CPU Float64 and GPU Float32, checking steps 1, 10, 100, 250, 500, and 1000.</div>
-</div>
+<h2>緯向平均 / Zonal means</h2>
+<div id="zonalInfo" class="muted">執行後每 6 模式小時取樣 / Sampled every 6 model hours once running</div>
+<canvas id="secU" class="sec"></canvas>
+<canvas id="secT" class="sec"></canvas>
+<canvas id="secPsi" class="sec"></canvas>
+<div class="muted">ψ 正值（紅）為北半球順時針（赤道上升、向北）翻轉。三胞環流 = 各半球 Hadley／Ferrel／極地三個符號交替的翻轉胞。 / Positive ψ (red) = clockwise overturning in this view. The three-cell circulation is three alternating-sign cells per hemisphere: Hadley, Ferrel, polar.</div>
 
-<h2>檢視器 / Viewer</h2>
-<div class="muted">拖曳可旋轉；滾輪或雙指縮放。畫面中的點是取樣的三維大氣網格單元；徑向位移有視覺誇張，讓大氣厚度可見。 / Drag to rotate; wheel or pinch to zoom. Points are sampled 3D air cells; radial displacement is visually exaggerated so atmospheric thickness is visible.</div>
-<h2>紀錄 / Log</h2><div id="log" class="log"></div>
+<h2>紀錄 / Log</h2>
+<div id="log" class="log"></div>
 </section>
-<script type="module" src="./dist/main.js"></script>
+<script type="module" src="./dist/app/main.js"></script>
 </body>
 </html>

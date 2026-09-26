@@ -1,28 +1,26 @@
-export interface PlanetConfig {
-  radius: number;
-  omega: number;
-  gravity: number;
+// Physical constants (SI). All model code reads planet / gas properties from here.
+
+export interface Planet {
+  radius: number;      // m
+  omega: number;       // s^-1
+  gravity: number;     // m s^-2
 }
 
-export interface AtmosphereConfig {
-  rd: number;
-  rv: number;
-  cpd: number;
-  cvd: number;
-  gamma: number;
-  kappa: number;
-  pRef: number;
+export interface DryAir {
+  rd: number;          // J kg^-1 K^-1
+  cp: number;          // J kg^-1 K^-1
+  kappa: number;       // R_d / c_p
+  pRef: number;        // Pa
 }
 
-export const EARTH: PlanetConfig = {
+export const EARTH: Planet = {
   radius: 6.371e6,
   omega: 7.292115e-5,
   gravity: 9.80665,
 };
 
-export const DRY_AIR: AtmosphereConfig = (() => {
-  const rd = 287.05;
-  const cpd = 1004.5;
-  const cvd = cpd - rd;
-  return { rd, rv: 461.5, cpd, cvd, gamma: cpd / cvd, kappa: rd / cpd, pRef: 100000 };
-})();
+const rd = 287.05;
+const cp = 1004.5;
+export const DRY_AIR: DryAir = { rd, cp, kappa: rd / cp, pRef: 1.0e5 };
+
+export const DAY = 86400;

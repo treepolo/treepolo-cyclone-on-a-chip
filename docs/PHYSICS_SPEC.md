@@ -1,8 +1,10 @@
-# Physics Specification v1
+# Physics Specification v2（2026-09-26 依新架構修訂 / revised for the v0.1 architecture）
 
 ## 1. 物理目標與硬限制
 
-Cyclone on a Chip 的正式大氣計算域是具有有限厚度的三維球殼；每一個 air column 有多個垂直層，正式動力核心直接預報垂直速度，因此上升、下沉、深對流、眼牆、高層外流與噴流垂直切變都必須由方程產生。禁止直接寫「生成颱風」「生成溫帶氣旋」「生成鋒面」「生成三胞環流」等現象規則；程式可以指定初始場、邊界條件、地表條件與物理源項，天氣結構必須由方程自行演化。
+Cyclone on a Chip 的大氣計算域是具有有限厚度的三維球殼，每個 air column 有多個垂直層；上升、下沉、深對流、眼牆、高層外流與噴流垂直切變都必須由方程產生。禁止直接寫「生成颱風」「生成溫帶氣旋」「生成鋒面」「生成三胞環流」等現象規則；程式可以指定初始場、邊界條件、地表條件與物理源項，天氣結構必須由方程自行演化。
+
+不同尺度由不同層級的模式負責（見 `ARCHITECTURE.md`）：全球模式用靜力原始方程（對 >10 km 格距是真實方程的嚴格尺度近似）；需要非靜力效應的現象（眼牆內核、對流胞、龍捲）由區域／局地的全可壓縮非靜力巢狀模式計算。
 
 ## 2. 單位與地球 preset
 
@@ -21,39 +23,29 @@ Cyclone on a Chip 的正式大氣計算域是具有有限厚度的三維球殼�
 
 日後可修改行星半徑、自轉率、重力、日照等做理想化實驗。
 
-## 3. 正式動力核心
+## 3. 動力核心 / Dynamical cores
 
-reference physics 採 rotating、fully compressible、non-hydrostatic Euler atmosphere。Earth preset 第一版使用 traditional shallow-atmosphere approximation；這只忽略高度相對地球半徑很小時的部分 deep-atmosphere metric terms，完全不刪除垂直維度，也不把垂直動量改成 hydrostatic constraint。
+### 3.1 全球模式：靜力原始方程（已實作）
 
-### 3.1 乾空氣質量
+σ = p/p_s 座標，traditional shallow-atmosphere approximation：
 
-`∂rho_d/∂t + div(rho_d u) = 0`
+- 水平動量（向量不變式）：`∂v/∂t = −(ζ+f) k×v − σ̇ ∂v/∂σ − ∇(Φ + ½|v|²) − R_d T ∇ln p_s + F`
+- 熱力學：`∂T/∂t = −v·∇T − σ̇ ∂T/∂σ + κ T ω/p + Q`
+- 連續方程：`∂ln p_s/∂t = −∫₀¹ (D + v·∇ln p_s) dσ`
+- 靜力方程：`∂Φ/∂ln σ = −R_d T`
+- 理想氣體：`p = ρ R_d T`
 
-乾空氣是基本 conserved mass。加入水物質後仍以 dry-air-coupled variables 為主，避免凝結與蒸發在人為改變乾空氣總量。
+其中 `f = 2Ω sin φ`，F 與 Q 由物理參數化提供（有明確單位 m s⁻² 與 K s⁻¹）。離散方法見 `ARCHITECTURE.md` §2。
 
-### 3.2 三維動量
+加入水汽後改用虛溫 `T_v = T (1 + (R_v/R_d − 1) q_v)` 於靜力方程與氣壓梯度力，水物質以相對乾空氣或濕空氣的 mixing ratio 預報，輸送必須正定且守恆。
 
-連續方程概念：
+### 3.2 區域／局地模式：全可壓縮非靜力 Euler 方程（R5 起）
 
-`∂(rho_m u)/∂t + div(rho_m u⊗u) + grad(p) = -rho_m grad(Phi) - 2 rho_m Omega×u + F`
+`∂ρ_d/∂t + ∇·(ρ_d u) = 0`
 
-`u` 是真正三維速度，`rho_m` 包含乾空氣及所有水物質質量。離散實作使用 staggered velocity / mass flux，因此不要求程式逐字照 Cartesian conservative form；但是壓力梯度、重力、科氏力、摩擦／湍混合都必須有明確來源與診斷。
+`∂(ρ_m u)/∂t + ∇·(ρ_m u⊗u) + ∇p = −ρ_m g k − 2ρ_m Ω×u + F`
 
-### 3.3 熱力預報量
-
-鎖定 dry-density-coupled moist potential-temperature family，而不在 WebGPU `f32` 直接預報巨大背景 total energy。
-
-`theta = T (p_ref/p)^kappa`
-
-`theta_m = theta * [1 + (R_v/R_d) q_v]`
-
-其中 `q_v` 是相對乾空氣質量的水汽 mixing ratio。cell prognostic 儲存 `rho_d theta_m`；terrain coordinate 實作時再乘對應 Jacobian/metric volume factor。
-
-在 physical-volume form，壓力由 equation of state 診斷：
-
-`p = p_ref * [R_d rho_d theta_m / p_ref]^gamma`
-
-這個選擇與 MPAS-A 類 fully compressible non-hydrostatic core 的做法一致，而且適合 hydrostatic reference-state / perturbation single-precision strategy。
+熱力預報量採 `ρ_d θ_m`，`θ_m = θ [1 + (R_v/R_d) q_v]`，壓力由狀態方程 `p = p_ref [R_d ρ_d θ_m / p_ref]^γ` 診斷（MPAS／CM1 類做法）。笛卡兒 C 網格、分裂顯式聲波 + 垂直隱式。
 
 ## 4. 水物質與濕熱力學
 
@@ -75,8 +67,7 @@ Stage 5 起至少加入：
 ### Dry core
 - gravity
 - planetary rotation / Coriolis
-- model-top sponge，只處理人工上邊界反射
-- controlled numerical diffusion / divergence damping
+- scale-selective ∇⁸ hyperdiffusion（只作用於截斷尺度附近，e-folding 0.1–0.25 day）
 
 ### Idealized global circulation
 - Held–Suarez 類 Newtonian thermal relaxation

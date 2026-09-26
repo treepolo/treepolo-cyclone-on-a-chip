@@ -1,3 +1,15 @@
-export function assert(cond:unknown,msg:string):asserts cond { if(!cond) throw new Error(msg); }
-export function near(a:number,b:number,tol:number,msg:string):void { if(Math.abs(a-b)>tol) throw new Error(`${msg}: got ${a}, expected ${b}, |err|=${Math.abs(a-b)} > ${tol}`); }
-export function relative(a:number,b:number,tol:number,msg:string):void { const d=Math.abs(a-b)/Math.max(Math.abs(b),1e-300); if(d>tol)throw new Error(`${msg}: rel=${d} > ${tol}`); }
+let passed = 0;
+let failed = 0;
+
+export function check(name: string, ok: boolean, value?: number | string): void {
+  const v = value === undefined ? '' : `  (${typeof value === 'number' ? value.toExponential(3) : value})`;
+  if (ok) { passed++; console.log(`  PASS ${name}${v}`); }
+  else { failed++; console.log(`  FAIL ${name}${v}`); }
+}
+
+export function summary(suite: string): void {
+  console.log(`${suite}: ${passed}/${passed + failed} passed`);
+  if (failed > 0) process.exitCode = 1;
+}
+
+export { rng } from '../core/random.js';

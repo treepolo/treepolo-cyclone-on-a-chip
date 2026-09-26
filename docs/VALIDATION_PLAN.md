@@ -1,28 +1,22 @@
-# Validation Plan v1
+# Validation Plan v2（2026-09-26 依新架構修訂 / revised for the v0.1 architecture）
 
 原則：每一層物理在加入下一層以前先通過自己的 quantitative tests；畫面「像天氣」不能當驗收。
 
-## V0 — geometry / transport infrastructure
+## V0 — spectral transform infrastructure（`src/tests/spectral.ts`，已通過 / passing）
 
-1. cubed-sphere total area = `4 pi R^2`。
-2. 所有 interior/seam edges exactly two neighbors。
-3. uniform scalar field 的離散 flux divergence = 0 within tolerance。
-4. solid-body rotation passive tracer 一圈後 global mass drift：CPU Float64 ≤ `1e-12`；GPU Float32 初始 target ≤ `1e-6 relative`，之後依 reduction/flux method 收緊。
-5. positive-definite transport：若 initial `q>=0`，不得產生有物理量級的負值。
-6. seam error 不得比同解析度 panel interior error 出現 order-of-magnitude jump。
+1. Gaussian weights sum to 2；FFT forward/inverse 與解析係數一致。
+2. scalar spectral → grid → spectral round trip 達機器精度。
+3. vorticity/divergence → (U,V) → vorticity/divergence round trip。
+4. `div(grad X) = −n(n+1)/a² X`。
+5. 剛體旋轉的渦度係數正確。
 
-## V1 — dry non-rotating 3D core
+## V1 — dry dynamical core（`src/tests/dycore.ts`，已通過 / passing）
 
-- equation-of-state round trip
-- isothermal hydrostatic rest
-- stratified hydrostatic rest
-- acoustic wave phase/amplitude
-- internal gravity wave
-- rising thermal bubble
-- density current
-- vertical-column acoustic CFL test
+- 層結靜止大氣保持靜止。
+- 無強迫斜壓流：乾空氣質量、總能量 `∫(c_p T + ½|v|²) dp/g`、軸向角動量守恆。
+- 半隱式在外重力波 CFL ≫ 1 下穩定。
 
-硬門檻：hydrostatic-rest case 不得持續生成系統性垂直風；dry-mass conservation 沒過就停止後續 physics。
+區域非靜力模式（R5）另需：equation-of-state round trip、hydrostatic rest、acoustic wave、internal gravity wave、rising thermal bubble、density current、Weisman–Klemp supercell。
 
 ## V2 — rotating sphere
 
