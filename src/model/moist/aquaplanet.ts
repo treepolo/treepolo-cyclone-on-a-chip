@@ -18,9 +18,12 @@ import { DAY, DryAir, Planet } from '../../core/constants.js';
 import { ColumnPhysics, MoistGridState } from '../dycore.js';
 import { MOIST, dqsatdT, qsat } from './thermo.js';
 import { sbmColumn, sbmWork, SbmWork } from './sbm.js';
+import { cloudRadiation, cloudWork } from './cloudRadiation.js';
 
 export interface GrayPhysicsConfig {
-  radiation: 'frierson' | 'byrne';
+  radiation: 'frierson' | 'byrne' | 'cloudy';
+  /** land albedo for snow-covered ground (land colder than 263 K; linear ramp from 273 K), cloudy radiation */
+  albedoSnow: number;
   solarConstant: number;     // W m^-2
   delSol: number;            // perpetual-equinox pole-equator insolation contrast (Frierson p2 profile)
   seasonal: boolean;         // daily-mean insolation with obliquity (otherwise perpetual equinox p2 profile)
@@ -59,7 +62,7 @@ export const AQUA: GrayPhysicsConfig = {
   byrneA: 0.8678, byrneB: 1997.9,
   mixedLayerDepth: 2.5, landHeatCapacity: 1e6, roughness: 3.21e-5, roughnessLand: 3.21e-5, bucketMax: 0.15,
   qflux: false, qfluxAmp: 30, qfluxWidthDeg: 16,
-  seaIce: false,
+  seaIce: false, albedoSnow: 0.6,
   richCrit: 1.0, fracInner: 0.1, spongePBottom: 5000, spongeTau: 0.25 * DAY, useConvection: true,
 };
 
@@ -88,6 +91,11 @@ export interface AquaplanetFields {
   snowRate: Float64Array;     // kg m^-2 s^-1 (last step): precipitation reaching the ground as snow
   snowAcc: Float64Array;      // kg m^-2 accumulated snowfall
   olrNow: Float64Array;       // W m^-2
+  convRate: Float64Array;     // convective precipitation of the last step (kg m^-2 s^-1), for convective cloud
+  convTop: Float64Array;      // level index of the last step's convective top (-1: none)
+  cloud: Float64Array;        // total cloud cover (random overlap), last step, 'cloudy' radiation
+  swUpAcc: Float64Array;      // accumulated reflected / incoming shortwave at the top (J m^-2)
+  swInAcc: Float64Array;
   blDepth: Float64Array;      // m
 }
 
@@ -120,6 +128,7 @@ export class GrayPhysics implements ColumnPhysics {
   private readonly nlon: number;
   private readonly col: Record<string, Float64Array>;
   private readonly work: SbmWork;
+  private readonly cloudW: Record<string, Float64Array>;
   private readonly qfluxLat: Float64Array;
   /** clipped negative water (kg m^-2 summed over points) */
   negativeWater = 0;
@@ -142,7 +151,7 @@ export class GrayPhysics implements ColumnPhysics {
     this.cfg = { ...AQUA, ...cfg };
     this.surface = surface ?? { land: new Uint8Array(ng), zsurf: new Float64Array(ng) };
     const z = (): Float64Array => new Float64Array(ng);
-    this.f = { sst: z(), bucket: z(), ice: z(), precipConv: z(), precipLS: z(), evap: z(), shf: z(), olr: z(), runoff: z(), tsAcc: z(), accTime: 0, precipRate: z(), snowRate: z(), snowAcc: z(), olrNow: z(), blDepth: z() };
+    this.f = { sst: z(), bucket: z(), ice: z(), precipConv: z(), precipLS: z(), evap: z(), shf: z(), olr: z(), runoff: z(), tsAcc: z(), accTime: 0, precipRate: z(), snowRate: z(), snowAcc: z(), olrNow: z(), blDepth: z(), convRate: z(), convTop: new Float64Array(ng).fill(-1), cloud: z(), swUpAcc: z(), swInAcc: z() };
     const c = (n: number): Float64Array => new Float64Array(n);
     this.col = {
       T: c(K), q: c(K), u: c(K), v: c(K), pf: c(K), ph: c(K + 1), zf: c(K), zh: c(K + 1),
@@ -150,6 +159,7 @@ export class GrayPhysics implements ColumnPhysics {
       cc: c(K), dd: c(K), kk: c(K + 1), sw: c(K + 1),
     };
     this.work = sbmWork(K);
+    this.cloudW = cloudWork(K);
     this.netAcc = Array.from({ length: 12 }, () => new Float64Array(ng));
     this.netW = new Float64Array(12);
     this.qfluxLat = new Float64Array(nlat);
@@ -177,7 +187,7 @@ export class GrayPhysics implements ColumnPhysics {
   }
 
   resetAccumulators(): void {
-    for (const a of [this.f.precipConv, this.f.precipLS, this.f.evap, this.f.shf, this.f.olr, this.f.runoff, this.f.tsAcc, this.f.snowAcc]) a.fill(0);
+    for (const a of [this.f.precipConv, this.f.precipLS, this.f.evap, this.f.shf, this.f.olr, this.f.runoff, this.f.tsAcc, this.f.snowAcc, this.f.swUpAcc, this.f.swInAcc]) a.fill(0);
     this.f.accTime = 0;
   }
 
@@ -296,8 +306,6 @@ export class GrayPhysics implements ColumnPhysics {
     for (let k = 0; k < K; k++) { const B = MOIST.stefan * T[k]! ** 4; lwd[k + 1] = lwd[k]! * tr[k]! + B * (1 - tr[k]!); }
     lwu[K] = MOIST.stefan * ts ** 4;
     for (let k = K - 1; k >= 0; k--) { const B = MOIST.stefan * T[k]! ** 4; lwu[k] = lwu[k + 1]! * tr[k]! + B * (1 - tr[k]!); }
-    const sw = C.sw!;
-    for (let k = 0; k <= K; k++) { const x = ph[k]! / 1e5; sw[k] = insol * Math.exp(-cfg.atmAbs * x * x * x * x); }
     let albedo = isLand ? cfg.albedoLand : cfg.albedo;
     if (!isLand && cfg.seaIce) {
       // bare-ice albedo reached at 0.5 m thickness
@@ -306,14 +314,30 @@ export class GrayPhysics implements ColumnPhysics {
       // simple sea-ice albedo: linear ramp from open water at 273.15 K to ice at 263.15 K
       const w = Math.max(0, Math.min(1, (273.15 - ts) / 10));
       albedo = cfg.albedo + w * (cfg.albedoIce - cfg.albedo);
+    } else if (isLand && cfg.radiation === 'cloudy') {
+      // snow-covered ground: persistently frozen land (proxy without a snow-cover model)
+      const w = Math.max(0, Math.min(1, (273.15 - ts) / 10));
+      albedo = cfg.albedoLand + w * (cfg.albedoSnow - cfg.albedoLand);
     }
-    const swSfc = sw[K]!, swUp = albedo * swSfc;
-    for (let k = 0; k < K; k++) {
-      const Ftop = lwu[k]! - lwd[k]! + swUp - sw[k]!;
-      const Fbot = lwu[k + 1]! - lwd[k + 1]! + swUp - sw[k + 1]!;
-      T[k] = T[k]! + dt * g * (Fbot - Ftop) / (cp * (ph[k + 1]! - ph[k]!));
+    let swAbsSfc: number, lwDownSfc: number, olr: number;
+    if (cfg.radiation === 'cloudy') {
+      const r = cloudRadiation({ K, T, q, pf, ph, zh, zf, ts, albedoSfc: albedo, insol, lwTau: tr, convRate: f.convRate[p]!, convTop: f.convTop[p]!, g }, this.cloudW, MOIST.stefan, cp);
+      for (let k = 0; k < K; k++) T[k] = T[k]! + dt * r.heat[k]!;
+      swAbsSfc = r.swSfcNet; lwDownSfc = r.lwDownSfc; olr = r.olr;
+      f.cloud[p] = r.cloudCover;
+      f.swUpAcc[p] = f.swUpAcc[p]! + r.swUpTop * dt; f.swInAcc[p] = f.swInAcc[p]! + insol * dt;
+    } else {
+      const sw = C.sw!;
+      for (let k = 0; k <= K; k++) { const x = ph[k]! / 1e5; sw[k] = insol * Math.exp(-cfg.atmAbs * x * x * x * x); }
+      const swSfc = sw[K]!, swUp = albedo * swSfc;
+      for (let k = 0; k < K; k++) {
+        const Ftop = lwu[k]! - lwd[k]! + swUp - sw[k]!;
+        const Fbot = lwu[k + 1]! - lwd[k + 1]! + swUp - sw[k + 1]!;
+        T[k] = T[k]! + dt * g * (Fbot - Ftop) / (cp * (ph[k + 1]! - ph[k]!));
+      }
+      swAbsSfc = swSfc * (1 - albedo); lwDownSfc = lwd[K]!; olr = lwu[0]!;
+      f.swUpAcc[p] = f.swUpAcc[p]! + (insol - swAbsSfc) * dt; f.swInAcc[p] = f.swInAcc[p]! + insol * dt;
     }
-    const olr = lwu[0]!;
 
     // ---------------- 2. surface fluxes + boundary-layer diffusion (implicit)
     const z0 = isLand ? cfg.roughnessLand : cfg.roughness;
@@ -381,7 +405,7 @@ export class GrayPhysics implements ColumnPhysics {
     const lh = MOIST.Lv * fluxQ;
     // surface energy budget
     const heatCap = isLand ? cfg.landHeatCapacity : MOIST.rhoWater * MOIST.cpWater * cfg.mixedLayerDepth;
-    const net = swSfc * (1 - albedo) + lwd[K]! - MOIST.stefan * ts ** 4 - fluxS - lh + (isLand ? 0 : qflux);
+    const net = swAbsSfc + lwDownSfc - MOIST.stefan * ts ** 4 - fluxS - lh + (isLand ? 0 : qflux);
     const sstC = this.sstNow;
     if (!isLand && Number.isFinite(sstC) && sstC > SEA_ICE.TF + 0.2) {
       // fixed SST over open water: record the surface energy flux (without q-flux) for the implied q-flux
@@ -404,7 +428,10 @@ export class GrayPhysics implements ColumnPhysics {
 
     // ---------------- 5. convection
     let rainConv = 0;
-    if (cfg.useConvection) rainConv = sbmColumn(T, q, pf, ph, dt, g, this.work).rain;
+    if (cfg.useConvection) {
+      const cr = sbmColumn(T, q, pf, ph, dt, g, this.work);
+      rainConv = cr.rain; f.convRate[p] = cr.rain / dt; f.convTop[p] = cr.rain > 0 ? cr.top : -1;
+    }
 
     // ---------------- 6. large-scale condensation with re-evaporation
     const hlcp = MOIST.Lv / cp;

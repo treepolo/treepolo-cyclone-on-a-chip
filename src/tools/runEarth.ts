@@ -104,7 +104,8 @@ while (model.time < endT - 1) {
       const g = model.refreshGrid();
       let umax = 0;
       for (let q = 0; q < g.u.length; q++) umax = Math.max(umax, Math.hypot(g.u[q]!, g.v[q]!));
-      say(`day ${d} (doy ${((t % year) / DAY).toFixed(0)}): Ts ${tmin.toFixed(1)}..${tmax.toFixed(1)} K (mean ${gmean(physics.f.sst).toFixed(1)})  max|V| ${umax.toFixed(1)} m/s  W=${model.totalWater().toFixed(2)} kg/m2  decl ${(physics.declination * 180 / Math.PI).toFixed(1)}°  wall=${((Date.now() - t0) / 1000).toFixed(0)}s`);
+      say(`day ${d} (doy ${((t % year) / DAY).toFixed(0)}): Ts ${tmin.toFixed(1)}..${tmax.toFixed(1)} K (mean ${gmean(physics.f.sst).toFixed(1)})  max|V| ${umax.toFixed(1)} m/s  W=${model.totalWater().toFixed(2)} kg/m2  decl ${(physics.declination * 180 / Math.PI).toFixed(1)}°  albedo ${(gmean(physics.f.swUpAcc) / Math.max(1e-9, gmean(physics.f.swInAcc))).toFixed(3)}  cloud ${gmean(physics.f.cloud).toFixed(2)}  wall=${((Date.now() - t0) / 1000).toFixed(0)}s`);
+      physics.f.swUpAcc.fill(0); physics.f.swInAcc.fill(0);
       saveCheckpoint();
     }
   }

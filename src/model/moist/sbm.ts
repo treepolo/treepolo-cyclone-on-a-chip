@@ -44,7 +44,7 @@ export function sbmWork(K: number): SbmWork {
  * Returns convective precipitation (kg m^-2 over dt) and CAPE (J/kg).
  */
 export function sbmColumn(T: Float64Array, q: Float64Array, pFull: Float64Array, pHalf: Float64Array,
-                          dt: number, g: number, w: SbmWork): { rain: number; cape: number } {
+                          dt: number, g: number, w: SbmWork): { rain: number; cape: number; top: number } {
   const K = T.length, ks = K - 1;
   const { Tp, rp, rin, Tv, Tref, qref, dT, dq } = w;
   const tau = SBM.tauBm;
@@ -121,7 +121,7 @@ export function sbmColumn(T: Float64Array, q: Float64Array, pFull: Float64Array,
       }
     }
   }
-  if (!(cape > 0)) return { rain: 0, cape: 0 };
+  if (!(cape > 0)) return { rain: 0, cape: 0, top: -1 };
   if (kLZB < 0) kLZB = 0;
 
   // ---------- reference profiles
@@ -134,7 +134,7 @@ export function sbmColumn(T: Float64Array, q: Float64Array, pFull: Float64Array,
   for (let k = 0; k < kLZB; k++) { Tref[k] = T[k]!; qref[k] = q[k]!; }
 
   // precipitation from moisture relaxation (Pq) and from temperature relaxation (Pt)
-  let Pq = 0, Pt = 0;
+  let Pq = 0, Pt = 0, shallowTop = -1;
   for (let k = kLZB; k <= ks; k++) {
     const dp = pHalf[k + 1]! - pHalf[k]!;
     dq[k] = -(q[k]! - qref[k]!) * dt / tau;
@@ -161,6 +161,7 @@ export function sbmColumn(T: Float64Array, q: Float64Array, pFull: Float64Array,
     let k = kLZB;
     while (Pq < 0 && k <= ks) { Pq -= dq[k]! * (pHalf[k]! - pHalf[k + 1]!) / g; k++; }
     const kTop = k - 1;
+    shallowTop = kTop;
     const found = Pq > 0;
     if (kTop > kLZB) for (let kk = kLZB; kk <= kTop - 1; kk++) { dT[kk] = 0; dq[kk] = 0; }
     if (found) {
@@ -176,8 +177,9 @@ export function sbmColumn(T: Float64Array, q: Float64Array, pFull: Float64Array,
     }
     Pq = 0;
   } else {
-    return { rain: 0, cape };
+    return { rain: 0, cape, top: -1 };
   }
   for (let k = 0; k < K; k++) { T[k] = T[k]! + dT[k]!; q[k] = q[k]! + dq[k]!; }
-  return { rain: Math.max(0, Pq), cape };
+  // top: highest level of the convective layer (kLZB for deep convection, the shallow-convection top otherwise)
+  return { rain: Math.max(0, Pq), cape, top: shallowTop >= 0 ? shallowTop : kLZB };
 }
