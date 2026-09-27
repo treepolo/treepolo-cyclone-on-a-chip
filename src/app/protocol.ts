@@ -1,7 +1,7 @@
 // Messages between the UI thread and the simulation worker.
 import type { NestPayload } from './regional/protocol.js';
 
-export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip' | 'snow' | 'sst' | 'q' | 'olr' | 'ice';
+export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip' | 'snow' | 'sst' | 'q' | 'olr' | 'ice' | 'sat';
 
 export type ToWorker =
   | { type: 'init'; preset: string; backend: 'auto' | 'cpu' }

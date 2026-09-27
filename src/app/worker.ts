@@ -271,11 +271,11 @@ async function sendFrame(): Promise<void> {
   const scalar = new Float32Array(ng), u = s.u.slice(o, o + ng), v = s.v.slice(o, o + ng);
   let maxWind = 0;
   for (let q = 0; q < s.u.length; q++) maxWind = Math.max(maxWind, Math.hypot(s.u[q]!, s.v[q]!));
-  if ((field === 'precip' || field === 'snow' || field === 'sst' || field === 'olr' || field === 'q' || field === 'ice') && !s.ts) field = 'T';
+  if ((field === 'precip' || field === 'snow' || field === 'sst' || field === 'olr' || field === 'q' || field === 'ice' || field === 'sat') && !s.ts) field = 'T';
   if (field === 'precip') { if (precipRate) for (let q = 0; q < ng; q++) scalar[q] = precipRate[q]! * 86400; }
   else if (field === 'snow') { if (snowRate) for (let q = 0; q < ng; q++) scalar[q] = snowRate[q]! * 86400; }
   else if (field === 'sst') scalar.set(s.ts!);
-  else if (field === 'olr') scalar.set(s.olr!);
+  else if (field === 'olr' || field === 'sat') scalar.set(s.olr!);
   else if (field === 'ice') scalar.set(s.ice!);
   else if (field === 'q') { for (let q = 0; q < ng; q++) scalar[q] = s.q![o + q]! * 1000; }
   else if (field === 'vor') scalar.set(s.vor.subarray(o, o + ng));

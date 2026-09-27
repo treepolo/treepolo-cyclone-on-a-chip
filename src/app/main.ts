@@ -17,6 +17,7 @@ const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'modu
 const send = (m: ToWorker): void => worker.postMessage(m);
 
 let frame: FrameMessage | null = null;
+let landMask: Uint8Array | null = null;
 let zonal: ZonalMessage | null = null;
 let running = false;
 
@@ -53,6 +54,7 @@ const FIELD_STYLE: Record<FieldId, { div: boolean; range?: [number, number]; sym
   q: { div: false, unit: 'g/kg' },
   olr: { div: false, range: [100, 320], unit: 'W/m²' },
   ice: { div: false, range: [0, 3], unit: 'm' },
+  sat: { div: false, range: [110, 290], unit: 'W/m² (OLR)' },
 };
 
 function colourise(f: FrameMessage): void {
@@ -66,7 +68,14 @@ function colourise(f: FrameMessage): void {
     $('legend').textContent = `±${scale.toPrecision(2)} ${st.unit}`;
   } else {
     const [a, b] = st.range && f.field !== 'ps' ? st.range : [lo, hi];
-    if (f.field === 'snow') {
+    if (f.field === 'sat') {
+      // infrared-satellite style: cold (low-OLR) cloud tops bright over a land / ocean background
+      globe.setField(f.lat, f.nlon, f.scalar, (v, idx) => {
+        const t = Math.max(0, Math.min(1, (290 - v) / 170)) ** 0.8;
+        const base: [number, number, number] = idx >= 0 && landMask && landMask[idx] ? [0.22, 0.25, 0.16] : [0.03, 0.07, 0.15];
+        return [base[0] + t * (0.97 - base[0]), base[1] + t * (0.97 - base[1]), base[2] + t * (1 - base[2])];
+      });
+    } else if (f.field === 'snow') {
       globe.setField(f.lat, f.nlon, f.scalar, (v) => v < 0.2 ? [0.06, 0.12, 0.24] : (() => { const t = Math.min(1, Math.log(v / 0.2) / Math.log(100)); return [0.7 + 0.3 * t, 0.72 + 0.28 * t, 0.9 + 0.1 * t] as [number, number, number]; })());
     } else if (f.field === 'precip') {
       // rain: transparent-to-blue style ramp on a square-root scale
@@ -156,6 +165,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
     $('backend').textContent = m.backend === 'gpu' ? 'WebGPU（f32）' : 'CPU（Float64）';
     $('grid').textContent = `T${m.trunc} · ${m.nlon}×${m.nlat} · L${m.K}`;
     globe.setOutline(m.lat, m.nlon, m.land);
+    landMask = m.land;
     const lev = $<HTMLInputElement>('level');
     lev.max = String(m.K - 1);
     if (Number(lev.value) > m.K - 1) lev.value = String(m.K - 1);

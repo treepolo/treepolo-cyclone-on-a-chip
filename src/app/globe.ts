@@ -173,16 +173,17 @@ export class Globe {
   }
 
   /** Colour the sphere from a [lat][lon] field using colour function f. */
-  setField(lat: Float64Array, nlon: number, values: Float32Array, f: (v: number) => Rgb): void {
+  /** Colour the sphere from a [lat][lon] field; f receives the value and its grid index (-1 at the poles). */
+  setField(lat: Float64Array, nlon: number, values: Float32Array, f: (v: number, idx: number) => Rgb): void {
     this.ensureMesh(lat, nlon);
     const m = this.mesh!, nlat = lat.length, col = new Float32Array(m.rows * m.cols * 3);
     const put = (r: number, c: number, rgb: Rgb): void => { const o = (r * m.cols + c) * 3; col[o] = rgb[0]; col[o + 1] = rgb[1]; col[o + 2] = rgb[2]; };
     let n = 0, s = 0;
     for (let i = 0; i < nlon; i++) n += values[i]!;
     for (let i = 0; i < nlon; i++) s += values[(nlat - 1) * nlon + i]!;
-    const np = f(n / nlon), sp = f(s / nlon);
+    const np = f(n / nlon, -1), sp = f(s / nlon, -1);
     for (let c = 0; c < m.cols; c++) { put(0, c, np); put(m.rows - 1, c, sp); }
-    for (let j = 0; j < nlat; j++) for (let c = 0; c < m.cols; c++) put(j + 1, c, f(values[j * nlon + (c % nlon)]!));
+    for (let j = 0; j < nlat; j++) for (let c = 0; c < m.cols; c++) put(j + 1, c, f(values[j * nlon + (c % nlon)]!, j * nlon + (c % nlon)));
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, m.col);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, col);

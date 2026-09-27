@@ -105,6 +105,8 @@ export interface MapPlot {
   range?: [number, number];
   /** optional wind vectors (u, v) drawn every `stride` points */
   vectors?: { u: number[]; v: number[]; stride: number; scale: number };
+  /** optional second field drawn as contours over the shading (e.g. sea-level pressure over T850) */
+  overlay?: { values: number[]; step: number };
 }
 
 /** Equirectangular map of a Gaussian-grid field, restricted to a latitude band. */
@@ -135,10 +137,20 @@ export function mapSvg(p: MapPlot, width = 900, height = 300): string {
   }
   const xs = [...p.lon, 360].map(xOf), ys = rows.map((j) => yOf(p.lat[j]!));
   const val = (r: number, c: number): number => p.values[rows[r]! * nx + (c % nx)]!;
-  const lo = Math.ceil(vmin / p.contourStep), hi = Math.floor(vmax / p.contourStep);
-  for (let i = lo; i <= hi; i++) {
-    const d = contours(xs, ys, val, i * p.contourStep + 1e-9);
-    if (d) out.push(`<path d="${d}" stroke="#000" stroke-width="0.7" fill="none"/>`);
+  if (p.overlay) {
+    const ov = p.overlay, oval = (r: number, c: number): number => ov.values[rows[r]! * nx + (c % nx)]!;
+    let omin = Infinity, omax = -Infinity;
+    for (const j of rows) for (let i = 0; i < nx; i++) { const v = ov.values[j * nx + i]!; omin = Math.min(omin, v); omax = Math.max(omax, v); }
+    for (let i = Math.ceil(omin / ov.step); i <= Math.floor(omax / ov.step); i++) {
+      const d = contours(xs, ys, oval, i * ov.step + 1e-9);
+      if (d) out.push(`<path d="${d}" stroke="#000" stroke-width="0.8" fill="none"/>`);
+    }
+  } else {
+    const lo = Math.ceil(vmin / p.contourStep), hi = Math.floor(vmax / p.contourStep);
+    for (let i = lo; i <= hi; i++) {
+      const d = contours(xs, ys, val, i * p.contourStep + 1e-9);
+      if (d) out.push(`<path d="${d}" stroke="#000" stroke-width="0.7" fill="none"/>`);
+    }
   }
   if (p.outline) {
     const ol = p.outline;

@@ -56,34 +56,34 @@ The hydrostatic approximation is a scale-justified approximation of the real equ
 - 驗收：緯向平均 [u]、[T]、經圈流函數 ψ、渦動通量與 HS94 / 文獻 dry-core 比較（噴流強度與位置、熱帶地面東風、中緯地面西風、Hadley 與 Ferrel 胞）。
 - Jablonowski–Williamson 斜壓波（確定性溫帶氣旋、鋒面發展）。
 
-### R2 濕大氣水球 / Moist aquaplanet — **已實作，氣候驗收中 / implemented, climate validation running**
-- 水汽 q：格點上的 **形狀保持半拉格朗日** 輸送（三維軌跡、跨極點、三次內插 + Bermejo–Staniforth 限制器，q ≥ 0、不產生新極值），全球水量修正（NCAR CCM3 / ECMWF IFS 做法）。完全局地守恆的有限體積輸送留待之後比較。
-- 物理（Frierson et al. 2006, 2007；參數取自 Isca `frierson` 測試案例）：兩流灰體輻射、簡化 Monin–Obukhov 地表通量、隱式 K-profile 邊界層（Ri_b = 1 診斷邊界層高度）、2.5 m slab ocean、50 hPa 以上能量守恆 sponge、Simplified Betts–Miller 對流、大尺度凝結與降水再蒸發。
-- 物理在每個動力步之後 **依序分裂（process splitting）** 作用：剛性的邊界層／對流過程若在 leapfrog 中心時間計算，會激發不穩定的計算模態。
-- 已驗證：SL 均勻場保持、跨極點餘弦鐘、SBM 焓與水量守恆、逐欄水收支閉合（< 1e-9 kg/m²）；T21 全球 P = E = 4.25 mm/day。
+### R2 濕大氣水球 / Moist aquaplanet — **完成 / done**（結果見 / results: `RESULTS_R2_R5.md`）
+- 水汽 q：格點上的 **形狀保持半拉格朗日** 輸送（三維軌跡、跨極點、三次內插 + Bermejo–Staniforth 限制器，q ≥ 0、不產生新極值），全球水量修正（NCAR CCM3 / ECMWF IFS 做法）。
+- 物理（Frierson et al. 2006, 2007；參數取自 Isca `frierson` 測試案例）：兩流灰體輻射、簡化 Monin–Obukhov 地表通量、隱式 K-profile 邊界層、2.5 m slab ocean、50 hPa 以上能量守恆 sponge、Simplified Betts–Miller 對流、大尺度凝結與降水再蒸發。物理在每個動力步之後依序分裂作用。
+- T21（300 日平均）與 T42（200 日平均）：P = E（4.24 / 4.28 mm/day）、ITCZ、副熱帶乾區、中緯度風暴路徑、Hadley 胞 ±6–8 × 10¹⁰ kg/s、噴流 33–39 m/s。
 
-### R3 真實地表與季節 / Land, seasons, topography — **進行中 / in progress**
-- ERA 地表高度與海陸遮罩（T42 Gaussian，來源 Isca input data），頻譜平滑地形、靜力平衡初始 p_s。
-- 季節日照（黃赤交角 23.44°，日平均），Byrne & O'Gorman (2013) 隨水汽變化的灰體長波光學厚度，海冰反照率、Merlis et al. (2013) 形式的海洋熱傳輸 q-flux，陸地 bucket 水文。
-- 第一次三年積分出現水汽失控增溫（反照率 0.31 太低）；已改用 Isca 季節性 Byrne 設定的 0.38 反照率與陸地參數，重新積分中。
+### R3 真實地表與季節 / Land, seasons, topography — **完成第一版，季風偏弱 / first version done, monsoons weak**
+- ERA 地表高度與海陸遮罩、頻譜平滑地形、季節日照、Byrne & O'Gorman (2013) 隨水汽變化的灰體光學厚度、Merlis et al. (2013) q-flux、陸地 bucket 水文。
+- **熱力學海冰**（Semtner 1976 零層模式）：混合層在 271.35 K 結冰，冰厚由傳導、表面與底部（q-flux）熱收支決定，能量精確守恆；取代只改反照率的舊作法。
+- 結果：大陸季節溫差（西伯利亞夏冬差 41 K）、撒哈拉夏季高溫、西非季風（JJA 1.3 vs DJF 0.0 mm/day）、南美夏季雨季、三胞環流與季節性 ITCZ 移動。
+- 已知不足：亞洲季風反向（印度、華南冬雨多於夏雨）。原因是灰體模式在深熱帶的陸地比鄰近海洋冷約 10 °C（陸地反照率 0.42、蒸發冷卻），而 slab 印度洋高達 34–38 °C，季風所需的海陸熱力對比反轉。陸地反照率敏感度實驗進行中；根本改善需要非灰體輻射與雲。
 
-### R4 GPU 加速 / GPU acceleration — **已實作並對 CPU 驗證 / implemented and validated against the CPU core**
-- WebGPU/WGSL（f32）：批次勒讓德轉換、workgroup Stockham FFT（雙精度 twiddle 表）、格點動力、半隱式求解、RAW 濾波、半拉格朗日水汽、完整灰體柱物理（含 SBM）、全球水量與質量修正。
-- `npm run test:gpu`：以 headless Chromium + SwiftShader 軟體 WebGPU 執行。Held–Suarez T21 100 步後 GPU/CPU 相對 L2 1.4e-5；濕水球 72 步後 T 6.6e-5、q 2.1e-3；GPU 單獨 20 天 P = E = 4.40 mm/day。
-- 瀏覽器 worker 自動使用 WebGPU（不可用時退回 CPU），新增 T85 設定。實際 GPU 速度需在使用者裝置上量測。
+### R4 GPU 加速 / GPU acceleration — **完成 / done**
+- WebGPU/WGSL（f32）：批次勒讓德轉換、workgroup Stockham FFT（雙精度 twiddle 表）、格點動力、半隱式求解、RAW 濾波、半拉格朗日水汽、完整灰體柱物理（含 SBM、海冰）、全球水量與質量修正；區域模式全部核心、亂流、地表、Kessler 與冰相微物理、開放側邊界。
+- `npm run test:gpu`（headless Chromium + SwiftShader）：每一部分都對 CPU Float64 版本做逐場比較。
 
-### R5 區域非靜力模式 / Regional non-hydrostatic model — **核心、濕物理、GPU 已完成；熱帶氣旋驗收中 / core, moist physics and GPU done; TC validation running**
-- `src/regional/core.ts`：全可壓縮非靜力方程（u, v, w, θ, Exner 擾動 π′；靜力平衡基本態），笛卡兒 C 網格，Wicker–Skamarock RK3 + 分裂顯式聲波步，垂直隱式（偏心 Crank–Nicolson）w–π′ 求解，散度阻尼，5 階迎風通量型平流，f 平面科氏力，模式頂 Rayleigh 吸收層，週期側邊界。
-- `src/regional/kessler.ts`：Kessler 暖雨（自動轉換、碰併、飽和調整與潛熱、雨滴蒸發、KW78 終端落速沉降）。
-- `src/regional/physics.ts`：Smagorinsky–Lilly 次網格亂流（水平／垂直混合長度、Ri 修正）、海面 bulk 通量、Newtonian 輻射冷卻（上限 2 K/day）。
-- `src/regional/tropical.ts`：濕熱帶探空、Rotunno–Emanuel (1987) 平衡初始渦旋、颱風診斷。
-- `src/gpu/regionalGpu.ts`：完整 WebGPU 版本（f32），對 CPU 驗證：濕對流 10 步 u 相對誤差 1.3e-6、雨水 1.7e-5。
-- 驗收：靜止大氣保持靜止；Straka (1993) 密度流 100 m：θ′ 最低 −9.79 K（參考 −9.77）、鋒面 15.15 km（參考 15.54）；聲速與伽利略不變性檢查；Weisman–Klemp 超大胞在單向風切中分裂成左右移動的旋轉超大胞，上升氣流 25–34 m/s 維持 2 小時；總水量守恆 9e-4。
-- `regional.html`：雲（白）與雨（藍）的體積光線追蹤 3D 檢視，WebGPU 可用時自動使用；1 km 超大胞與 5 km 熱帶氣旋設定需 GPU。
-- 下一步：冰相微物理（雲冰、雪、霰）、較高解析颱風（眼牆、雙眼牆與眼牆置換）、由全球模式提供側邊界的一向巢狀。
+### R5 區域非靜力模式 / Regional non-hydrostatic model — **完成 / done**
+- `src/regional/core.ts`：全可壓縮非靜力方程（u, v, w, θ, π′），C 網格，Wicker–Skamarock RK3 + 分裂聲波步，垂直隱式 w–π′，散度阻尼，5 階迎風通量型平流 + **Skamarock (2006) 正定通量限制器**（水物質），浮力與氣壓梯度用完整密度位溫 θρ = θ(1 + 0.61qv − Σ凝結物)，週期或 **開放側邊界**（Davies 鬆弛區）。
+- 微物理：Kessler 暖雨；**六類冰相**（qv, qc, qr, qi, qs, qg；Lin et al. 1983、Rutledge & Hobbs 1983、Hong et al. 2004）：冰核化、冰／雪／霰的凝華與昇華（Bergeron 過程）、凇附、收集、自動轉換、Bigg 凍結、融化、−40 °C 均質凍結、沉降。0 °C 以上與 Kessler 完全相同。
+- `src/regional/physics.ts`：Smagorinsky–Lilly 亂流、逐格點地表溫度與濕度的 bulk 通量、Newtonian 輻射冷卻。
+- **單向巢狀**（`src/regional/nest.ts`）：由全球模式狀態初始化，側邊界隨全球模式時間更新；網頁可在地球上點選區域「放大」（1200 km／12 km 或 480 km／4 km 可解析對流）。
+- 驗收：Straka 密度流（θ′ −9.66 K、鋒面 15.45 km）、超大胞分裂、15 km 熱帶氣旋快速增強至 ~40 m/s、巢狀區域降水與全球模式一致；GPU 與 CPU 逐場一致。
 
-### R6 局地 LES / Local LES
+### R6 高解析颱風與局地 LES / High-resolution TC and local LES — **下一步 / next**
+- 2–3 km 颱風（GPU）搭配冰相微物理：眼、眼牆、外圍雨帶，長時間積分觀察次級眼牆形成與眼牆置換是否自然出現。
 - 50–250 m 格距的超大胞環境，觀察龍捲風旋生（tornadogenesis）是否自然出現。
+
+### R7 輻射與雲 / Radiation and clouds — **規劃 / planned**
+- 以非灰體（多頻帶，含水汽窗區）輻射與診斷雲取代灰體輻射，改善海陸熱力對比與亞洲季風。
 
 ## 4. 硬限制（沿用）/ Hard constraints (kept)
 
@@ -102,3 +102,9 @@ The hydrostatic approximation is a scale-justified approximation of the real equ
 - Frierson, D. M. W., I. M. Held, and P. Zurita-Gotor, 2006: A gray-radiation aquaplanet moist GCM. JAS, 63, 2548–2566.
 - Jablonowski, C., and D. L. Williamson, 2006: A baroclinic instability test case for atmospheric model dynamical cores. QJRMS, 132, 2943–2975.
 - Bryan, G. H., and J. M. Fritsch, 2002: A benchmark simulation for moist nonhydrostatic numerical models. MWR, 130, 2917–2928.
+- Lin, Y.-L., R. D. Farley, and H. D. Orville, 1983: Bulk parameterization of the snow field in a cloud model. JCAM, 22, 1065–1092.
+- Rutledge, S. A., and P. V. Hobbs, 1983: The mesoscale and microscale structure and organization of clouds and precipitation in midlatitude cyclones. VIII. JAS, 40, 1185–1206.
+- Hong, S.-Y., J. Dudhia, and S.-H. Chen, 2004: A revised approach to ice microphysical processes for the bulk parameterization of clouds and precipitation. MWR, 132, 103–120.
+- Skamarock, W. C., 2006: Positive-definite and monotonic limiters for unrestricted-time-step transport schemes. MWR, 134, 2241–2250.
+- Semtner, A. J., 1976: A model for the thermodynamic growth of sea ice in numerical investigations of climate. JPO, 6, 379–389.
+- Davies, H. C., 1976: A lateral boundary formulation for multi-level prediction models. QJRMS, 102, 405–418.
