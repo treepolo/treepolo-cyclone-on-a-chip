@@ -38,7 +38,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     view.setGround(m.nx, m.ny, rgba);
     const s = m.stats, t = m.time;
     $('time').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h (${(t / 86400).toFixed(2)} d)`;
-    $('rate').textContent = `${m.stepsPerSecond.toFixed(1)} 步/s steps/s · ${(m.stepsPerSecond * dt / 60).toFixed(1)} 模式分/s model-min/s`;
+    const ms = m.stepsPerSecond * dt;
+    $('rate').textContent = `${m.stepsPerSecond.toFixed(m.stepsPerSecond < 10 ? 2 : 1)} 步/s steps/s · ${ms < 60 ? `${ms.toFixed(1)} 模式秒/s model-s/s` : `${(ms / 60).toFixed(1)} 模式分/s model-min/s`}`;
     $('w').textContent = `${s.wmin.toFixed(1)} … ${s.wmax.toFixed(1)} m/s`;
     $('qc').textContent = `${(s.qcmax * 1000).toFixed(2)} g/kg`;
     $('qr').textContent = `${(s.qrmax * 1000).toFixed(2)} g/kg`;

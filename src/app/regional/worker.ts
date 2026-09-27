@@ -20,6 +20,8 @@ let dpEnv = 0;
 let gpu: GpuRegional | null = null;
 let gpuDevice: GPUDevice | null = null;
 let busy = false;
+let gpuBatch = 2;
+const DEBUG = false;
 let physCfg: RegionalPhysicsConfig | null = null;
 let frameVel = { u: 0, v: 0 };
 let tracker: StormTracker | null = null, lastTrack = 0;
@@ -167,10 +169,18 @@ async function loop(): Promise<void> {
     if (m && mp && running && !busy) {
       busy = true;
       try {
-        if (gpu) { gpu.step(stepsPerTick * 2); rateSteps += stepsPerTick * 2; await gpu.device.queue.onSubmittedWorkDone(); }
+        if (gpu) {
+          // adaptive batch: about 60 ms x speed setting of GPU work between checks
+          const t0 = performance.now();
+          gpu.step(gpuBatch); rateSteps += gpuBatch;
+          await gpu.device.queue.onSubmittedWorkDone();
+          const el = performance.now() - t0, target = 60 * stepsPerTick;
+          if (DEBUG) console.log(`DBG batch ${gpuBatch} steps ${el.toFixed(0)} ms`);
+          gpuBatch = Math.max(1, Math.min(2000, Math.round(gpuBatch * Math.min(2, Math.max(0.5, target / Math.max(el, 1))))));
+        }
         else for (let s = 0; s < stepsPerTick; s++) { m.step(); mp.apply(m.c.dt); rateSteps++; }
         if (tracker && m.time - lastTrack >= 600) { lastTrack = m.time; await followStorm(); }
-        if (performance.now() - lastFrame > 300) await sendFrame();
+        if (performance.now() - lastFrame > (gpu ? 500 : 300)) { const tf = performance.now(); await sendFrame(); if (DEBUG) console.log(`DBG frame ${(performance.now() - tf).toFixed(0)} ms`); }
       } catch (e) { running = false; post({ type: 'error', message: String(e) }); }
       busy = false;
     }
@@ -212,20 +222,31 @@ async function syncFromGpu(): Promise<void> {
 async function sendFrame(): Promise<void> {
   if (!m || !mp) return;
   lastFrame = performance.now();
-  await syncFromGpu();
-  if (!Number.isFinite(m.w[m.idx(0, 0, 1)]!)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
   const { nx, ny, nz, dx, dz } = m.c, n = nx * ny * nz;
   const cloud = new Uint8Array(n), rain = new Uint8Array(n);
-  const qc = m.scalars[QC]!, qr = m.scalars[QR]!, qi = m.scalars[QI]!, qs = m.scalars[QS]!, qg = m.scalars[QG]!;
   let wmax = 0, wmin = 0, qcmax = 0, qrmax = 0;
-  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    const q = m.idx(i, j, k), o = (k * ny + j) * nx + i;
-    // cloud: liquid + ice cloud; precipitation: rain + snow + graupel
-    const cl = Math.max(0, qc[q]! + qi[q]!), pr = Math.max(0, qr[q]! + qs[q]! + qg[q]!);
-    cloud[o] = Math.min(255, Math.round(Math.sqrt(cl / 3e-3) * 255));
-    rain[o] = Math.min(255, Math.round(Math.sqrt(pr / 8e-3) * 255));
-    qcmax = Math.max(qcmax, cl); qrmax = Math.max(qrmax, pr);
-    const w = m.w[q]!; wmax = Math.max(wmax, w); wmin = Math.min(wmin, w);
+  if (gpu) {
+    // GPU: packed display bytes, column extremes and the few horizontal planes the diagnostics need
+    let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
+    const d = await gpu.readDisplay(k15 === 0 ? [0] : [0, k15]);
+    for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; }
+    for (let c = 0; c < nx * ny; c++) { wmax = Math.max(wmax, d.col[4 * c]!); wmin = Math.min(wmin, d.col[4 * c + 1]!); qcmax = Math.max(qcmax, d.col[4 * c + 2]!); qrmax = Math.max(qrmax, d.col[4 * c + 3]!); }
+    for (const [k, pl] of d.planes) { const o = k * m.plane; m.u.set(pl.u, o); m.v.set(pl.v, o); m.th.set(pl.th, o); m.pp.set(pl.pp, o); }
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = m.idx(i, j, 0); mp.rainAcc[j * nx + i] = d.rain[q]!; mp.snowAcc[j * nx + i] = d.snow[q]!; }
+    m.time = gpu.time; m.steps = gpu.steps;
+    if (!Number.isFinite(wmax)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
+  } else {
+    if (!Number.isFinite(m.w[m.idx(0, 0, 1)]!)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
+    const qc = m.scalars[QC]!, qr = m.scalars[QR]!, qi = m.scalars[QI]!, qs = m.scalars[QS]!, qg = m.scalars[QG]!;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const q = m.idx(i, j, k), o = (k * ny + j) * nx + i;
+      // cloud: liquid + ice cloud; precipitation: rain + snow + graupel
+      const cl = Math.max(0, qc[q]! + qi[q]!), pr = Math.max(0, qr[q]! + qs[q]! + qg[q]!);
+      cloud[o] = Math.min(255, Math.round(Math.sqrt(cl / 3e-3) * 255));
+      rain[o] = Math.min(255, Math.round(Math.sqrt(pr / 8e-3) * 255));
+      qcmax = Math.max(qcmax, cl); qrmax = Math.max(qrmax, pr);
+      const w = m.w[q]!; wmax = Math.max(wmax, w); wmin = Math.min(wmin, w);
+    }
   }
   const g = new Float32Array(nx * ny);
   let vmax = 0, rainmax = 0;

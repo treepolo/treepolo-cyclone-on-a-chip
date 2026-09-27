@@ -1,9 +1,12 @@
-// WebGL2 globe: colour-shaded model field on a sphere mesh whose rows are the model's
-// Gaussian latitudes, plus wind tracer streaks and a graticule. Orbit camera.
+// WebGL2 globe: a high-resolution relief map of the planet (ERA5 land mask and orography at about
+// 0.35 degrees) with the model field overlaid, a ray-marched cloud shell with exaggerated vertical scale
+// (the model's diagnosed 3-D cloud), wind tracer streaks, a graticule and an orbit camera.
 import { attachOrbit } from './orbitControls.js';
 
 export type Rgb = [number, number, number];
+export type Rgba = [number, number, number, number];
 
+// lines (graticule, marker, tracers)
 const VS = `#version 300 es
 in vec3 aPos; in vec3 aCol;
 uniform mat4 uMVP; uniform float uScale;
@@ -15,38 +18,158 @@ in vec3 vCol; in vec3 vN; uniform vec3 uLight; uniform float uAlpha; uniform flo
 out vec4 o;
 void main(){ float l = mix(1.0, 0.55+0.45*max(dot(normalize(vN),uLight),0.0), uShade); o=vec4(vCol*l,uAlpha); }`;
 
+const PI_GLSL = 'const float PI = 3.14159265358979;';
+// planet surface: relief-displaced sphere, map colours, hillshade, coastline, model field overlay
+const PVS = `#version 300 es
+precision highp float;
+${PI_GLSL}
+in vec2 aUV;
+uniform mat4 uMVP; uniform sampler2D uMap; uniform float uRelief; uniform float uLandOn;
+out vec2 vUV; out vec3 vP;
+void main(){
+  float lat = PI * 0.5 - aUV.y * PI, lon = aUV.x * 2.0 * PI;
+  vec3 p = vec3(cos(lat) * cos(lon), sin(lat), -cos(lat) * sin(lon));
+  float e = textureLod(uMap, vec2(aUV.x + 0.5 / 1024.0, aUV.y), 0.0).r * uLandOn;
+  vUV = aUV; vP = p;
+  gl_Position = uMVP * vec4(p * (1.0 + uRelief * e), 1.0);
+}`;
+const PFS = `#version 300 es
+precision highp float;
+in vec2 vUV; in vec3 vP;
+uniform sampler2D uMap; uniform sampler2D uField; uniform vec3 uLight; uniform float uFieldAlpha; uniform float uLandOn;
+uniform vec2 uFieldSize; uniform float uRelief;
+out vec4 o;
+vec3 landColour(float h){ // h: elevation / 6 km
+  vec3 c = mix(vec3(0.20, 0.33, 0.16), vec3(0.45, 0.43, 0.26), smoothstep(0.0, 0.18, h));
+  c = mix(c, vec3(0.42, 0.33, 0.24), smoothstep(0.18, 0.45, h));
+  return mix(c, vec3(0.86, 0.86, 0.88), smoothstep(0.55, 0.85, h));
+}
+void main(){
+  vec2 mu = vec2(vUV.x + 0.5 / 1024.0, vUV.y);
+  vec4 m = texture(uMap, mu);
+  float land = m.g * uLandOn, h = m.r * uLandOn;
+  // hillshade from the elevation gradient (map texels: 0.3516 deg)
+  float dx = 1.0 / 1024.0, dy = 1.0 / 512.0;
+  float hx = texture(uMap, mu + vec2(dx, 0.0)).r - texture(uMap, mu - vec2(dx, 0.0)).r;
+  float hy = texture(uMap, mu - vec2(0.0, dy)).r - texture(uMap, mu + vec2(0.0, dy)).r;
+  vec3 n = normalize(vP);
+  vec3 east = normalize(vec3(-n.z, 0.0, -n.x) + 1e-6), north = cross(n, east);
+  vec3 nn = normalize(n - (east * hx + north * hy) * uLandOn * 60.0);
+  float sun = max(dot(nn, uLight), 0.0);
+  vec3 ocean = vec3(0.035, 0.09, 0.20);
+  vec3 base = mix(ocean, landColour(h), smoothstep(0.35, 0.65, land));
+  // coastline
+  float fw = fwidth(land);
+  float coast = 1.0 - smoothstep(0.0, 1.2 * fw + 1e-4, abs(land - 0.5));
+  base = mix(base, vec3(0.02, 0.02, 0.02), coast * 0.8 * uLandOn);
+  vec3 col = base * (0.30 + 0.75 * sun);
+  vec4 f = texture(uField, vec2(vUV.x + 0.5 / uFieldSize.x, vUV.y));
+  col = mix(col, f.rgb * (0.55 + 0.5 * max(dot(n, uLight), 0.0)), f.a * uFieldAlpha);
+  o = vec4(col, 1.0);
+}`;
+// cloud shell: full-screen ray march between the surface and the top of the exaggerated troposphere
+const VVS = `#version 300 es
+in vec2 aQ; out vec2 vQ;
+void main(){ vQ = aQ; gl_Position = vec4(aQ, 0.0, 1.0); }`;
+const VFS = `#version 300 es
+precision highp float; precision highp sampler3D;
+${PI_GLSL}
+in vec2 vQ;
+uniform vec3 uEye, uF, uS, uU; uniform float uTan, uAspect, uH, uCloudOn;
+uniform sampler3D uCloud; uniform float uNx; uniform vec3 uLight;
+out vec4 o;
+vec2 sph(vec3 ro, vec3 rd, float r){ float b = dot(ro, rd), c = dot(ro, ro) - r * r, d = b * b - c; if (d < 0.0) return vec2(1e9, -1e9); d = sqrt(d); return vec2(-b - d, -b + d); }
+void main(){
+  vec3 rd = normalize(uF + (uS * vQ.x * uAspect + uU * vQ.y) * uTan);
+  vec2 outer = sph(uEye, rd, 1.0 + uH);
+  if (outer.y < 0.0 || outer.x > outer.y) { o = vec4(0.0); return; }
+  vec2 inner = sph(uEye, rd, 1.0);
+  float t0 = max(outer.x, 0.0), t1 = outer.y;
+  if (inner.x < inner.y && inner.x > 0.0) t1 = inner.x;
+  float len = t1 - t0;
+  // thin blue limb glow (optical path through the shell)
+  vec3 mid = uEye + rd * (t0 + 0.5 * len);
+  float day = clamp(dot(normalize(mid), uLight) * 1.5 + 0.3, 0.0, 1.0);
+  vec3 glow = vec3(0.30, 0.55, 1.0) * (1.0 - exp(-len / uH * 0.10)) * day;
+  vec3 acc = vec3(0.0); float T = 1.0;
+  if (uCloudOn > 0.5) {
+    const int N = 56;
+    float dt = len / float(N);
+    for (int i = 0; i < N; i++) {
+      vec3 p = uEye + rd * (t0 + (float(i) + 0.5) * dt);
+      float r = length(p);
+      float w = (r - 1.0) / uH;
+      if (w < 0.0 || w > 1.0) continue;
+      vec3 n = p / r;
+      float lon = atan(-n.z, n.x); if (lon < 0.0) lon += 2.0 * PI;
+      float lat = asin(clamp(n.y, -1.0, 1.0));
+      float d = texture(uCloud, vec3(lon / (2.0 * PI) + 0.5 / uNx, 0.5 - lat / PI, w)).r;
+      if (d < 0.01) continue;
+      float k = d * 9.0 * dt / uH;             // optical depth of the step
+      float a = 1.0 - exp(-k);
+      float lit = 0.25 + 0.85 * clamp(dot(n, uLight) * 1.3 + 0.15, 0.0, 1.0);
+      acc += T * a * vec3(lit);
+      T *= 1.0 - a;
+      if (T < 0.02) break;
+    }
+  }
+  o = vec4(acc + T * glow, 1.0 - T + T * length(glow) * 0.6);
+}`;
+// composite of the cached cloud-shell image (premultiplied colour)
+const CFS = `#version 300 es
+precision mediump float;
+in vec2 vQ; uniform sampler2D uImg; out vec4 o;
+void main(){ o = texture(uImg, vQ * 0.5 + 0.5); }`;
+
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
   const s = gl.createShader(type)!;
   gl.shaderSource(s, src); gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) ?? 'shader');
   return s;
 }
+function program(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {
+  const p = gl.createProgram()!;
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vs)); gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) ?? 'link');
+  return p;
+}
 
 export class Globe {
   private readonly gl: WebGL2RenderingContext;
   private readonly prog: WebGLProgram;
   private readonly loc: { pos: number; col: number; mvp: WebGLUniformLocation; scale: WebGLUniformLocation; light: WebGLUniformLocation; alpha: WebGLUniformLocation; shade: WebGLUniformLocation };
-  private mesh: { vao: WebGLVertexArrayObject; col: WebGLBuffer; count: number; rows: number; cols: number; lat: Float64Array } | null = null;
+  private readonly planet: { prog: WebGLProgram; vao: WebGLVertexArrayObject; count: number };
+  private readonly vol: { prog: WebGLProgram; vao: WebGLVertexArrayObject; comp: WebGLProgram; tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: number };
+  /** the cloud ray march is cached in vol.tex and redone only when clouds, camera or settings change */
+  private cloudDirty = true;
+  private lastDraw = 0;
+  private readonly mapTex: WebGLTexture; private readonly fieldTex: WebGLTexture; private readonly cloudTex: WebGLTexture;
+  private fieldSize: [number, number] = [1, 1];
+  private cloudNx = 1; private hasCloud = false; private landOn = 0;
   private readonly grat: { vao: WebGLVertexArrayObject; count: number };
   private readonly trc: { vao: WebGLVertexArrayObject; pos: WebGLBuffer; col: WebGLBuffer };
   private trcCount = 0;
-  private coast: { vao: WebGLVertexArrayObject; count: number } | null = null;
   private marker: { vao: WebGLVertexArrayObject; count: number } | null = null;
   /** called on a click (not a drag) on the sphere with (lat, lon) in radians, lon in [0, 2 pi) */
   onPick: ((lat: number, lon: number) => void) | null = null;
   yaw = -0.4;
   pitch = 0.35;
   dist = 3.2;
+  /** vertical exaggeration of the atmosphere and terrain (x real scale) */
+  exaggeration = 30;
+  /** opacity of the model field over the map (0..1) */
+  fieldAlpha = 0.75;
+  /** draw the 3-D cloud shell */
+  cloudsOn = true;
+  /** top of the cloud texture (m) */
+  cloudTop = 16000;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', { antialias: true });
     if (!gl) throw new Error('WebGL2 不可用 / WebGL2 unavailable');
     this.gl = gl;
-    const p = gl.createProgram()!;
-    gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, VS));
-    gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, FS));
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) ?? 'link');
+    const p = program(gl, VS, FS);
     this.prog = p;
     this.loc = {
       pos: gl.getAttribLocation(p, 'aPos'), col: gl.getAttribLocation(p, 'aCol'),
@@ -60,7 +183,54 @@ export class Globe {
     gl.bindBuffer(gl.ARRAY_BUFFER, col); gl.enableVertexAttribArray(this.loc.col); gl.vertexAttribPointer(this.loc.col, 3, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
     this.trc = { vao, pos, col };
+    // planet mesh: regular longitude-latitude grid in texture coordinates
+    const pp = program(gl, PVS, PFS), NU = 360, NV = 180, uv = new Float32Array((NU + 1) * (NV + 1) * 2), idx = new Uint32Array(NU * NV * 6);
+    for (let j = 0; j <= NV; j++) for (let i = 0; i <= NU; i++) { const o = (j * (NU + 1) + i) * 2; uv[o] = i / NU; uv[o + 1] = j / NV; }
+    let n = 0;
+    for (let j = 0; j < NV; j++) for (let i = 0; i < NU; i++) { const a = j * (NU + 1) + i, b = a + 1, c = a + NU + 1, d = c + 1; idx[n++] = a; idx[n++] = c; idx[n++] = b; idx[n++] = b; idx[n++] = c; idx[n++] = d; }
+    const pv = gl.createVertexArray()!;
+    gl.bindVertexArray(pv);
+    const ub = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, ub); gl.bufferData(gl.ARRAY_BUFFER, uv, gl.STATIC_DRAW);
+    const la = gl.getAttribLocation(pp, 'aUV'); gl.enableVertexAttribArray(la); gl.vertexAttribPointer(la, 2, gl.FLOAT, false, 0, 0);
+    const ib = gl.createBuffer()!; gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
+    this.planet = { prog: pp, vao: pv, count: n };
+    // full-screen quad for the cloud shell
+    const vp = program(gl, VVS, VFS), vv = gl.createVertexArray()!;
+    gl.bindVertexArray(vv);
+    const qb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, qb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const lq = gl.getAttribLocation(vp, 'aQ'); gl.enableVertexAttribArray(lq); gl.vertexAttribPointer(lq, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    const ct = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, ct);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    const fbo = gl.createFramebuffer()!;
+    this.vol = { prog: vp, vao: vv, comp: program(gl, VVS, CFS), tex: ct, fbo, w: 0, h: 0 };
+    // textures: map (R elevation / 6 km, G land fraction), field colours, 3-D cloud
+    const tex2 = (): WebGLTexture => { const t = gl.createTexture()!; gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); return t; };
+    this.mapTex = tex2(); this.fieldTex = tex2();
+    this.cloudTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_3D, this.cloudTex);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.REPEAT], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_3D, k, v);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, 1, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
     this.attachControls();
+  }
+
+  /** Load the relief map (PNG: R,G = elevation + 1000 m as 16 bits, B = land fraction x 255). */
+  async loadMap(url: string): Promise<void> {
+    const img = await createImageBitmap(await (await fetch(url)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    const cv = new OffscreenCanvas(img.width, img.height), cx = cv.getContext('2d', { colorSpace: 'srgb' })!;
+    cx.drawImage(img, 0, 0);
+    const d = cx.getImageData(0, 0, img.width, img.height).data, out = new Uint8Array(img.width * img.height * 4);
+    for (let i = 0; i < img.width * img.height; i++) {
+      const e = d[4 * i]! * 256 + d[4 * i + 1]! - 1000, land = d[4 * i + 2]!;
+      out[4 * i] = Math.max(0, Math.min(255, Math.round(e / 6000 * 255)));
+      out[4 * i + 1] = land;
+    }
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.mapTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, img.width, img.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    this.dirty = true;
   }
 
   private attachControls(): void {
@@ -90,7 +260,7 @@ export class Globe {
   /** Outline a square region of half-width `half` (radians of arc) centred at (lat, lon); null clears it. */
   setMarker(lat: number | null, lon = 0, half = 0.1): void {
     const gl = this.gl;
-    if (lat === null) { this.marker = null; return; }
+    if (lat === null) { this.marker = null; this.dirty = true; return; }
     const v: number[] = [], c: number[] = [];
     const pt = (x: number, y: number): void => {
       const la = lat + y, lo = lon + x / Math.max(0.05, Math.cos(lat));
@@ -109,6 +279,7 @@ export class Globe {
     gl.enableVertexAttribArray(this.loc.col); gl.vertexAttribPointer(this.loc.col, 3, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
     this.marker = { vao, count: v.length / 3 };
+    this.dirty = true;
   }
 
   private buildGraticule(): { vao: WebGLVertexArrayObject; count: number } {
@@ -134,132 +305,150 @@ export class Globe {
     return { vao, count: v.length / 3 };
   }
 
-  /** (Re)build the sphere mesh for a Gaussian grid: rows = north pole, lat[0..nlat-1], south pole. */
-  private ensureMesh(lat: Float64Array, nlon: number): void {
-    if (this.mesh && this.mesh.cols === nlon + 1 && this.mesh.lat.length === lat.length) return;
-    const gl = this.gl, rows = lat.length + 2, cols = nlon + 1;
-    const pos = new Float32Array(rows * cols * 3);
-    for (let r = 0; r < rows; r++) {
-      const la = r === 0 ? Math.PI / 2 : r === rows - 1 ? -Math.PI / 2 : lat[r - 1]!;
-      for (let c = 0; c < cols; c++) {
-        const lo = c * 2 * Math.PI / nlon, o = (r * cols + c) * 3;
-        pos[o] = Math.cos(la) * Math.cos(lo); pos[o + 1] = Math.sin(la); pos[o + 2] = -Math.cos(la) * Math.sin(lo);
-      }
+  /** Colour the model field (grid [lat][lon], rows north -> south); f may return an alpha (0 = map shows through). */
+  setField(lat: Float64Array, nlon: number, values: Float32Array, f: (v: number, idx: number) => Rgb | Rgba): void {
+    const nlat = lat.length, px = new Uint8Array(nlat * nlon * 4);
+    for (let p = 0; p < nlat * nlon; p++) {
+      const c = f(values[p]!, p);
+      px[4 * p] = Math.round(Math.max(0, Math.min(1, c[0])) * 255); px[4 * p + 1] = Math.round(Math.max(0, Math.min(1, c[1])) * 255);
+      px[4 * p + 2] = Math.round(Math.max(0, Math.min(1, c[2])) * 255); px[4 * p + 3] = Math.round((c.length > 3 ? (c as Rgba)[3] : 1) * 255);
     }
-    const idx = new Uint32Array((rows - 1) * (cols - 1) * 6);
-    let n = 0;
-    for (let r = 0; r < rows - 1; r++) for (let c = 0; c < cols - 1; c++) {
-      const a = r * cols + c, b = a + 1, d = a + cols, e = d + 1;
-      idx[n++] = a; idx[n++] = d; idx[n++] = b; idx[n++] = b; idx[n++] = d; idx[n++] = e;
-    }
-    const vao = gl.createVertexArray()!;
-    gl.bindVertexArray(vao);
-    const pb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, pb); gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(this.loc.pos); gl.vertexAttribPointer(this.loc.pos, 3, gl.FLOAT, false, 0, 0);
-    const cb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, cb); gl.bufferData(gl.ARRAY_BUFFER, rows * cols * 12, gl.DYNAMIC_DRAW);
-    gl.enableVertexAttribArray(this.loc.col); gl.vertexAttribPointer(this.loc.col, 3, gl.FLOAT, false, 0, 0);
-    const ib = gl.createBuffer()!; gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
-    gl.bindVertexArray(null);
-    this.mesh = { vao, col: cb, count: n, rows, cols, lat: Float64Array.from(lat) };
-  }
-
-  /** Colour the sphere from a [lat][lon] field using colour function f. */
-  /** Colour the sphere from a [lat][lon] field; f receives the value and its grid index (-1 at the poles). */
-  setField(lat: Float64Array, nlon: number, values: Float32Array, f: (v: number, idx: number) => Rgb): void {
-    this.ensureMesh(lat, nlon);
-    const m = this.mesh!, nlat = lat.length, col = new Float32Array(m.rows * m.cols * 3);
-    const put = (r: number, c: number, rgb: Rgb): void => { const o = (r * m.cols + c) * 3; col[o] = rgb[0]; col[o + 1] = rgb[1]; col[o + 2] = rgb[2]; };
-    let n = 0, s = 0;
-    for (let i = 0; i < nlon; i++) n += values[i]!;
-    for (let i = 0; i < nlon; i++) s += values[(nlat - 1) * nlon + i]!;
-    const np = f(n / nlon, -1), sp = f(s / nlon, -1);
-    for (let c = 0; c < m.cols; c++) { put(0, c, np); put(m.rows - 1, c, sp); }
-    for (let j = 0; j < nlat; j++) for (let c = 0; c < m.cols; c++) put(j + 1, c, f(values[j * nlon + (c % nlon)]!, j * nlon + (c % nlon)));
     const gl = this.gl;
-    gl.bindBuffer(gl.ARRAY_BUFFER, m.col);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, col);
+    gl.bindTexture(gl.TEXTURE_2D, this.fieldTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, nlon, nlat, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    this.fieldSize = [nlon, nlat];
+    this.dirty = true;
   }
 
-  /** Coastlines: 0.5 contour of a [lat][lon] land mask (marching squares), or null to clear. */
-  setOutline(lat: Float64Array, nlon: number, mask: Uint8Array | null): void {
-    if (!mask) { this.coast = null; return; }
-    const gl = this.gl, nlat = lat.length, v: number[] = [], c: number[] = [];
-    const P = (la: number, lo: number): void => { v.push(Math.cos(la) * Math.cos(lo), Math.sin(la), -Math.cos(la) * Math.sin(lo)); c.push(0.05, 0.05, 0.05); };
-    for (let j = 0; j < nlat - 1; j++) for (let i = 0; i < nlon; i++) {
-      const i1 = (i + 1) % nlon;
-      const lo0 = i * 2 * Math.PI / nlon, lo1 = (i + 1) * 2 * Math.PI / nlon, la0 = lat[j]!, la1 = lat[j + 1]!;
-      const corners: [number, number, number][] = [
-        [la0, lo0, mask[j * nlon + i]!], [la0, lo1, mask[j * nlon + i1]!], [la1, lo1, mask[(j + 1) * nlon + i1]!], [la1, lo0, mask[(j + 1) * nlon + i]!],
-      ];
-      const pts: [number, number][] = [];
-      for (let e = 0; e < 4; e++) {
-        const a = corners[e]!, b = corners[(e + 1) % 4]!;
-        if (a[2] !== b[2]) pts.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
-      }
-      if (pts.length >= 2) { P(pts[0]![0], pts[0]![1]); P(pts[1]![0], pts[1]![1]); }
-      if (pts.length === 4) { P(pts[2]![0], pts[2]![1]); P(pts[3]![0], pts[3]![1]); }
-    }
-    const vao = gl.createVertexArray()!;
-    gl.bindVertexArray(vao);
-    const pb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, pb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(this.loc.pos); gl.vertexAttribPointer(this.loc.pos, 3, gl.FLOAT, false, 0, 0);
-    const cb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, cb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(c), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(this.loc.col); gl.vertexAttribPointer(this.loc.col, 3, gl.FLOAT, false, 0, 0);
-    gl.bindVertexArray(null);
-    this.coast = { vao, count: v.length / 3 };
+  /** Continents on (Earth experiments) or off (aquaplanet, idealised planets). */
+  setOutline(_lat: Float64Array, _nlon: number, mask: Uint8Array | null): void { this.landOn = mask ? 1 : 0; this.dirty = true; }
+
+  /** 3-D cloud field [k][lat][lon] (bytes, k = height level from the surface to cloudTop), or null. */
+  setClouds(data: Uint8Array | null, nlon: number, nlat: number, nz: number, top: number): void {
+    this.hasCloud = !!data;
+    if (!data) return;
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_3D, this.cloudTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, nlon, nlat, nz, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+    this.cloudNx = nlon; this.cloudTop = top;
+    this.dirty = true; this.cloudDirty = true;
   }
 
   /** Tracer streaks: pairs of unit vectors (head, tail) with colours. */
   setTracers(pos: Float32Array, col: Float32Array, count: number): void {
+    if (count === 0 && this.trcCount === 0) return;
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.trc.pos); gl.bufferData(gl.ARRAY_BUFFER, pos.subarray(0, count * 3), gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.trc.col); gl.bufferData(gl.ARRAY_BUFFER, col.subarray(0, count * 3), gl.DYNAMIC_DRAW);
     this.trcCount = count;
+    this.dirty = true;
   }
+
+  /** redraw needed (new data, camera, settings); the cloud ray march shares the GPU with the model */
+  dirty = true;
+  private lastSettings = '';
 
   render(): void {
     const gl = this.gl, c = this.canvas;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const w = Math.max(1, Math.round(c.clientWidth * dpr)), h = Math.max(1, Math.round(c.clientHeight * dpr));
-    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    const cssW = Math.max(1, c.clientWidth), cssH = Math.max(1, c.clientHeight);
+    const scale = Math.min(Math.min(2, window.devicePixelRatio || 1), Math.sqrt(1.6e6 / (cssW * cssH)));
+    const w = Math.max(1, Math.round(cssW * scale)), h = Math.max(1, Math.round(cssH * scale));
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; this.dirty = true; this.cloudDirty = true; }
+    const settings = `${this.exaggeration}|${this.fieldAlpha}|${this.cloudsOn}|${this.yaw}|${this.pitch}|${this.dist}`;
+    if (settings !== this.lastSettings) { this.lastSettings = settings; this.dirty = true; this.cloudDirty = true; }
+    if (!this.dirty) return;
+    // data-only redraws (tracers, fields) at most 30 per second; the model shares the GPU
+    const now = performance.now();
+    if (!this.cloudDirty && now - this.lastDraw < 33) return;
+    this.lastDraw = now;
+    this.dirty = false;
     gl.viewport(0, 0, w, h);
-    gl.clearColor(0.02, 0.03, 0.05, 1);
+    gl.clearColor(0.01, 0.015, 0.03, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
-    gl.useProgram(this.prog);
-    const mvp = this.matrix(w / h);
-    gl.uniformMatrix4fv(this.loc.mvp, false, mvp);
-    const eye = this.eye();
-    const ln = Math.hypot(eye[0] + 0.6, eye[1] + 0.8, eye[2]);
-    gl.uniform3f(this.loc.light, (eye[0] + 0.6) / ln, (eye[1] + 0.8) / ln, eye[2] / ln);
-    if (this.mesh) {
-      gl.uniform1f(this.loc.scale, 1); gl.uniform1f(this.loc.alpha, 1); gl.uniform1f(this.loc.shade, 1);
-      gl.bindVertexArray(this.mesh.vao);
-      gl.drawElements(gl.TRIANGLES, this.mesh.count, gl.UNSIGNED_INT, 0);
-    }
+    const mvp = this.matrix(w / h), eye = this.eye();
+    const ln = Math.hypot(eye[0] + 0.6, eye[1] + 0.8, eye[2]), L: V3 = [(eye[0] + 0.6) / ln, (eye[1] + 0.8) / ln, eye[2] / ln];
+    const H = this.exaggeration * this.cloudTop / 6.371e6, relief = this.exaggeration * 6000 / 6.371e6;
+    // planet
+    const P = this.planet.prog;
+    gl.useProgram(P);
+    gl.uniformMatrix4fv(gl.getUniformLocation(P, 'uMVP'), false, mvp);
+    gl.uniform3f(gl.getUniformLocation(P, 'uLight'), L[0], L[1], L[2]);
+    gl.uniform1f(gl.getUniformLocation(P, 'uFieldAlpha'), this.fieldAlpha);
+    gl.uniform1f(gl.getUniformLocation(P, 'uLandOn'), this.landOn);
+    gl.uniform1f(gl.getUniformLocation(P, 'uRelief'), relief);
+    gl.uniform2f(gl.getUniformLocation(P, 'uFieldSize'), this.fieldSize[0], this.fieldSize[1]);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.mapTex); gl.uniform1i(gl.getUniformLocation(P, 'uMap'), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.fieldTex); gl.uniform1i(gl.getUniformLocation(P, 'uField'), 1);
+    gl.bindVertexArray(this.planet.vao);
+    gl.drawElements(gl.TRIANGLES, this.planet.count, gl.UNSIGNED_INT, 0);
+    // lines under the clouds
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(this.prog);
+    gl.uniformMatrix4fv(this.loc.mvp, false, mvp);
+    gl.uniform3f(this.loc.light, L[0], L[1], L[2]);
     gl.uniform1f(this.loc.shade, 0);
-    gl.uniform1f(this.loc.scale, 1.002); gl.uniform1f(this.loc.alpha, 0.18);
+    gl.uniform1f(this.loc.scale, 1.001 + relief * 0.05); gl.uniform1f(this.loc.alpha, 0.12);
     gl.bindVertexArray(this.grat.vao);
     gl.drawArrays(gl.LINES, 0, this.grat.count);
-    if (this.coast) {
-      gl.uniform1f(this.loc.scale, 1.003); gl.uniform1f(this.loc.alpha, 0.9);
-      gl.bindVertexArray(this.coast.vao);
-      gl.drawArrays(gl.LINES, 0, this.coast.count);
-    }
-    if (this.marker) {
-      gl.uniform1f(this.loc.scale, 1.005); gl.uniform1f(this.loc.alpha, 1);
-      gl.bindVertexArray(this.marker.vao);
-      gl.drawArrays(gl.LINES, 0, this.marker.count);
-    }
     if (this.trcCount > 0) {
-      gl.uniform1f(this.loc.scale, 1.004); gl.uniform1f(this.loc.alpha, 0.85);
+      gl.uniform1f(this.loc.scale, 1.0 + 0.5 * H); gl.uniform1f(this.loc.alpha, 0.8);
       gl.bindVertexArray(this.trc.vao);
       gl.drawArrays(gl.LINES, 0, this.trcCount);
     }
+    // cloud shell and limb glow (premultiplied colour), cached at reduced resolution
+    gl.disable(gl.DEPTH_TEST);
+    if (this.cloudDirty) { this.drawShell(w, h, eye, L, H); this.cloudDirty = false; gl.viewport(0, 0, w, h); }
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(this.vol.comp);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.vol.tex); gl.uniform1i(gl.getUniformLocation(this.vol.comp, 'uImg'), 2);
+    gl.bindVertexArray(this.vol.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // marker on top
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    if (this.marker) {
+      gl.useProgram(this.prog);
+      gl.uniform1f(this.loc.scale, 1.0 + H); gl.uniform1f(this.loc.alpha, 1);
+      gl.bindVertexArray(this.marker.vao);
+      gl.drawArrays(gl.LINES, 0, this.marker.count);
+    }
     gl.disable(gl.BLEND);
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(null);
+  }
+
+  private drawShell(cw: number, ch: number, eye: V3, L: V3, H: number): void {
+    const gl = this.gl, vol = this.vol;
+    const k = Math.min(1, Math.sqrt(0.8e6 / (cw * ch))), w = Math.max(1, Math.round(cw * k)), h = Math.max(1, Math.round(ch * k));
+    if (vol.w !== w || vol.h !== h) {
+      vol.w = w; vol.h = h;
+      gl.bindTexture(gl.TEXTURE_2D, vol.tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, vol.fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, vol.tex, 0);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, vol.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.disable(gl.BLEND);
+    const V = this.vol.prog, f = norm([-eye[0], -eye[1], -eye[2]]), s2 = norm(cross(f, [0, 1, 0])), u2 = cross(s2, f);
+    gl.useProgram(V);
+    gl.uniform3f(gl.getUniformLocation(V, 'uEye'), eye[0], eye[1], eye[2]);
+    gl.uniform3f(gl.getUniformLocation(V, 'uF'), f[0], f[1], f[2]);
+    gl.uniform3f(gl.getUniformLocation(V, 'uS'), s2[0], s2[1], s2[2]);
+    gl.uniform3f(gl.getUniformLocation(V, 'uU'), u2[0], u2[1], u2[2]);
+    gl.uniform1f(gl.getUniformLocation(V, 'uTan'), Math.tan(0.4));
+    gl.uniform1f(gl.getUniformLocation(V, 'uAspect'), cw / ch);
+    gl.uniform1f(gl.getUniformLocation(V, 'uH'), H);
+    gl.uniform1f(gl.getUniformLocation(V, 'uCloudOn'), this.cloudsOn && this.hasCloud ? 1 : 0);
+    gl.uniform1f(gl.getUniformLocation(V, 'uNx'), this.cloudNx);
+    gl.uniform3f(gl.getUniformLocation(V, 'uLight'), L[0], L[1], L[2]);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_3D, this.cloudTex); gl.uniform1i(gl.getUniformLocation(V, 'uCloud'), 2);
+    gl.bindVertexArray(this.vol.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
   private eye(): [number, number, number] {

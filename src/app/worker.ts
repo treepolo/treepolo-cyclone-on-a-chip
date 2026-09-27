@@ -11,6 +11,7 @@ import { GpuDycore } from '../gpu/dycoreGpu.js';
 import { GpuMoist, SFC } from '../gpu/moistGpu.js';
 import type { FieldId, FromWorker, ToWorker } from './protocol.js';
 import type { NestPayload } from './regional/protocol.js';
+import { qsat } from '../model/moist/thermo.js';
 
 /** Everything the UI needs from one model state. Arrays are [k][lat][lon] or [lat][lon]. */
 interface Snapshot {
@@ -318,10 +319,54 @@ async function sendFrame(): Promise<void> {
   for (let j = 0; j < m.tr.nlat; j++) { let r = 0; for (let i = 0; i < m.tr.nlon; i++) r += s.ps[j * m.tr.nlon + i]!; psMean += m.tr.weight[j]! * r / m.tr.nlon; }
   psMean /= 2;
   if (physics) physics.setTime(t);
+  const cloud3d = s.q ? diagnoseClouds(m, s, precipRate) : null;
+  const tr: Transferable[] = [scalar.buffer, u.buffer, v.buffer];
+  if (cloud3d) tr.push(cloud3d.buffer);
   post({
-    type: 'frame', day: t / DAY, steps: b.steps(), stepsPerSecond: rate,
+    type: 'frame', day: t / DAY, cloud3d, cloudNz: CLOUD_NZ, cloudTop: CLOUD_TOP, steps: b.steps(), stepsPerSecond: rate,
     nlat: m.tr.nlat, nlon: m.tr.nlon, K, lat: m.tr.lat, sigma: m.lev.sigma,
     level: k, field, scalar, u, v, maxWind, psDrift: (psMean - ps0) / ps0,
     declinationDeg: physics && physics.cfg.seasonal ? physics.declination * 180 / Math.PI : null,
-  }, [scalar.buffer, u.buffer, v.buffer]);
+  }, tr);
+}
+
+const CLOUD_NZ = 24, CLOUD_TOP = 16000;
+let zsCache: { key: Dycore; zs: Float64Array } | null = null;
+/**
+ * 3-D cloud for display, diagnosed like the radiation's clouds: stratiform fraction
+ * ((RH - 0.8) / 0.2)^2 (Slingo 1987) per model level, plus a convective tower of fraction
+ * 0.245 + 0.125 ln(P [mm/day]) (capped at 0.8) where it rains more than 2 mm/day, from the lowest
+ * level up to the highest moist (RH > 0.6) level; interpolated to height levels above sea level.
+ */
+function diagnoseClouds(m: Dycore, s: Snapshot, rate: Float32Array | null): Uint8Array {
+  const nlat = m.tr.nlat, nlon = m.tr.nlon, ng = m.ng, K = m.K, sig = m.lev.sigma;
+  if (!zsCache || zsCache.key !== m) { const ph = new Float64Array(ng); m.surfaceGeopotentialGrid(ph); zsCache = { key: m, zs: ph.map((x) => Math.max(0, x / EARTH.gravity)) }; }
+  const zs = zsCache.zs, out = new Uint8Array(CLOUD_NZ * ng), cf = new Float64Array(K), zk = new Float64Array(K), dz = CLOUD_TOP / CLOUD_NZ;
+  for (let p = 0; p < ng; p++) {
+    const ps = s.ps[p]!;
+    let topK = K;
+    const pr = rate ? rate[p]! * 86400 : 0, cc = pr > 2 ? Math.min(0.8, 0.245 + 0.125 * Math.log(pr)) : 0;
+    for (let k = K - 1; k >= 0; k--) {
+      const T = s.T[k * ng + p]!, q = s.q![k * ng + p]!, pk = sig[k]! * ps;
+      const rh = q / qsat(T, pk);
+      cf[k] = pk > 1e4 && rh > 0.8 ? Math.min(1, ((rh - 0.8) / 0.2) ** 2) : 0;
+      // hydrostatic height: from the surface for the lowest level, layer-mean temperature above
+      zk[k] = k === K - 1 ? zs[p]! + 29.27 * T * Math.log(1 / sig[k]!) : zk[k + 1]! + 29.27 * 0.5 * (T + s.T[(k + 1) * ng + p]!) * Math.log(sig[k + 1]! / sig[k]!);
+      if (cc > 0 && topK === k + 1 && (rh > 0.6 || pk > 7e4)) topK = k;
+    }
+    if (cc > 0) for (let k = topK; k < K; k++) cf[k] = Math.max(cf[k]!, cc);
+    // height levels (model levels ordered top -> bottom, z decreasing with k)
+    let k = K - 1;
+    for (let i = 0; i < CLOUD_NZ; i++) {
+      const z = (i + 0.5) * dz;
+      if (z < zs[p]!) continue;
+      while (k > 0 && zk[k - 1]! < z) k--;
+      let c: number;
+      if (z <= zk[K - 1]!) c = cf[K - 1]!;
+      else if (k === 0 && z >= zk[0]!) c = 0;
+      else { const w = (z - zk[k]!) / (zk[k - 1]! - zk[k]!); c = cf[k]! + w * (cf[k - 1]! - cf[k]!); }
+      out[(i * nlat + (p / nlon | 0)) * nlon + p % nlon] = Math.round(Math.max(0, Math.min(1, c)) * 255);
+    }
+  }
+  return out;
 }

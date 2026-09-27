@@ -12,12 +12,17 @@ const log = (s: string): void => { const el = $('log'); el.textContent = `${s}\n
 
 let globe: Globe;
 try { globe = new Globe(canvas); } catch (e) { log(String(e)); throw e; }
+globe.loadMap(new URL('../../data/earth_map_1024.png', import.meta.url).href).catch((e) => log(`地形圖載入失敗 / Relief map failed: ${String(e)}`));
+const bindRange = (id: string, set: (v: number) => void): void => { const el = $<HTMLInputElement>(id); const f = (): void => set(Number(el.value)); el.oninput = f; f(); };
+bindRange('exag', (v) => { globe.exaggeration = v; $('exagLabel').textContent = `×${v}`; });
+bindRange('fieldAlpha', (v) => { globe.fieldAlpha = v / 100; });
+{ const c = $<HTMLInputElement>('clouds3d'); c.onchange = (): void => { globe.cloudsOn = c.checked; }; }
 
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
 const send = (m: ToWorker): void => worker.postMessage(m);
 
 let frame: FrameMessage | null = null;
-let landMask: Uint8Array | null = null;
+let _landMask: Uint8Array | null = null;
 let zonal: ZonalMessage | null = null;
 let running = false;
 
@@ -71,13 +76,12 @@ function colourise(f: FrameMessage): void {
     const [a, b] = st.range && f.field !== 'ps' ? st.range : [lo, hi];
     if (f.field === 'sat') {
       // infrared-satellite style: cold (low-OLR) cloud tops bright over a land / ocean background
-      globe.setField(f.lat, f.nlon, f.scalar, (v, idx) => {
+      globe.setField(f.lat, f.nlon, f.scalar, (v) => {
         const t = Math.max(0, Math.min(1, (290 - v) / 170)) ** 0.8;
-        const base: [number, number, number] = idx >= 0 && landMask && landMask[idx] ? [0.22, 0.25, 0.16] : [0.03, 0.07, 0.15];
-        return [base[0] + t * (0.97 - base[0]), base[1] + t * (0.97 - base[1]), base[2] + t * (1 - base[2])];
+        return [0.97, 0.97, 1, t];
       });
     } else if (f.field === 'snow') {
-      globe.setField(f.lat, f.nlon, f.scalar, (v) => v < 0.2 ? [0.06, 0.12, 0.24] : (() => { const t = Math.min(1, Math.log(v / 0.2) / Math.log(100)); return [0.7 + 0.3 * t, 0.72 + 0.28 * t, 0.9 + 0.1 * t] as [number, number, number]; })());
+      globe.setField(f.lat, f.nlon, f.scalar, (v) => v < 0.2 ? [0, 0, 0, 0] : (() => { const t = Math.min(1, Math.log(v / 0.2) / Math.log(100)); return [0.7 + 0.3 * t, 0.72 + 0.28 * t, 0.9 + 0.1 * t, 0.5 + 0.5 * t] as [number, number, number, number]; })());
     } else if (f.field === 'precip') {
       // rain: transparent-to-blue style ramp on a square-root scale
       globe.setField(f.lat, f.nlon, f.scalar, rainColour);
@@ -86,13 +90,13 @@ function colourise(f: FrameMessage): void {
   }
 }
 
-/** Radar-style rain colours: dark ocean below 0.5 mm/day, then log-scaled blue -> green -> yellow -> red -> magenta. */
+/** Radar-style rain colours: transparent below 0.5 mm/day, then log-scaled blue -> green -> yellow -> red -> magenta. */
 const RAIN_STOPS: [number, [number, number, number]][] = [
   [0.5, [0.16, 0.3, 0.55]], [2, [0.35, 0.6, 0.95]], [5, [0.2, 0.75, 0.45]], [10, [0.95, 0.9, 0.25]],
   [20, [0.98, 0.55, 0.15]], [40, [0.85, 0.15, 0.15]], [80, [0.8, 0.2, 0.8]],
 ];
-function rainColour(v: number): [number, number, number] {
-  if (v < RAIN_STOPS[0]![0]) return [0.06, 0.12, 0.24];
+function rainColour(v: number): [number, number, number] | [number, number, number, number] {
+  if (v < RAIN_STOPS[0]![0]) return [0, 0, 0, 0];
   for (let i = 1; i < RAIN_STOPS.length; i++) {
     const [x1, c1] = RAIN_STOPS[i]!, [x0, c0] = RAIN_STOPS[i - 1]!;
     if (v <= x1) {
@@ -166,7 +170,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
     $('backend').textContent = m.backend === 'gpu' ? 'WebGPU（f32）' : 'CPU（Float64）';
     $('grid').textContent = `T${m.trunc} · ${m.nlon}×${m.nlat} · L${m.K}`;
     globe.setOutline(m.lat, m.nlon, m.land);
-    landMask = m.land;
+    _landMask = m.land;
     const lev = $<HTMLInputElement>('level');
     lev.max = String(m.K - 1);
     if (Number(lev.value) > m.K - 1) lev.value = String(m.K - 1);
@@ -174,6 +178,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
   } else if (m.type === 'frame') {
     frame = m;
     colourise(m);
+    globe.setClouds(m.cloud3d, m.nlon, m.nlat, m.cloudNz, m.cloudTop);
     $('day').textContent = m.day.toFixed(2);
     $('rate').textContent = `${m.stepsPerSecond.toFixed(1)} 步/s steps/s · ${(m.stepsPerSecond * Number($('dt').dataset.dt ?? 0) / 86400 * 60).toFixed(1)} 日/分 days/min`;
     $('maxwind').textContent = `${m.maxWind.toFixed(1)} m/s`;

@@ -83,8 +83,8 @@ export class VolumeView {
     this.vol = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
     attachOrbit(canvas, {
-      rotate: (dx, dy) => { this.yaw -= dx * 0.006; this.pitch = Math.max(0.05, Math.min(1.5, this.pitch + dy * 0.006)); },
-      zoom: (f) => { this.dist = Math.max(0.6, Math.min(6, this.dist * f)); },
+      rotate: (dx, dy) => { this.yaw -= dx * 0.006; this.pitch = Math.max(0.05, Math.min(1.5, this.pitch + dy * 0.006)); this.dirty = true; },
+      zoom: (f) => { this.dist = Math.max(0.6, Math.min(6, this.dist * f)); this.dirty = true; },
     });
   }
 
@@ -100,6 +100,7 @@ export class VolumeView {
     for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
     const ax = 1, ay = ny / nx;
     this.box = [ax, ay, aspectZ];
+    this.dirty = true;
   }
 
   /** Upload the ground colour image (RGBA bytes, [j][i]). */
@@ -112,13 +113,24 @@ export class VolumeView {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.dirty = true;
   }
+
+  /** Set when the picture must be redrawn (new data, camera or size change); the ray march is costly
+   *  and shares the GPU with the model, so unchanged frames are not redrawn. */
+  private dirty = true;
+  private lastK = -1;
 
   render(cloudK: number, rainK: number): void {
     const gl = this.gl, c = this.canvas;
-    const dpr = Math.min(1.5, window.devicePixelRatio || 1);
-    const w = Math.max(1, Math.round(c.clientWidth * dpr)), h = Math.max(1, Math.round(c.clientHeight * dpr));
-    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    // cap the ray-marched pixel count (about 0.9 megapixels): the ray march is the costly part
+    const cssW = Math.max(1, c.clientWidth), cssH = Math.max(1, c.clientHeight);
+    const scale = Math.min(Math.min(1.5, window.devicePixelRatio || 1), Math.sqrt(9e5 / (cssW * cssH)));
+    const w = Math.max(1, Math.round(cssW * scale)), h = Math.max(1, Math.round(cssH * scale));
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; this.dirty = true; }
+    if (cloudK !== this.lastK) { this.lastK = cloudK; this.dirty = true; }
+    if (!this.dirty) return;
+    this.dirty = false;
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);
     const [bx, by, bz] = this.box;

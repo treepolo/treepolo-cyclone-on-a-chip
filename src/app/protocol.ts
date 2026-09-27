@@ -28,6 +28,10 @@ export interface FrameMessage {
   v: Float32Array;
   maxWind: number;
   psDrift: number;
+  /** diagnosed 3-D cloud [k][lat][lon] (bytes) on cloudNz height levels from the surface to cloudTop (m) */
+  cloud3d: Uint8Array | null;
+  cloudNz: number;
+  cloudTop: number;
   /** season information for seasonal experiments */
   declinationDeg: number | null;
 }

@@ -151,14 +151,18 @@ export async function regionalIceTests(): Promise<void> {
 /** Timing of one GPU step for the app's supercell configuration (Kessler vs ice). */
 export async function regionalPerf(): Promise<void> {
   const device = await getDevice();
-  for (const ice of [false, true]) {
+  for (const [ice, env] of [[false, false], [true, false], [true, true]] as const) {
     const nx = 60, nz = 40, dx = 2000;
     const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz: 500, dt: 6, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, ice ? 6 : 3);
+    if (env) {   // the app's supercell environment: shear and a moist boundary layer
+      m.setBaseWind((z) => ({ u: 30 * Math.tanh(z / 3000) - 15, v: 0 }));
+      for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+    }
     const g = new GpuRegional(device, m, { moist: true, physics: null, ice });
     g.uploadFrom(m);
     g.step(1); await device.queue.onSubmittedWorkDone();
     const t0 = performance.now();
     g.step(3); await device.queue.onSubmittedWorkDone();
-    gcheck(`perf supercell 60x60x40 ice=${ice}: ms per step`, true, ((performance.now() - t0) / 3).toFixed(0));
+    gcheck(`perf supercell 60x60x40 ice=${ice} env=${env}: ms per step`, true, ((performance.now() - t0) / 3).toFixed(0));
   }
 }

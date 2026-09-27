@@ -92,6 +92,11 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 </select>
 <label for="level">垂直層 / Model level <span id="levelLabel" class="muted"></span></label>
 <input id="level" type="range" min="0" max="19" value="19" />
+<label for="exag">垂直放大 / Vertical exaggeration <span id="exagLabel"></span></label>
+<input id="exag" type="range" min="1" max="80" value="30" />
+<label for="fieldAlpha">資料疊加透明度 / Field overlay opacity</label>
+<input id="fieldAlpha" type="range" min="0" max="100" value="75" />
+<label><input id="clouds3d" type="checkbox" checked /> 立體雲（診斷）/ 3-D clouds (diagnosed)</label>
 <label><input id="tracers" type="checkbox" checked /> 風場示蹤粒子（無質量，只作顯示）/ Wind tracers (massless, display only)</label>
 <div id="legend"></div>
 

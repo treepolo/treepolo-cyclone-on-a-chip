@@ -218,7 +218,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
 
   /** Release GPU buffers. */
   destroy(): void {
-    for (const b of [this.S, this.S0, this.F, this.aux, this.B, this.R, ...this.params]) b?.destroy();
+    for (const b of [this.S, this.S0, this.F, this.aux, this.B, this.R, this.disp?.D, this.disp?.C, ...this.params]) b?.destroy();
   }
 
   step(n = 1): void {
@@ -263,6 +263,72 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     for (let i = 0; i < n; i++) this.passes[i]!(pass);
     pass.end();
     this.device.queue.submit([enc.finish()]);
+  }
+
+  private disp: { pipe: GPUComputePipeline; bind: GPUBindGroup; D: GPUBuffer; C: GPUBuffer } | null = null;
+
+  /**
+   * Display data without reading the whole state back: a GPU kernel packs cloud (qc + qi) and
+   * precipitation (qr + qs + qg) bytes per cell and per-column extremes; only those, the requested
+   * horizontal planes of u, v, theta, pi' and the surface precipitation accumulations are copied.
+   */
+  async readDisplay(levels: number[]): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, { u: Float32Array; v: Float32Array; th: Float32Array; pp: Float32Array }>; rain: Float32Array; snow: Float32Array }> {
+    const m = this.cpu, { nx, ny, nz } = m.c, n = nx * ny * nz, dev = this.device, PL = m.plane, SIZE = m.size;
+    if (!this.disp) {
+      const code = `
+const NX: u32 = ${nx}u; const NY: u32 = ${ny}u; const NZ: u32 = ${nz}u; const HH: u32 = ${H}u; const SX: u32 = ${m.sx}u; const PL: u32 = ${PL}u; const SIZE: u32 = ${SIZE}u; const ICE: bool = ${this.nq === 6};
+@group(0) @binding(0) var<storage, read> S: array<f32>;
+@group(0) @binding(1) var<storage, read_write> D: array<u32>;
+@group(0) @binding(2) var<storage, read_write> C: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= NX * NY) { return; }
+  let j = t / NX; let i = t % NX;
+  var wmax = 0.0; var wmin = 0.0; var cmax = 0.0; var pmax = 0.0;
+  for (var k = 0u; k < NZ; k++) {
+    let q = k * PL + (j + HH) * SX + (i + HH);
+    var cl = S[6u * SIZE + q]; var pr = S[7u * SIZE + q];
+    if (ICE) { cl += S[8u * SIZE + q]; pr += S[9u * SIZE + q] + S[10u * SIZE + q]; }
+    cl = max(cl, 0.0); pr = max(pr, 0.0);
+    let cb = u32(min(255.0, round(sqrt(cl / 3e-3) * 255.0)));
+    let pb = u32(min(255.0, round(sqrt(pr / 8e-3) * 255.0)));
+    D[(k * NY + j) * NX + i] = cb | (pb << 8u);
+    let w = S[2u * SIZE + q];
+    wmax = max(wmax, w); wmin = min(wmin, w); cmax = max(cmax, cl); pmax = max(pmax, pr);
+  }
+  C[4u * t] = wmax; C[4u * t + 1u] = wmin; C[4u * t + 2u] = cmax; C[4u * t + 3u] = pmax;
+}`;
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
+      const D = dev.createBuffer({ size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const C = dev.createBuffer({ size: nx * ny * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const bind = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: D } }, { binding: 2, resource: { buffer: C } }] });
+      this.disp = { pipe, bind, D, C };
+    }
+    const d = this.disp, planeBytes = PL * 4;
+    const total = n * 4 + nx * ny * 16 + levels.length * 4 * planeBytes + 2 * planeBytes;
+    const st = dev.createBuffer({ size: total, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = dev.createCommandEncoder();
+    const pass = enc.beginComputePass(); pass.setPipeline(d.pipe); pass.setBindGroup(0, d.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny / 64)); pass.end();
+    let off = 0;
+    enc.copyBufferToBuffer(d.D, 0, st, off, n * 4); off += n * 4;
+    enc.copyBufferToBuffer(d.C, 0, st, off, nx * ny * 16); off += nx * ny * 16;
+    const fieldOf = [0, 1, 3, 4];     // u, v, theta, pi'
+    for (const k of levels) for (const f of fieldOf) { enc.copyBufferToBuffer(this.S, (f * SIZE + k * PL) * 4, st, off, planeBytes); off += planeBytes; }
+    enc.copyBufferToBuffer(this.aux, 2 * SIZE * 4, st, off, planeBytes); off += planeBytes;
+    enc.copyBufferToBuffer(this.aux, 3 * SIZE * 4, st, off, planeBytes);
+    dev.queue.submit([enc.finish()]);
+    await st.mapAsync(GPUMapMode.READ);
+    const buf = st.getMappedRange().slice(0);
+    st.unmap(); st.destroy();
+    let o = 0;
+    const packed = new Uint32Array(buf, o, n); o += n * 4;
+    const col = new Float32Array(buf, o, nx * ny * 4); o += nx * ny * 16;
+    const planes = new Map<number, { u: Float32Array; v: Float32Array; th: Float32Array; pp: Float32Array }>();
+    for (const k of levels) { const g = (): Float32Array => { const a = new Float32Array(buf, o, PL); o += planeBytes; return a; }; planes.set(k, { u: g(), v: g(), th: g(), pp: g() }); }
+    const rain = new Float32Array(buf, o, PL); o += planeBytes;
+    const snow = new Float32Array(buf, o, PL);
+    return { packed, col, planes, rain, snow };
   }
 
   /** Accumulated frozen precipitation (snow + graupel + ice) at level 0, same layout as readRain. */
