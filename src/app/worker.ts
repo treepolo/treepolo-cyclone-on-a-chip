@@ -3,6 +3,7 @@
 
 import { DAY, EARTH } from '../core/constants.js';
 import { Dycore, GridState } from '../model/dycore.js';
+import { applySpinup } from '../model/spinup.js';
 import { HS_PRESETS, AQUA_PRESETS, EARTH_PRESETS, OBSERVED_QFLUX_SUFFIX, createHeldSuarez, createAquaplanet, createEarth, EarthData, MonthlyLatLon } from '../model/presets.js';
 import type { GrayPhysics } from '../model/moist/aquaplanet.js';
 import { ZonalMeanAccumulator } from '../model/diagnostics.js';
@@ -96,6 +97,7 @@ let backend: Backend | null = null;
 let currentPreset = '';
 let physics: GrayPhysics | null = null;
 const earthData: Record<string, EarthData> = {};
+let spinupData: ArrayBuffer | null = null, spinupNote = '';
 let qfluxData: MonthlyLatLon | null = null;
 let gpuDevice: GPUDevice | null = null;
 let acc: ZonalMeanAccumulator | null = null;
@@ -152,6 +154,12 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
         }
         const built = createEarth(EARTH_PRESETS[earthName]!, earthData[cfg.trunc >= 85 ? 'earth_512.json' : 'earth_t42.json']!, climate.qflux ? { qflux: false } : {}, climate);
         model = built.model; physics = built.physics;
+        if (m.spinup && climate.qflux) {
+          try {
+            if (!spinupData) spinupData = await (await fetch(new URL('../../data/spinup_earth_t42q.bin', import.meta.url))).arrayBuffer();
+            applySpinup(model, physics, spinupData);
+          } catch (e) { spinupNote = `無法載入起轉狀態，從頭開始 / could not load the spun-up state, starting from rest: ${String(e).slice(0, 120)}`; }
+        }
       } else if (AQUA_PRESETS[m.preset]) {
         cfg = AQUA_PRESETS[m.preset]!;
         const built = createAquaplanet(AQUA_PRESETS[m.preset]!);
@@ -165,7 +173,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
         cfg = hs;
         model = createHeldSuarez(hs);
       }
-      let note = '';
+      let note = spinupNote; spinupNote = '';
       const device = m.backend === 'cpu' ? null : await getGpu();
       let gpuBackend: GpuBackend | null = null;
       if (device) {
@@ -189,14 +197,14 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
         for (let i = 0; i < scopes.length; i++) { const err = await device.popErrorScope(); if (err && !reason) reason = err.message; }
         if (reason) {
           gpuBackend = null;
-          note = `WebGPU 在這個裝置上失敗，改用 CPU / WebGPU failed on this device, using the CPU: ${reason.slice(0, 300)}`;
+          note += (note ? ' · ' : '') + `WebGPU 在這個裝置上失敗，改用 CPU / WebGPU failed on this device, using the CPU: ${reason.slice(0, 300)}`;
         }
       }
       if (gpuBackend) backend = gpuBackend;
       else if (device) backend = new CpuBackend(model, physics);
       else {
         backend = new CpuBackend(model, physics);
-        if (m.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
+        if (m.backend !== 'cpu') note += (note ? ' · ' : '') + 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       }
       acc = new ZonalMeanAccumulator(model.tr.nlat, model.tr.nlon, model.K);
       accFrom = 0; lastSampleStep = 0;

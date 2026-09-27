@@ -4,7 +4,8 @@ import type { NestPayload } from './regional/protocol.js';
 export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip' | 'snow' | 'sst' | 'q' | 'olr' | 'ice' | 'sat';
 
 export type ToWorker =
-  | { type: 'init'; preset: string; backend: 'auto' | 'cpu' }
+  /** spinup: Earth presets with ocean heat transport start from the spun-up July state (data/spinup_earth_t42q.bin) */
+  | { type: 'init'; preset: string; backend: 'auto' | 'cpu'; spinup?: boolean }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
   | { type: 'view'; field: FieldId; level: number }

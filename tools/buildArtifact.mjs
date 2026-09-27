@@ -17,6 +17,6 @@ const files = {};
 const walk = (d) => { for (const f of readdirSync(d)) { const p = join(d, f); if (statSync(p).isDirectory()) { if (f !== 'tools' && f !== 'tests') walk(p); } else if (p.endsWith('.js')) files[p] = p; } };
 walk('dist');
 files['regional.html'] = 'regional.html';
-for (const f of ['data/earth_t42.json', 'data/qflux_gray_t21.json', 'data/earth_map_1024.png', 'data/earth_512.json']) files[f] = f;
+for (const f of ['data/earth_t42.json', 'data/qflux_gray_t21.json', 'data/earth_map_1024.png', 'data/earth_512.json', 'data/spinup_earth_t42q.bin']) files[f] = f;
 writeFileSync(join(out, 'files.json'), JSON.stringify(files, null, 1));
 console.log(`${Object.keys(files).length} files -> ${out}`);

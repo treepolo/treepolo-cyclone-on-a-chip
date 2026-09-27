@@ -97,7 +97,7 @@ in vec2 vQ;
 uniform vec3 uEye, uF, uS, uU; uniform float uTan, uAspect, uH, uCloudOn;
 uniform sampler3D uCloud; uniform float uNx, uNy; uniform vec3 uLight; uniform float uSteps, uD0;
 // embedded regional nest: tangent-plane box (nest.ts geometry) of side uNestL (radians), top uNestTop (m)
-uniform sampler3D uNest; uniform float uNestOn, uNestLat0, uNestLon0, uNestL, uNestTop, uCloudTopM; uniform vec2 uNestK;
+uniform sampler3D uNest; uniform float uNestOn, uNestLat0, uNestLon0, uNestL, uNestTop, uCloudTopM; uniform vec2 uNestK; uniform float uNestDx;
 const int NEST_SUB = 8;
 ${BSPLINE_GLSL}
 bool nestUV(float lat, float lon, float w, out vec3 q) {
@@ -130,10 +130,11 @@ void main(){
       vec3 q, pm = uEye + rd * (t0 + (float(i) + 0.5) * dt);
       vec3 nm = normalize(pm);
       float lonm = atan(-nm.z, nm.x); if (lonm < 0.0) lonm += 2.0 * PI;
-      int sub = nestUV(asin(clamp(nm.y, -1.0, 1.0)), lonm, 0.0, q) ? NEST_SUB : 1;
+      // subdivide only where the step is much longer than the nest grid spacing
+      int sub = nestUV(asin(clamp(nm.y, -1.0, 1.0)), lonm, 0.0, q) ? int(clamp(dt * 6.371e6 / (2.0 * uNestDx), 1.0, float(NEST_SUB))) : 1;
       float ds = dt / float(sub);
       for (int s = 0; s < NEST_SUB; s++) {
-        if (s >= sub) break;
+        if (s >= sub || T < 0.02) break;
         vec3 p = uEye + rd * (t0 + float(i) * dt + (float(s) + 0.5) * ds);
         float r = length(p);
         float w = (r - 1.0) / uH;
@@ -147,12 +148,12 @@ void main(){
           vec2 d = q.z <= 1.0 ? texture(uNest, q).rg : vec2(0.0);
           kc = d.r * d.r * uNestK.x * ds; kp = d.g * d.g * uNestK.y * ds;
           if (kc > 1e-3) {
-            // self-shadowing: short march toward the sun through the nest (1.5 km steps)
+            // self-shadowing: short march toward the sun through the nest (2 km steps)
             vec3 E = vec3(-sin(lon), 0.0, -cos(lon)), Nn = vec3(-sin(lat) * cos(lon), cos(lat), sin(lat) * sin(lon));
-            vec3 dq = vec3(dot(uLight, E) / (uNestL * 6.371e6), dot(uLight, Nn) / (uNestL * 6.371e6), dot(uLight, n) / uNestTop) * 1500.0;
+            vec3 dq = vec3(dot(uLight, E) / (uNestL * 6.371e6), dot(uLight, Nn) / (uNestL * 6.371e6), dot(uLight, n) / uNestTop) * 2000.0;
             float od = 0.0;
-            for (int l = 1; l <= 5; l++) { vec3 ql = q + dq * float(l); if (ql.z > 1.0) break; od += texture(uNest, ql).r * texture(uNest, ql).r; }
-            shade = 0.45 + 0.55 * exp(-od * uNestK.x / 6.371e6 * 1500.0);
+            for (int l = 1; l <= 3; l++) { vec3 ql = q + dq * float(l); if (ql.z > 1.0) break; float c = texture(uNest, ql).r; od += c * c; }
+            shade = 0.45 + 0.55 * exp(-od * uNestK.x / 6.371e6 * 2000.0);
           }
         } else {
           vec2 cp = bspline3(uCloud, vec3(lon / (2.0 * PI) + 0.5 / uNx, 0.5 - lat / PI, w), vec2(uNx, uNy)).rg;
@@ -203,13 +204,15 @@ export class Globe {
   private readonly mapTex: WebGLTexture; private readonly fieldTex: WebGLTexture; private readonly cloudTex: WebGLTexture; private readonly nestTex: WebGLTexture;
   /** embedded regional nest: centre (radians), side (m) and model top (m); null when none */
   private nest: { lat0: number; lon0: number; L: number; top: number } | null = null;
-  private nestBuf: Uint8Array | null = null;
+  private nestBuf: Uint8Array | null = null; private nestNx = 1;
+  /** nest data waiting for the next (throttled) cloud-shell redraw */
+  private nestPending = false; private lastShell = 0;
   private fieldSize: [number, number] = [1, 1];
   private cloudNx = 1; private cloudNy = 1; private hasCloud = false; private landOn = 0;
   private readonly grat: { vao: WebGLVertexArrayObject; count: number };
   private readonly trc: { vao: WebGLVertexArrayObject; pos: WebGLBuffer; col: WebGLBuffer };
   private trcCount = 0;
-  private marker: { vao: WebGLVertexArrayObject; count: number } | null = null;
+  private readonly markers = new Map<'pick' | 'nest', { vao: WebGLVertexArrayObject; count: number }>();
   /** called on a click (not a drag) on the sphere with (lat, lon) in radians, lon in [0, 2 pi) */
   onPick: ((lat: number, lon: number) => void) | null = null;
   yaw = -0.4;
@@ -322,13 +325,14 @@ export class Globe {
   }
 
   /** Outline a square region of half-width `half` (radians of arc) centred at (lat, lon); null clears it. */
-  setMarker(lat: number | null, lon = 0, half = 0.1): void {
+  setMarker(lat: number | null, lon = 0, half = 0.1, slot: 'pick' | 'nest' = 'pick'): void {
     const gl = this.gl;
-    if (lat === null) { this.marker = null; this.dirty = true; return; }
+    if (lat === null) { this.markers.delete(slot); this.dirty = true; return; }
+    const rgb = slot === 'nest' ? [0.3, 0.95, 1] : [1, 0.85, 0.2];
     const v: number[] = [], c: number[] = [];
     const pt = (x: number, y: number): void => {
       const la = lat + y, lo = lon + x / Math.max(0.05, Math.cos(lat));
-      v.push(Math.cos(la) * Math.cos(lo), Math.sin(la), -Math.cos(la) * Math.sin(lo)); c.push(1, 0.85, 0.2);
+      v.push(Math.cos(la) * Math.cos(lo), Math.sin(la), -Math.cos(la) * Math.sin(lo)); c.push(rgb[0]!, rgb[1]!, rgb[2]!);
     };
     const n = 24;
     const edge = (x0: number, y0: number, x1: number, y1: number): void => {
@@ -342,7 +346,7 @@ export class Globe {
     const cb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, cb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(c), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(this.loc.col); gl.vertexAttribPointer(this.loc.col, 3, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
-    this.marker = { vao, count: v.length / 3 };
+    this.markers.set(slot, { vao, count: v.length / 3 });
     this.dirty = true;
   }
 
@@ -415,7 +419,8 @@ export class Globe {
     gl.bindTexture(gl.TEXTURE_3D, this.nestTex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, nx, ny, nz, 0, gl.RG, gl.UNSIGNED_BYTE, b);
-    this.dirty = true; this.cloudDirty = true;
+    this.nestNx = nx;
+    this.nestPending = true;
   }
 
   /** Tracer streaks: pairs of unit vectors (head, tail) with colours. */
@@ -440,6 +445,7 @@ export class Globe {
     if (c.width !== w || c.height !== h) { c.width = w; c.height = h; this.dirty = true; this.cloudDirty = true; }
     const settings = `${this.exaggeration}|${this.fieldAlpha}|${this.cloudsOn}|${this.yaw}|${this.pitch}|${this.dist}`;
     if (settings !== this.lastSettings) { this.lastSettings = settings; this.dirty = true; this.cloudDirty = true; }
+    if (this.nestPending && now0() - this.lastShell > 1500) { this.nestPending = false; this.dirty = true; this.cloudDirty = true; }
     if (!this.dirty) return;
     // data-only redraws (tracers, fields) at most 30 per second; the model shares the GPU
     const now = performance.now();
@@ -483,7 +489,7 @@ export class Globe {
     }
     // cloud shell and limb glow (premultiplied colour), cached at reduced resolution
     gl.disable(gl.DEPTH_TEST);
-    if (this.cloudDirty) { this.drawShell(w, h, cam, L, H); this.cloudDirty = false; gl.viewport(0, 0, w, h); }
+    if (this.cloudDirty) { this.drawShell(w, h, cam, L, H); this.cloudDirty = false; this.lastShell = now0(); gl.viewport(0, 0, w, h); }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(this.vol.comp);
@@ -492,11 +498,11 @@ export class Globe {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     // marker on top
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    if (this.marker) {
+    for (const mk of this.markers.values()) {
       gl.useProgram(this.prog);
       gl.uniform1f(this.loc.scale, 1.0 + H); gl.uniform1f(this.loc.alpha, 1);
-      gl.bindVertexArray(this.marker.vao);
-      gl.drawArrays(gl.LINES, 0, this.marker.count);
+      gl.bindVertexArray(mk.vao);
+      gl.drawArrays(gl.LINES, 0, mk.count);
     }
     gl.disable(gl.BLEND);
     gl.activeTexture(gl.TEXTURE0);
@@ -505,7 +511,7 @@ export class Globe {
 
   private drawShell(cw: number, ch: number, cam: { e: V3; f: V3; s: V3; u: V3 }, L: V3, H: number): void {
     const gl = this.gl, vol = this.vol;
-    const k = Math.min(1, Math.sqrt(0.8e6 / (cw * ch))), w = Math.max(1, Math.round(cw * k)), h = Math.max(1, Math.round(ch * k));
+    const k = Math.min(1, Math.sqrt((this.nest ? 0.5e6 : 0.8e6) / (cw * ch))), w = Math.max(1, Math.round(cw * k)), h = Math.max(1, Math.round(ch * k));
     if (vol.w !== w || vol.h !== h) {
       vol.w = w; vol.h = h;
       gl.bindTexture(gl.TEXTURE_2D, vol.tex);
@@ -538,6 +544,7 @@ export class Globe {
     gl.uniform1f(gl.getUniformLocation(V, 'uNestL'), (ne?.L ?? 1) / 6.371e6);
     gl.uniform1f(gl.getUniformLocation(V, 'uNestTop'), ne?.top ?? 1);
     gl.uniform1f(gl.getUniformLocation(V, 'uCloudTopM'), this.cloudTop);
+    gl.uniform1f(gl.getUniformLocation(V, 'uNestDx'), ne ? ne.L / this.nestNx : 1);
     gl.uniform2f(gl.getUniformLocation(V, 'uNestK'), 0.12 * 6.371e6, 0.012 * 6.371e6);
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_3D, this.nestTex); gl.uniform1i(gl.getUniformLocation(V, 'uNest'), 3);
     gl.uniform1f(gl.getUniformLocation(V, 'uSteps'), 20);
@@ -586,6 +593,7 @@ export class Globe {
 }
 
 type V3 = [number, number, number];
+const now0 = (): number => performance.now();
 function cross(a: V3, b: V3): V3 { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
 function dot(a: V3, b: V3): number { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 function norm(a: V3): V3 { const l = Math.hypot(a[0], a[1], a[2]); return [a[0] / l, a[1] / l, a[2] / l]; }

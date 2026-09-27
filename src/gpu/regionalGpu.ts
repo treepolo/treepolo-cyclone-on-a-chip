@@ -12,6 +12,8 @@ import { ICE, LF, gammaFn } from '../regional/ice.js';
 const WG = 64;
 /** workgroups along x per dispatch row; kernels see gid.x = x + y * GX * WG */
 const GX = 32768;
+/** kernel passes per command buffer: about PASS_CELLS / grid size (at least 4) */
+const PASS_CELLS = 2e7;
 const linearGid = (code: string): string => code.replace(/fn main\(@builtin\(global_invocation_id\) gid: vec3<u32>\) \{/g,
   `fn main(@builtin(global_invocation_id) gid3: vec3<u32>) { let gid = vec3<u32>(gid3.x + gid3.y * ${GX * WG}u, 0u, 0u);`);
 
@@ -230,12 +232,17 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
   }
 
   step(n = 1): void {
+    // several short command buffers per step: on large grids one step is ~1 s of GPU work, and a single
+    // long submission can trip the OS GPU watchdog (Windows TDR, ~2 s), which resets the device
+    const chunk = Math.max(4, Math.ceil(PASS_CELLS / this.cpu.size));
     for (let s = 0; s < n; s++) {
-      const enc = this.device.createCommandEncoder();
-      const pass = enc.beginComputePass();
-      for (const p of this.passes) p(pass);
-      pass.end();
-      this.device.queue.submit([enc.finish()]);
+      for (let p0 = 0; p0 < this.passes.length; p0 += chunk) {
+        const enc = this.device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        for (let p = p0; p < Math.min(this.passes.length, p0 + chunk); p++) this.passes[p]!(pass);
+        pass.end();
+        this.device.queue.submit([enc.finish()]);
+      }
       this.time += this.cpu.c.dt;
       this.steps++;
     }

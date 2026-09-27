@@ -61,6 +61,7 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <option value="JW_T42">T42 L26：溫帶氣旋與鋒面自行生成 / extratropical cyclone and fronts develop</option>
 </optgroup>
 </select>
+<label><input id="spinup" type="checkbox" checked /> 從已起轉的 7 月狀態開始（含「海洋熱傳輸」的地球情境）/ Start from a spun-up July state (Earth with ocean heat transport)</label>
 <label for="backendSel">計算後端 / Compute backend</label>
 <select id="backendSel"><option value="auto">自動：可用時用 WebGPU / Auto: WebGPU when available</option><option value="cpu">CPU Float64（參考解 / reference）</option></select>
 <div class="controls"><button id="run">執行 / Run</button><button id="resetAvg">重設平均 / Reset average</button></div>
@@ -70,7 +71,7 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <h2>放大區域 / Zoom into a region</h2>
 <div class="muted">在地球上點一下選擇地點（黃框為區域範圍），再開啟區域非靜力模式：以目前的全球場為初始與側邊界條件（單向巢狀），解析對流、颮線與氣旋內部結構。 / Click the globe to choose a point (yellow box: the domain), then open the regional non-hydrostatic model there, initialised and driven at its boundaries by the current global fields (one-way nesting), to resolve convection, squall lines and storm structure.</div>
 <label for="nestSize">區域大小 / Domain</label>
-<select id="nestSize"><option value="meso">1200 km，Δx 12 km：鋒面、氣旋、季風雨帶 / fronts, cyclones, monsoon rain bands</option><option value="storm">480 km，Δx 4 km：可解析對流（需 GPU）/ convection-permitting (GPU)</option><option value="cp3">960 km，Δx 3 km：可解析對流、大範圍（需獨立顯卡）/ convection-permitting, large (discrete GPU)</option></select>
+<select id="nestSize"><option value="meso">1200 km，Δx 12 km：鋒面、氣旋、季風雨帶 / fronts, cyclones, monsoon rain bands</option><option value="storm" selected>480 km，Δx 4 km：可解析對流（需 GPU，嵌入建議用這個）/ convection-permitting (GPU; recommended for embedding)</option><option value="cp3">960 km，Δx 3 km：可解析對流、大範圍（需獨立顯卡）/ convection-permitting, large (discrete GPU)</option></select>
 <div class="row"><span>所選地點 / Selected point</span><span id="pick">—</span></div>
 <div class="controls"><button id="embed" disabled>嵌入地球（真實比例）/ Embed on the globe</button><button id="unembed" disabled>移除嵌入 / Remove</button><button id="zoom" disabled>另開視窗 / Open in a window</button></div>
 <div class="muted">嵌入：區域模式直接在地球上、照真實位置與比例跑，放大飛低即可看見雲塔；全球模式每小時提供新的邊界，並在領先超過 1 小時時等待。/ Embed: the regional model runs in place on the globe at true scale; zoom in and fly low to see the cloud towers. The global model refreshes its boundaries hourly and waits when more than an hour ahead.</div>

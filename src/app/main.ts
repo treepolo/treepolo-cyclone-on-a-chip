@@ -240,6 +240,7 @@ function startEmbed(payload: NestPayload): void {
     if (r.type === 'ready') {
       e.ready = true;
       globe.setNest({ lat0: e.lat0, lon0: e.lon0, L: r.nx * r.dx, top: r.nz * r.dz });
+      globe.setMarker(e.lat0, e.lon0, 0.5 * r.nx * r.dx / 6.371e6, 'nest');
       log(`嵌入區域模式就緒 / Embedded nest ready: ${r.nx}×${r.ny}×${r.nz}, Δx ${r.dx / 1000} km, ${r.backend === 'gpu' ? 'WebGPU' : 'CPU'}${r.note ? ' · ' + r.note : ''}`);
       reg.postMessage({ type: 'speed', stepsPerTick: 6 } satisfies ToRegionalWorker);
       syncRun();
@@ -267,6 +268,7 @@ function stopEmbed(): void {
   embed.reg?.terminate();
   embed = null;
   globe.setNest(null);
+  globe.setMarker(null, 0, 0, 'nest');
   $('nestStatus').textContent = '—';
   $<HTMLButtonElement>('unembed').disabled = true;
   syncRun();
@@ -316,6 +318,7 @@ $('nestSize').onchange = (): void => { if (pick) globe.setMarker(pick.lat, pick.
 $('resetAvg').onclick = (): void => { send({ type: 'resetAverage' }); log('重設緯向平均 / Zonal average reset'); };
 $('preset').onchange = (): void => init();
 $('backendSel').onchange = (): void => init();
+$('spinup').onchange = (): void => init();
 function init(): void {
   stopEmbed();
   running = false; syncRun();
@@ -323,7 +326,9 @@ function init(): void {
   $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : p === 'EARTH_T21' ? '1200' : p === 'EARTH_T42' ? '720' : p.endsWith('T85') ? '600' : p.endsWith('T170') ? '300' : '900';
   if (p.startsWith('EARTH')) {
     $<HTMLSelectElement>('field').value = 'precip';
-    log('地球：真實海陸與地形、季節日照；模式從 3 月 20 日（春分）開始 / Earth: real land, orography and seasons; the model starts on 20 March (equinox)');
+    log(preset.endsWith('_Q') && $<HTMLInputElement>('spinup').checked
+      ? '地球：從已起轉的 7 月初狀態開始（天氣系統、季風、熱帶擾動已發展）/ Earth: starting from a spun-up early-July state (weather systems, monsoon and tropical disturbances already developed)'
+      : '地球：真實海陸與地形、季節日照；模式從 3 月 20 日（春分）靜止開始，天氣系統約需 1–2 週發展 / Earth: real land, orography and seasons; the model starts at rest on 20 March (equinox); weather systems take 1–2 weeks to develop');
   }
   if (p.startsWith('AQUA')) {
     $<HTMLSelectElement>('field').value = 'precip';
@@ -334,7 +339,7 @@ function init(): void {
     log('斜壓波：第 6–10 日可見氣旋加深與鋒面 / Baroclinic wave: cyclones deepen and fronts form around days 6–10');
   }
   log(`建立模式中 / Building model: ${preset}`);
-  send({ type: 'init', preset, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' });
+  send({ type: 'init', preset, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu', spinup: $<HTMLInputElement>('spinup').checked });
   send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 }
 init();

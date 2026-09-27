@@ -34,6 +34,12 @@ async function getGpu(): Promise<GPUDevice | null> {
   const ad = await nav.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!ad) return null;
   gpuDevice = await ad.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, maxBufferSize: ad.limits.maxBufferSize } });
+  const dev = gpuDevice;
+  dev.lost.then((info) => {
+    if (gpuDevice === dev) gpuDevice = null;
+    running = false;
+    post({ type: 'error', message: `GPU 裝置遺失（可能是顯示卡逾時被系統重設），請重新整理頁面 / GPU device lost (probably reset by the OS watchdog); please reload the page: ${info.message}` });
+  });
   return gpuDevice;
 }
 
@@ -238,11 +244,14 @@ async function sendFrame(): Promise<void> {
     // GPU: packed display bytes, column extremes and the few horizontal planes the diagnostics need
     let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
     const d = await gpu.readDisplay(k15 === 0 ? [0] : [0, k15]);
+    // keep the GPU busy while this frame is unpacked on the CPU
+    const tNow = gpu.time, sNow = gpu.steps;
+    if (running) { gpu.step(gpuBatch); rateSteps += gpuBatch; }
     for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; }
     for (let c = 0; c < nx * ny; c++) { wmax = Math.max(wmax, d.col[4 * c]!); wmin = Math.min(wmin, d.col[4 * c + 1]!); qcmax = Math.max(qcmax, d.col[4 * c + 2]!); qrmax = Math.max(qrmax, d.col[4 * c + 3]!); }
     for (const [k, pl] of d.planes) { const o = k * m.plane; m.u.set(pl.u, o); m.v.set(pl.v, o); m.th.set(pl.th, o); m.pp.set(pl.pp, o); }
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = m.idx(i, j, 0); mp.rainAcc[j * nx + i] = d.rain[q]!; mp.snowAcc[j * nx + i] = d.snow[q]!; }
-    m.time = gpu.time; m.steps = gpu.steps;
+    m.time = tNow; m.steps = sNow;
     if (!Number.isFinite(wmax)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
   } else {
     if (!Number.isFinite(m.w[m.idx(0, 0, 1)]!)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
