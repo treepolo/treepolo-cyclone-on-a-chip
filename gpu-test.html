@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><title>GPU 測試 / GPU tests</title></head>
+<body style="font-family:monospace;background:#05070a;color:#dbe5ef">
+<h1>GPU 驗證 / GPU validation</h1><pre id="out"></pre>
+<script>const o=document.getElementById('out');const l=console.log;console.log=(...a)=>{o.textContent+=a.join(' ')+'\n';l(...a);};</script>
+<script type="module" src="./dist/gpu/tests/main.js"></script>
+</body></html>
