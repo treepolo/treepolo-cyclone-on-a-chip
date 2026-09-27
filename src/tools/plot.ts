@@ -207,3 +207,37 @@ function niceStep(x: number): number {
   const m = x / e;
   return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * e;
 }
+
+export interface XYPlot { title: string; nx: number; ny: number; dx: number; values: number[]; units: string; diverging: boolean; contourStep: number }
+
+/** Horizontal (x-y) section of a regional-model field, y upward. */
+export function xySvg(p: XYPlot, size = 420): string {
+  const ml = 44, mr = 12, mt = 26, mb = 30, W = size, H = size;
+  const nx = p.nx, ny = p.ny;
+  let vmin = Infinity, vmax = -Infinity, amax = 0;
+  for (const v of p.values) { vmin = Math.min(vmin, v); vmax = Math.max(vmax, v); amax = Math.max(amax, Math.abs(v)); }
+  const cw = W / nx, ch = H / ny;
+  const out: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W + ml + mr}" height="${H + mt + mb}" font-family="sans-serif" font-size="11">`,
+    `<rect width="100%" height="100%" fill="#fff"/>`, `<text x="${ml}" y="16" font-size="13" font-weight="bold">${p.title} (${p.units})</text>`];
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const v = p.values[j * nx + i]!;
+    const t = p.diverging ? v / (amax || 1) : (v - vmin) / ((vmax - vmin) || 1);
+    if (!p.diverging && t < 0.02) continue;
+    out.push(`<rect x="${(ml + i * cw).toFixed(1)}" y="${(mt + H - (j + 1) * ch).toFixed(1)}" width="${(cw + 0.5).toFixed(1)}" height="${(ch + 0.5).toFixed(1)}" fill="${color(t, p.diverging)}"/>`);
+  }
+  const xs = Array.from({ length: nx }, (_, i) => ml + (i + 0.5) * cw), ys = Array.from({ length: ny }, (_, j) => mt + H - (j + 0.5) * ch);
+  const val = (r: number, c: number): number => p.values[r * nx + c]!;
+  const lo = Math.ceil(vmin / p.contourStep), hi = Math.floor(vmax / p.contourStep);
+  for (let i = lo; i <= hi; i++) {
+    if (i === 0) continue;
+    const d = contours(xs, ys, val, i * p.contourStep);
+    if (d) out.push(`<path d="${d}" stroke="${i < 0 ? '#333' : '#000'}" stroke-width="0.7" ${i < 0 ? 'stroke-dasharray="3,2"' : ''} fill="none"/>`);
+  }
+  out.push(`<rect x="${ml}" y="${mt}" width="${W}" height="${H}" fill="none" stroke="#000"/>`);
+  for (let km = 0; km <= nx * p.dx / 1000; km += 20) {
+    out.push(`<text x="${ml + km * 1000 / p.dx * cw}" y="${mt + H + 14}" text-anchor="middle">${km}</text>`);
+    out.push(`<text x="${ml - 4}" y="${mt + H - km * 1000 / p.dx * ch + 4}" text-anchor="end">${km}</text>`);
+  }
+  out.push(`<text x="${ml + W}" y="${mt + H + 28}" text-anchor="end" fill="#555">km; range ${vmin.toPrecision(3)} … ${vmax.toPrecision(3)}</text></svg>`);
+  return out.join('\n');
+}

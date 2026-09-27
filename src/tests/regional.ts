@@ -2,6 +2,7 @@
 import { DRY_AIR, EARTH } from '../core/constants.js';
 import { RegionalModel, RegionalConfig } from '../regional/core.js';
 import { check, summary } from './assert.js';
+import { KesslerMicrophysics, weismanKlemp, QV, QC, QR } from '../regional/kessler.js';
 
 const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200, dt: 1, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 0, dampRate: 0, kdiff2: 0 };
 
@@ -45,6 +46,39 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
   check('Straka density current: front position within 0.5 km of 15.54 km', Math.abs(front / 1000 - 15.54) < 0.5, front / 1000);
   check('Straka density current: w extremes within 15% of (-16, +13) m/s', Math.abs(wmin + 16) < 2.4 && Math.abs(wmax - 13) < 2.0, `${wmin.toFixed(2)}..${wmax.toFixed(2)}`);
   check('Straka density current: left-right symmetric', asym < 1e-6, asym);
+}
+
+// 3. Moist convection (Weisman–Klemp sounding, Kessler): a warm bubble grows into a deep precipitating
+//    updraft within 25 min, and total water (vapour + condensate + surface rain) is conserved.
+{
+  const nx = 24, nz = 40, dx = 3000, dz = 500;
+  const m = new RegionalModel({ ...base, nx, ny: nx, nz, dx, dy: dx, dz, dt: 6, nsound: 6, dampDepth: 5000, dampRate: 1 / 300 }, weismanKlemp, 3);
+  const mp = new KesslerMicrophysics(m);
+  for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+  const c = nx * dx / 2;
+  for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+    const r = Math.sqrt((((i + 0.5) * dx - c) / 10000) ** 2 + (((j + 0.5) * dx - c) / 10000) ** 2 + ((m.zc[k]! - 1400) / 1400) ** 2);
+    if (r < 1) m.th[m.idx(i, j, k)] = m.th[m.idx(i, j, k)]! + 2 * Math.cos(0.5 * Math.PI * r) ** 2;
+  }
+  const water = (): number => {
+    let t = 0;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+      const q = m.idx(i, j, k);
+      t += (m.scalars[QV]![q]! + m.scalars[QC]![q]! + m.scalars[QR]![q]!) * m.rho0[k]! * dz;
+    }
+    for (const r of mp.rainAcc) t += r;
+    return t + mp.clipped * 0;
+  };
+  const W0 = water();
+  let wmax = 0, qrmax = 0;
+  while (m.time < 25 * 60 - 1e-9) {
+    m.step(); mp.apply(6);
+    wmax = Math.max(wmax, m.maxAbs(m.w, nz + 1));
+    qrmax = Math.max(qrmax, m.maxAbs(m.scalars[QR]!));
+  }
+  const drift = Math.abs(water() - W0) / W0;
+  check('moist regional: bubble grows into a deep updraft (> 15 m/s) with rain (> 1 g/kg)', wmax > 15 && qrmax > 1e-3, `w ${wmax.toFixed(1)} m/s, qr ${(qrmax * 1000).toFixed(2)} g/kg`);
+  check('moist regional: total water conserved within 0.5% (clipping included)', drift < 5e-3, drift);
 }
 
 void DRY_AIR;

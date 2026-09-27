@@ -36,6 +36,8 @@ export class RegionalModel {
   readonly zc: Float64Array; readonly zf: Float64Array;
   readonly th0: Float64Array; readonly pi0: Float64Array; readonly rho0: Float64Array; readonly qv0: Float64Array;
   readonly th0f: Float64Array; readonly rho0f: Float64Array; readonly pi0f: Float64Array;
+  /** base-state wind profile (m/s) the damping layer relaxes toward */
+  readonly ub: Float64Array; readonly vb: Float64Array;
   // prognostic state
   u: Float64Array; v: Float64Array; w: Float64Array; th: Float64Array; pp: Float64Array;
   /** additional advected scalars (e.g. moisture species), same layout as th */
@@ -64,6 +66,7 @@ export class RegionalModel {
     for (let k = 0; k < nz; k++) this.zc[k] = (k + 0.5) * cfg.dz;
     this.th0 = new Float64Array(nz); this.qv0 = new Float64Array(nz); this.pi0 = new Float64Array(nz); this.rho0 = new Float64Array(nz);
     this.th0f = new Float64Array(nz + 1); this.rho0f = new Float64Array(nz + 1); this.pi0f = new Float64Array(nz + 1);
+    this.ub = new Float64Array(nz); this.vb = new Float64Array(nz);
     this.buildBaseState(sounding);
     const z = (): Float64Array => new Float64Array(this.size);
     this.u = z(); this.v = z(); this.w = z(); this.th = z(); this.pp = z();
@@ -287,8 +290,8 @@ export class RegionalModel {
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const q = this.idx(i, j, k);
         if (k < nz) {
-          this.fu[q] = this.fu[q]! - rc * u[q]!;
-          this.fv[q] = this.fv[q]! - rc * v[q]!;
+          this.fu[q] = this.fu[q]! - rc * (u[q]! - this.ub[k]!);
+          this.fv[q] = this.fv[q]! - rc * (v[q]! - this.vb[k]!);
           this.fth[q] = this.fth[q]! - rc * (this.th[q]! - this.th0[k]!);
         }
         this.fw[q] = this.fw[q]! - rw * this.w[q]!;
@@ -421,6 +424,16 @@ export class RegionalModel {
     void nz;
     this.time += dt;
     this.steps++;
+  }
+
+  /** Set a horizontally uniform wind profile (also the damping-layer target). */
+  setBaseWind(prof: (z: number) => { u: number; v: number }): void {
+    const { nx, ny, nz } = this.c;
+    for (let k = 0; k < nz; k++) {
+      const w = prof(this.zc[k]!);
+      this.ub[k] = w.u; this.vb[k] = w.v;
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = this.idx(i, j, k); this.u[q] = w.u; this.v[q] = w.v; }
+    }
   }
 
   // ----------------------------------------------------------------------------------------
