@@ -28,7 +28,7 @@ export interface FrameMessage {
   v: Float32Array;
   maxWind: number;
   psDrift: number;
-  /** diagnosed 3-D cloud [k][lat][lon] (bytes) on cloudNz height levels from the surface to cloudTop (m) */
+  /** diagnosed 3-D cloud and precipitation [k][lat][lon][2] (bytes: cloud fraction, precipitation) on cloudNz height levels from sea level to cloudTop (m) */
   cloud3d: Uint8Array | null;
   cloudNz: number;
   cloudTop: number;

@@ -19,6 +19,24 @@ out vec4 o;
 void main(){ float l = mix(1.0, 0.55+0.45*max(dot(normalize(vN),uLight),0.0), uShade); o=vec4(vCol*l,uAlpha); }`;
 
 const PI_GLSL = 'const float PI = 3.14159265358979;';
+// cubic B-spline filtering from four bilinear taps (GPU Gems 2, ch. 20): smooth contours of the coarse
+// model grid instead of the staircase of plain bilinear interpolation
+const BSPLINE_GLSL = `
+void bsTaps(vec2 uv, vec2 size, out vec4 p, out vec2 g0) {
+  vec2 st = uv * size - 0.5, i = floor(st), f = st - i, f2 = f * f, f3 = f2 * f;
+  vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0, w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  vec2 w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0, w3 = f3 / 6.0;
+  g0 = w0 + w1;
+  p = vec4((i - 0.5 + w1 / g0) / size, (i + 1.5 + w3 / (w2 + w3)) / size);
+}
+vec4 bspline2(sampler2D t, vec2 uv, vec2 size) {
+  vec4 p; vec2 g0; bsTaps(uv, size, p, g0);
+  return mix(mix(texture(t, p.zw), texture(t, p.xw), g0.x), mix(texture(t, p.zy), texture(t, p.xy), g0.x), g0.y);
+}
+vec4 bspline3(highp sampler3D t, vec3 uvw, vec2 size) {
+  vec4 p; vec2 g0; bsTaps(uvw.xy, size, p, g0);
+  return mix(mix(texture(t, vec3(p.zw, uvw.z)), texture(t, vec3(p.xw, uvw.z)), g0.x), mix(texture(t, vec3(p.zy, uvw.z)), texture(t, vec3(p.xy, uvw.z)), g0.x), g0.y);
+}`;
 // planet surface: relief-displaced sphere, map colours, hillshade, coastline, model field overlay
 const PVS = `#version 300 es
 precision highp float;
@@ -38,6 +56,7 @@ precision highp float;
 in vec2 vUV; in vec3 vP;
 uniform sampler2D uMap; uniform sampler2D uField; uniform vec3 uLight; uniform float uFieldAlpha; uniform float uLandOn;
 uniform vec2 uFieldSize; uniform float uRelief;
+${BSPLINE_GLSL}
 out vec4 o;
 vec3 landColour(float h){ // h: elevation / 6 km
   vec3 c = mix(vec3(0.20, 0.33, 0.16), vec3(0.45, 0.43, 0.26), smoothstep(0.0, 0.18, h));
@@ -63,7 +82,7 @@ void main(){
   float coast = 1.0 - smoothstep(0.0, 1.2 * fw + 1e-4, abs(land - 0.5));
   base = mix(base, vec3(0.02, 0.02, 0.02), coast * 0.8 * uLandOn);
   vec3 col = base * (0.30 + 0.75 * sun);
-  vec4 f = texture(uField, vec2(vUV.x + 0.5 / uFieldSize.x, vUV.y));
+  vec4 f = bspline2(uField, vec2(vUV.x + 0.5 / uFieldSize.x, vUV.y), uFieldSize);
   col = mix(col, f.rgb * (0.55 + 0.5 * max(dot(n, uLight), 0.0)), f.a * uFieldAlpha);
   o = vec4(col, 1.0);
 }`;
@@ -76,7 +95,8 @@ precision highp float; precision highp sampler3D;
 ${PI_GLSL}
 in vec2 vQ;
 uniform vec3 uEye, uF, uS, uU; uniform float uTan, uAspect, uH, uCloudOn;
-uniform sampler3D uCloud; uniform float uNx; uniform vec3 uLight;
+uniform sampler3D uCloud; uniform float uNx, uNy; uniform vec3 uLight; uniform float uSteps, uD0;
+${BSPLINE_GLSL}
 out vec4 o;
 vec2 sph(vec3 ro, vec3 rd, float r){ float b = dot(ro, rd), c = dot(ro, ro) - r * r, d = b * b - c; if (d < 0.0) return vec2(1e9, -1e9); d = sqrt(d); return vec2(-b - d, -b + d); }
 void main(){
@@ -93,9 +113,11 @@ void main(){
   vec3 glow = vec3(0.30, 0.55, 1.0) * (1.0 - exp(-len / uH * 0.10)) * day;
   vec3 acc = vec3(0.0); float T = 1.0;
   if (uCloudOn > 0.5) {
-    const int N = 56;
+    // steps: enough to resolve the layer depth along the ray (grazing rays cross many columns)
+    int N = int(clamp(uSteps * sqrt(len / uH), 24.0, 160.0));
     float dt = len / float(N);
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < 160; i++) {
+      if (i >= N) break;
       vec3 p = uEye + rd * (t0 + (float(i) + 0.5) * dt);
       float r = length(p);
       float w = (r - 1.0) / uH;
@@ -103,12 +125,15 @@ void main(){
       vec3 n = p / r;
       float lon = atan(-n.z, n.x); if (lon < 0.0) lon += 2.0 * PI;
       float lat = asin(clamp(n.y, -1.0, 1.0));
-      float d = texture(uCloud, vec3(lon / (2.0 * PI) + 0.5 / uNx, 0.5 - lat / PI, w)).r;
-      if (d < 0.01) continue;
-      float k = d * 9.0 * dt / uH;             // optical depth of the step
-      float a = 1.0 - exp(-k);
+      vec2 cp = bspline3(uCloud, vec3(lon / (2.0 * PI) + 0.5 / uNx, 0.5 - lat / PI, w), vec2(uNx, uNy)).rg;
+      if (cp.r + cp.g < 0.01) continue;
+      // grid-box cloud fraction f: a layer of depth D0 (2 km) hides a fraction f of what lies behind it,
+      // i.e. extinction -ln(1 - f) / D0; precipitation shafts (blue) hide up to half over 6 km
+      float kc = -log(1.0 - 0.98 * cp.r) * dt / (uD0 * uH), kp = -log(1.0 - 0.5 * cp.g) * dt / (3.0 * uD0 * uH);
+      float a = 1.0 - exp(-(kc + kp));
       float lit = 0.25 + 0.85 * clamp(dot(n, uLight) * 1.3 + 0.15, 0.0, 1.0);
-      acc += T * a * vec3(lit);
+      vec3 col = (kc * vec3(1.0) + kp * vec3(0.35, 0.55, 1.0)) / max(kc + kp, 1e-6);
+      acc += T * a * col * lit;
       T *= 1.0 - a;
       if (T < 0.02) break;
     }
@@ -146,7 +171,7 @@ export class Globe {
   private lastDraw = 0;
   private readonly mapTex: WebGLTexture; private readonly fieldTex: WebGLTexture; private readonly cloudTex: WebGLTexture;
   private fieldSize: [number, number] = [1, 1];
-  private cloudNx = 1; private hasCloud = false; private landOn = 0;
+  private cloudNx = 1; private cloudNy = 1; private hasCloud = false; private landOn = 0;
   private readonly grat: { vao: WebGLVertexArrayObject; count: number };
   private readonly trc: { vao: WebGLVertexArrayObject; pos: WebGLBuffer; col: WebGLBuffer };
   private trcCount = 0;
@@ -155,9 +180,10 @@ export class Globe {
   onPick: ((lat: number, lon: number) => void) | null = null;
   yaw = -0.4;
   pitch = 0.35;
+  /** camera distance from the centre (Earth radii); close in, the view tilts toward the horizon */
   dist = 3.2;
   /** vertical exaggeration of the atmosphere and terrain (x real scale) */
-  exaggeration = 30;
+  exaggeration = 1;
   /** opacity of the model field over the map (0..1) */
   fieldAlpha = 0.75;
   /** draw the 3-D cloud shell */
@@ -184,7 +210,7 @@ export class Globe {
     gl.bindVertexArray(null);
     this.trc = { vao, pos, col };
     // planet mesh: regular longitude-latitude grid in texture coordinates
-    const pp = program(gl, PVS, PFS), NU = 360, NV = 180, uv = new Float32Array((NU + 1) * (NV + 1) * 2), idx = new Uint32Array(NU * NV * 6);
+    const pp = program(gl, PVS, PFS), NU = 720, NV = 360, uv = new Float32Array((NU + 1) * (NV + 1) * 2), idx = new Uint32Array(NU * NV * 6);
     for (let j = 0; j <= NV; j++) for (let i = 0; i <= NU; i++) { const o = (j * (NU + 1) + i) * 2; uv[o] = i / NU; uv[o + 1] = j / NV; }
     let n = 0;
     for (let j = 0; j < NV; j++) for (let i = 0; i < NU; i++) { const a = j * (NU + 1) + i, b = a + 1, c = a + NU + 1, d = c + 1; idx[n++] = a; idx[n++] = c; idx[n++] = b; idx[n++] = b; idx[n++] = c; idx[n++] = d; }
@@ -212,7 +238,7 @@ export class Globe {
     this.cloudTex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_3D, this.cloudTex);
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.REPEAT], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_3D, k, v);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, 1, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, 1, 1, 1, 0, gl.RG, gl.UNSIGNED_BYTE, new Uint8Array(2));
     this.attachControls();
   }
 
@@ -235,8 +261,8 @@ export class Globe {
 
   private attachControls(): void {
     attachOrbit(this.canvas, {
-      rotate: (dx, dy) => { this.yaw -= dx * 0.006; this.pitch = Math.max(-1.5, Math.min(1.5, this.pitch + dy * 0.006)); },
-      zoom: (f) => { this.dist = Math.max(1.4, Math.min(8, this.dist * f)); },
+      rotate: (dx, dy) => { const k = 0.006 * Math.min(1, 0.4 + (this.dist - 1)); this.yaw -= dx * k; this.pitch = Math.max(-1.5, Math.min(1.5, this.pitch + dy * k)); },
+      zoom: (f) => { this.dist = 1 + Math.max(0.003, Math.min(7, (this.dist - 1) * f)); },
       tap: (x, y) => { if (this.onPick) { const p = this.pick(x, y); if (p) this.onPick(p.lat, p.lon); } },
     });
   }
@@ -245,7 +271,7 @@ export class Globe {
   pick(clientX: number, clientY: number): { lat: number; lon: number } | null {
     const r = this.canvas.getBoundingClientRect();
     const x = (clientX - r.left) / r.width * 2 - 1, y = 1 - (clientY - r.top) / r.height * 2;
-    const e = this.eye(), f = norm([-e[0], -e[1], -e[2]]), s = norm(cross(f, [0, 1, 0])), u = cross(s, f);
+    const { e, f, s, u } = this.camera();
     const t = Math.tan(0.4), a = r.width / r.height;
     const d = norm([f[0] + (s[0] * x * a + u[0] * y) * t, f[1] + (s[1] * x * a + u[1] * y) * t, f[2] + (s[2] * x * a + u[2] * y) * t]);
     const b = dot(e, d), c = dot(e, e) - 1, disc = b * b - c;
@@ -323,15 +349,15 @@ export class Globe {
   /** Continents on (Earth experiments) or off (aquaplanet, idealised planets). */
   setOutline(_lat: Float64Array, _nlon: number, mask: Uint8Array | null): void { this.landOn = mask ? 1 : 0; this.dirty = true; }
 
-  /** 3-D cloud field [k][lat][lon] (bytes, k = height level from the surface to cloudTop), or null. */
+  /** 3-D cloud and precipitation [k][lat][lon][2] (bytes, k = height level from sea level to cloudTop), or null. */
   setClouds(data: Uint8Array | null, nlon: number, nlat: number, nz: number, top: number): void {
     this.hasCloud = !!data;
     if (!data) return;
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_3D, this.cloudTex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, nlon, nlat, nz, 0, gl.RED, gl.UNSIGNED_BYTE, data);
-    this.cloudNx = nlon; this.cloudTop = top;
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, nlon, nlat, nz, 0, gl.RG, gl.UNSIGNED_BYTE, data);
+    this.cloudNx = nlon; this.cloudNy = nlat; this.cloudTop = top;
     this.dirty = true; this.cloudDirty = true;
   }
 
@@ -367,7 +393,7 @@ export class Globe {
     gl.clearColor(0.01, 0.015, 0.03, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
-    const mvp = this.matrix(w / h), eye = this.eye();
+    const mvp = this.matrix(w / h), cam = this.camera(), eye = cam.e;
     const ln = Math.hypot(eye[0] + 0.6, eye[1] + 0.8, eye[2]), L: V3 = [(eye[0] + 0.6) / ln, (eye[1] + 0.8) / ln, eye[2] / ln];
     const H = this.exaggeration * this.cloudTop / 6.371e6, relief = this.exaggeration * 6000 / 6.371e6;
     // planet
@@ -390,7 +416,7 @@ export class Globe {
     gl.uniformMatrix4fv(this.loc.mvp, false, mvp);
     gl.uniform3f(this.loc.light, L[0], L[1], L[2]);
     gl.uniform1f(this.loc.shade, 0);
-    gl.uniform1f(this.loc.scale, 1.001 + relief * 0.05); gl.uniform1f(this.loc.alpha, 0.12);
+    gl.uniform1f(this.loc.scale, 1.00002 + relief * 1.05); gl.uniform1f(this.loc.alpha, 0.12);
     gl.bindVertexArray(this.grat.vao);
     gl.drawArrays(gl.LINES, 0, this.grat.count);
     if (this.trcCount > 0) {
@@ -400,7 +426,7 @@ export class Globe {
     }
     // cloud shell and limb glow (premultiplied colour), cached at reduced resolution
     gl.disable(gl.DEPTH_TEST);
-    if (this.cloudDirty) { this.drawShell(w, h, eye, L, H); this.cloudDirty = false; gl.viewport(0, 0, w, h); }
+    if (this.cloudDirty) { this.drawShell(w, h, cam, L, H); this.cloudDirty = false; gl.viewport(0, 0, w, h); }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(this.vol.comp);
@@ -420,7 +446,7 @@ export class Globe {
     gl.bindVertexArray(null);
   }
 
-  private drawShell(cw: number, ch: number, eye: V3, L: V3, H: number): void {
+  private drawShell(cw: number, ch: number, cam: { e: V3; f: V3; s: V3; u: V3 }, L: V3, H: number): void {
     const gl = this.gl, vol = this.vol;
     const k = Math.min(1, Math.sqrt(0.8e6 / (cw * ch))), w = Math.max(1, Math.round(cw * k)), h = Math.max(1, Math.round(ch * k));
     if (vol.w !== w || vol.h !== h) {
@@ -433,7 +459,7 @@ export class Globe {
     gl.bindFramebuffer(gl.FRAMEBUFFER, vol.fbo);
     gl.viewport(0, 0, w, h);
     gl.disable(gl.BLEND);
-    const V = this.vol.prog, f = norm([-eye[0], -eye[1], -eye[2]]), s2 = norm(cross(f, [0, 1, 0])), u2 = cross(s2, f);
+    const V = this.vol.prog, eye = cam.e, f = cam.f, s2 = cam.s, u2 = cam.u;
     gl.useProgram(V);
     gl.uniform3f(gl.getUniformLocation(V, 'uEye'), eye[0], eye[1], eye[2]);
     gl.uniform3f(gl.getUniformLocation(V, 'uF'), f[0], f[1], f[2]);
@@ -444,6 +470,9 @@ export class Globe {
     gl.uniform1f(gl.getUniformLocation(V, 'uH'), H);
     gl.uniform1f(gl.getUniformLocation(V, 'uCloudOn'), this.cloudsOn && this.hasCloud ? 1 : 0);
     gl.uniform1f(gl.getUniformLocation(V, 'uNx'), this.cloudNx);
+    gl.uniform1f(gl.getUniformLocation(V, 'uNy'), this.cloudNy);
+    gl.uniform1f(gl.getUniformLocation(V, 'uSteps'), 20);
+    gl.uniform1f(gl.getUniformLocation(V, 'uD0'), 2000 / this.cloudTop);
     gl.uniform3f(gl.getUniformLocation(V, 'uLight'), L[0], L[1], L[2]);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_3D, this.cloudTex); gl.uniform1i(gl.getUniformLocation(V, 'uCloud'), 2);
     gl.bindVertexArray(this.vol.vao);
@@ -451,24 +480,31 @@ export class Globe {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
-  private eye(): [number, number, number] {
-    const d = this.dist;
-    return [d * Math.cos(this.pitch) * Math.sin(this.yaw), d * Math.sin(this.pitch), d * Math.cos(this.pitch) * Math.cos(this.yaw)];
+
+  /** Eye position and view basis. Far out the camera looks at the centre; below ~0.8 Earth radii of
+   *  altitude it tilts from straight down toward the horizon (up to ~70 deg near 20 km). */
+  camera(): { e: V3; f: V3; s: V3; u: V3; h: number } {
+    const p = this.pitch, y = this.yaw, h = this.dist - 1;
+    const n: V3 = [Math.cos(p) * Math.sin(y), Math.sin(p), Math.cos(p) * Math.cos(y)];
+    const t: V3 = [-Math.sin(p) * Math.sin(y), Math.cos(p), -Math.sin(p) * Math.cos(y)];
+    const x = Math.max(0, Math.min(1, 1 - Math.log(h / 0.003) / Math.log(0.8 / 0.003)));
+    const tau = 1.22 * x * x * (3 - 2 * x);
+    const e: V3 = [n[0] * this.dist, n[1] * this.dist, n[2] * this.dist];
+    const f = norm([-n[0] * Math.cos(tau) + t[0] * Math.sin(tau), -n[1] * Math.cos(tau) + t[1] * Math.sin(tau), -n[2] * Math.cos(tau) + t[2] * Math.sin(tau)]);
+    const up: V3 = [n[0] * Math.sin(tau) + t[0] * Math.cos(tau), n[1] * Math.sin(tau) + t[1] * Math.cos(tau), n[2] * Math.sin(tau) + t[2] * Math.cos(tau)];
+    const s = norm(cross(f, up)), u = cross(s, f);
+    return { e, f, s, u, h };
   }
 
   private matrix(aspect: number): Float32Array {
-    const e = this.eye();
-    // view (lookAt origin, up = +y)
-    const f = norm([-e[0], -e[1], -e[2]]);
-    const s = norm(cross(f, [0, 1, 0]));
-    const u = cross(s, f);
+    const { e, f, s, u, h } = this.camera();
     const view = [
       s[0], u[0], -f[0], 0,
       s[1], u[1], -f[1], 0,
       s[2], u[2], -f[2], 0,
       -dot(s, e), -dot(u, e), dot(f, e), 1,
     ];
-    const fov = 0.8, near = 0.05, far = 50, t = 1 / Math.tan(fov / 2);
+    const fov = 0.8, near = Math.min(0.05, 0.3 * h), far = this.dist + 2, t = 1 / Math.tan(fov / 2);
     const proj = [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0];
     const out = new Float32Array(16);
     for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {

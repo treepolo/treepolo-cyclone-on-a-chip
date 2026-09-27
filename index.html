@@ -92,8 +92,9 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 </select>
 <label for="level">垂直層 / Model level <span id="levelLabel" class="muted"></span></label>
 <input id="level" type="range" min="0" max="19" value="19" />
-<label for="exag">垂直放大 / Vertical exaggeration <span id="exagLabel"></span></label>
-<input id="exag" type="range" min="1" max="80" value="30" />
+<label for="exag">垂直放大（1 = 真實比例）/ Vertical exaggeration (1 = true scale) <span id="exagLabel"></span></label>
+<input id="exag" type="range" min="1" max="60" value="1" />
+<p class="muted">滾輪或雙指放大可一路降到約 20 km 高的低空，視角會自動轉向地平線，從側面看雲塔與雨柱（白：雲，藍：降水）/ Zoom (wheel or pinch) down to ~20 km altitude: the view tilts toward the horizon to show cloud towers and rain shafts from the side (white: cloud, blue: precipitation)</p>
 <label for="fieldAlpha">資料疊加透明度 / Field overlay opacity</label>
 <input id="fieldAlpha" type="range" min="0" max="100" value="75" />
 <label><input id="clouds3d" type="checkbox" checked /> 立體雲（診斷）/ 3-D clouds (diagnosed)</label>

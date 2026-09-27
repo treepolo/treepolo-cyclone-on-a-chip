@@ -12,6 +12,7 @@ const log = (s: string): void => { const el = $('log'); el.textContent = `${s}\n
 
 let globe: Globe;
 try { globe = new Globe(canvas); } catch (e) { log(String(e)); throw e; }
+Object.assign(globalThis, { globe }); // handy for inspecting the view from the console
 globe.loadMap(new URL('../../data/earth_map_1024.png', import.meta.url).href).catch((e) => log(`地形圖載入失敗 / Relief map failed: ${String(e)}`));
 const bindRange = (id: string, set: (v: number) => void): void => { const el = $<HTMLInputElement>(id); const f = (): void => set(Number(el.value)); el.oninput = f; f(); };
 bindRange('exag', (v) => { globe.exaggeration = v; $('exagLabel').textContent = `×${v}`; });

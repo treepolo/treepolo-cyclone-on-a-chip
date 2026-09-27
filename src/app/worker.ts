@@ -330,7 +330,8 @@ async function sendFrame(): Promise<void> {
   }, tr);
 }
 
-const CLOUD_NZ = 24, CLOUD_TOP = 16000;
+/** height levels, top (m) and the reference cloud depth D0 (m) of the renderer (globe.ts uses 2000 m too) */
+const CLOUD_NZ = 24, CLOUD_TOP = 16000, CLOUD_D0 = 2000;
 let zsCache: { key: Dycore; zs: Float64Array } | null = null;
 /**
  * 3-D cloud for display, diagnosed like the radiation's clouds: stratiform fraction
@@ -341,7 +342,7 @@ let zsCache: { key: Dycore; zs: Float64Array } | null = null;
 function diagnoseClouds(m: Dycore, s: Snapshot, rate: Float32Array | null): Uint8Array {
   const nlat = m.tr.nlat, nlon = m.tr.nlon, ng = m.ng, K = m.K, sig = m.lev.sigma;
   if (!zsCache || zsCache.key !== m) { const ph = new Float64Array(ng); m.surfaceGeopotentialGrid(ph); zsCache = { key: m, zs: ph.map((x) => Math.max(0, x / EARTH.gravity)) }; }
-  const zs = zsCache.zs, out = new Uint8Array(CLOUD_NZ * ng), cf = new Float64Array(K), zk = new Float64Array(K), dz = CLOUD_TOP / CLOUD_NZ;
+  const zs = zsCache.zs, out = new Uint8Array(2 * CLOUD_NZ * ng), colC = new Float64Array(CLOUD_NZ), cf = new Float64Array(K), zk = new Float64Array(K), dz = CLOUD_TOP / CLOUD_NZ;
   for (let p = 0; p < ng; p++) {
     const ps = s.ps[p]!;
     let topK = K;
@@ -349,14 +350,30 @@ function diagnoseClouds(m: Dycore, s: Snapshot, rate: Float32Array | null): Uint
     for (let k = K - 1; k >= 0; k--) {
       const T = s.T[k * ng + p]!, q = s.q![k * ng + p]!, pk = sig[k]! * ps;
       const rh = q / qsat(T, pk);
-      cf[k] = pk > 1e4 && rh > 0.8 ? Math.min(1, ((rh - 0.8) / 0.2) ** 2) : 0;
+      // Slingo (1987) with the CCM3 critical humidities: 0.90 below 750 hPa, 0.80 above
+      const rhc = pk > 7.5e4 ? 0.9 : 0.8;
+      cf[k] = pk > 1e4 && rh > rhc ? Math.min(1, ((rh - rhc) / (1 - rhc)) ** 2) : 0;
       // hydrostatic height: from the surface for the lowest level, layer-mean temperature above
       zk[k] = k === K - 1 ? zs[p]! + 29.27 * T * Math.log(1 / sig[k]!) : zk[k + 1]! + 29.27 * 0.5 * (T + s.T[(k + 1) * ng + p]!) * Math.log(sig[k + 1]! / sig[k]!);
       if (cc > 0 && topK === k + 1 && (rh > 0.6 || pk > 7e4)) topK = k;
     }
     if (cc > 0) for (let k = topK; k < K; k++) cf[k] = Math.max(cf[k]!, cc);
+    // total cover with maximum-random overlap (maximum within contiguous cloudy layers, random between)
+    let clear = 1, blk = 0;
+    for (let kk = 0; kk < K; kk++) { if (cf[kk]! > 0.01) blk = Math.max(blk, cf[kk]!); else { clear *= 1 - blk; blk = 0; } }
+    const cover = 1 - clear * (1 - blk);
+    // precipitation shafts: from the surface up to the convective top, or to the highest thick
+    // stratiform layer (below it the falling rain / snow is visible under the cloud base)
+    let rainTop = 0;
+    const rp = pr > 2 ? Math.min(1, pr / 50) : 0;
+    if (rp > 0) {
+      let kr = cc > 0 ? topK : K;
+      if (kr === K) for (let kk = 0; kk < K; kk++) if (cf[kk]! > 0.3) { kr = kk; break; }
+      rainTop = kr < K ? zk[kr]! : zs[p]! + 2000;
+    }
     // height levels (model levels ordered top -> bottom, z decreasing with k)
-    let k = K - 1;
+    let k = K - 1, sum = 0;
+    colC.fill(0);
     for (let i = 0; i < CLOUD_NZ; i++) {
       const z = (i + 0.5) * dz;
       if (z < zs[p]!) continue;
@@ -365,7 +382,14 @@ function diagnoseClouds(m: Dycore, s: Snapshot, rate: Float32Array | null): Uint
       if (z <= zk[K - 1]!) c = cf[K - 1]!;
       else if (k === 0 && z >= zk[0]!) c = 0;
       else { const w = (z - zk[k]!) / (zk[k - 1]! - zk[k]!); c = cf[k]! + w * (cf[k - 1]! - cf[k]!); }
-      out[(i * nlat + (p / nlon | 0)) * nlon + p % nlon] = Math.round(Math.max(0, Math.min(1, c)) * 255);
+      colC[i] = Math.max(0, Math.min(1, c)); sum += colC[i]!;
+      if (z < rainTop) out[2 * ((i * nlat + (p / nlon | 0)) * nlon + p % nlon) + 1] = Math.round(rp * 255);
+    }
+    // display density: keeps the vertical profile, scaled so that looking straight down through the
+    // column hides exactly the overlap cover (the renderer's extinction is -ln(1 - 0.98 f) per CLOUD_D0)
+    if (sum > 0 && cover > 0.005) {
+      const A = -Math.log(1 - 0.98 * cover) * CLOUD_D0 / (dz * sum);
+      for (let i = 0; i < CLOUD_NZ; i++) if (colC[i]! > 0) out[2 * ((i * nlat + (p / nlon | 0)) * nlon + p % nlon)] = Math.round(Math.min(1, (1 - Math.exp(-colC[i]! * A)) / 0.98) * 255);
     }
   }
   return out;
