@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node dist/tests/spectral.js && node dist/tests/dycore.js",
+    "test": "npm run build && node dist/tests/spectral.js && node dist/tests/dycore.js && node dist/tests/moist.js",
     "climate": "npm run build && node dist/tools/runHeldSuarez.js",
     "serve": "npm run build && node tools/serve.mjs"
   },

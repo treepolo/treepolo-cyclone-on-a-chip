@@ -12,6 +12,7 @@
 import { Planet, DryAir } from '../core/constants.js';
 import { SpectralTransform, SpectralField } from '../spectral/transform.js';
 import { SigmaLevels, buildSigmaLevels } from './vertical.js';
+import { SemiLagrangian } from './semiLagrangian.js';
 
 /** Grid-point state handed to physics (all at the current time level). */
 export interface GridState {
@@ -39,6 +40,20 @@ export interface PhysicsForcing {
   compute(state: GridState, tend: PhysicsTendencies, time: number): void;
 }
 
+/** Grid-point state including water vapour, handed to sequential column physics. */
+export interface MoistGridState extends GridState {
+  q: Float64Array;            // specific humidity (kg/kg), [k][lat][lon]
+}
+
+/**
+ * Column physics applied sequentially after each dynamics step (process splitting):
+ * it receives the new state and modifies u, v, T, q in place over dt.
+ * Stiff processes (boundary-layer diffusion, convection, condensation) must use this path.
+ */
+export interface ColumnPhysics {
+  apply(state: MoistGridState, dt: number, time: number): void;
+}
+
 export interface DycoreOptions {
   trunc: number;
   sigmaHalf: Float64Array;
@@ -50,6 +65,9 @@ export interface DycoreOptions {
   robert?: number;             // RAW filter strength nu
   williams?: number;           // RAW alpha (0.5 = classic Robert–Asselin)
   physics?: PhysicsForcing;
+  /** Prognostic water vapour (semi-Lagrangian, grid point) */
+  moist?: boolean;
+  columnPhysics?: ColumnPhysics;
 }
 
 export interface SpectralState {
@@ -68,6 +86,17 @@ export class Dycore {
   readonly K: number;
   readonly ng: number;
   physics: PhysicsForcing | undefined;
+  columnPhysics: ColumnPhysics | undefined;
+  readonly moist: boolean;
+  /** Specific humidity at the current time level (grid point), [k][lat][lon]. */
+  q: Float64Array;
+  private qNext: Float64Array;
+  private readonly sl: SemiLagrangian | null;
+  /** sigma-dot at full levels from the last dynamics evaluation (s^-1). */
+  private readonly sdotFull: Float64Array;
+  private readonly post: MoistGridState;
+  /** accumulated water-fixer correction (kg m^-2, global mean) */
+  waterFixer = 0;
   time = 0;
   steps = 0;
 
@@ -139,6 +168,16 @@ export class Dycore {
     this.fcor = new Float64Array(tr.nlat);
     for (let j = 0; j < tr.nlat; j++) this.fcor[j] = 2 * o.planet.omega * tr.mu[j]!;
     this.scratch = tr.newSpec();
+    this.moist = !!o.moist;
+    this.columnPhysics = o.columnPhysics;
+    this.q = new Float64Array(this.moist ? nK : 0);
+    this.qNext = new Float64Array(this.moist ? nK : 0);
+    this.sdotFull = new Float64Array(nK);
+    this.sl = this.moist ? new SemiLagrangian({ nlat: tr.nlat, nlon: tr.nlon, K, lat: tr.lat, lon: tr.lon, sigma: this.lev.sigma, radius: o.planet.radius }) : null;
+    this.post = {
+      nlat: tr.nlat, nlon: tr.nlon, K, mu: tr.mu, sigma: this.lev.sigma, sigmaHalf: this.lev.sigmaHalf,
+      u: new Float64Array(nK), v: new Float64Array(nK), T: new Float64Array(nK), ps: new Float64Array(ng), q: this.qNext,
+    };
     this.col = { vgp: new Float64Array(K), DG: new Float64Array(K), C: new Float64Array(K + 1), sd: new Float64Array(K + 1) };
   }
 
@@ -180,12 +219,21 @@ export class Dycore {
   // ------------------------------------------------------------------
   // Time stepping
 
+  /** Set specific humidity (kg/kg) from a [k][lat][lon] grid. */
+  setMoisture(q: Float64Array): void {
+    if (!this.moist) throw new Error('model was built without moisture');
+    this.q.set(q);
+  }
+
   step(): void {
     const first = this.steps === 0;
     const leap = first ? this.dt : 2 * this.dt;
     this.computeTendencies();
     this.semiImplicit(leap);
+    if (this.moist) this.advectMoisture();
+    if (this.columnPhysics) this.applyColumnPhysics();
     if (!first) this.timeFilter();
+    if (this.moist) { const t = this.q; this.q = this.qNext; this.qNext = t; this.post.q = this.qNext; }
     // rotate buffers: old <- cur, cur <- nxt
     const o = this.old;
     this.old = this.cur;
@@ -247,6 +295,7 @@ export class Dycore {
         const Ctot = C[K]!;
         sd[0] = 0; sd[K] = 0;
         for (let k = 1; k < K; k++) sd[k] = sh[k]! * Ctot - C[k]!;
+        for (let k = 0; k < K; k++) this.sdotFull[k * ng + p] = 0.5 * (sd[k]! + sd[k + 1]!);
         for (let k = 0; k < K; k++) {
           const q = k * ng + p;
           const up = k > 0 ? q - ng : q, dn = k < K - 1 ? q + ng : q;
@@ -361,6 +410,81 @@ export class Dycore {
     }
   }
 
+  /** Column-integrated water (kg m^-2, global mean) of q with surface pressure field ps. */
+  private waterPath(q: Float64Array, ps: Float64Array): number {
+    const tr = this.tr, ng = this.ng, nlon = tr.nlon, ds = this.lev.dsigma;
+    let W = 0;
+    for (let j = 0; j < tr.nlat; j++) {
+      let r = 0;
+      for (let i = 0; i < nlon; i++) {
+        const p = j * nlon + i;
+        let col = 0;
+        for (let k = 0; k < this.K; k++) col += q[k * ng + p]! * ds[k]!;
+        r += col * ps[p]!;
+      }
+      W += tr.weight[j]! * r / nlon;
+    }
+    return W / 2 / this.planet.gravity;
+  }
+
+  /** Global-mean column water vapour (kg m^-2) of the current state. */
+  totalWater(): number {
+    if (!this.moist) return 0;
+    const g = new Float64Array(this.ng);
+    this.tr.synth(this.cur.lnps, g);
+    for (let i = 0; i < g.length; i++) g[i] = Math.exp(g[i]!);
+    return this.waterPath(this.q, g);
+  }
+
+  /** Semi-Lagrangian transport of q from t to t+dt with the winds of the current level, plus mass fixer. */
+  private advectMoisture(): void {
+    const g = this.grid;
+    const W0 = this.waterPath(this.q, g.ps);
+    this.sl!.advect(g.u, g.v, this.sdotFull, this.dt, [this.q], [this.qNext]);
+    const psNew = this.post.ps;
+    this.tr.synth(this.nxt.lnps, psNew);
+    for (let i = 0; i < psNew.length; i++) psNew[i] = Math.exp(psNew[i]!);
+    const W1 = this.waterPath(this.qNext, psNew);
+    if (W1 > 0) {
+      const f = W0 / W1;
+      for (let i = 0; i < this.qNext.length; i++) this.qNext[i] = this.qNext[i]! * f;
+      this.waterFixer += W0 - W1;
+    }
+  }
+
+  /** Sequential column physics on the new state; increments are transformed back to spectral space. */
+  private applyColumnPhysics(): void {
+    const tr = this.tr, K = this.K, ng = this.ng, nlon = tr.nlon, a = this.planet.radius;
+    const P = this.post, nx = this.nxt;
+    tr.synth(nx.lnps, P.ps);
+    for (let i = 0; i < ng; i++) P.ps[i] = Math.exp(P.ps[i]!);
+    for (let k = 0; k < K; k++) {
+      const o = k * ng;
+      tr.synthUV(nx.vor[k]!, nx.div[k]!, a, P.u.subarray(o, o + ng), P.v.subarray(o, o + ng));
+      tr.synth(nx.tmp[k]!, P.T.subarray(o, o + ng));
+      for (let j = 0; j < tr.nlat; j++) {
+        const ic = 1 / tr.coslat[j]!;
+        for (let i = 0; i < nlon; i++) { const q = o + j * nlon + i; P.u[q] = P.u[q]! * ic; P.v[q] = P.v[q]! * ic; }
+      }
+    }
+    const u0 = Float64Array.from(P.u), v0 = Float64Array.from(P.v), T0 = Float64Array.from(P.T);
+    if (!this.moist) P.q = new Float64Array(0);
+    this.columnPhysics!.apply(P, this.dt, this.time + this.dt);
+    const A = this.Ag, B = this.Bg, dT = this.TTg;
+    for (let k = 0; k < K; k++) {
+      const o = k * ng;
+      for (let j = 0; j < tr.nlat; j++) {
+        const c = tr.coslat[j]!;
+        for (let i = 0; i < nlon; i++) {
+          const q = o + j * nlon + i;
+          A[q] = (P.u[q]! - u0[q]!) * c; B[q] = (P.v[q]! - v0[q]!) * c; dT[q] = P.T[q]! - T0[q]!;
+        }
+      }
+      tr.analDivCurl(A.subarray(o, o + ng), B.subarray(o, o + ng), a, nx.div[k]!, nx.vor[k]!);
+      tr.anal(dT.subarray(o, o + ng), nx.tmp[k]!, 1, true);
+    }
+  }
+
   /** Robert–Asselin–Williams filter on the current level. */
   private timeFilter(): void {
     const nu = this.robert, al = this.williams;
@@ -435,6 +559,7 @@ export class Dycore {
       for (const arr of [st.vor, st.div, st.tmp]) for (const f of arr) { parts.push(f.re, f.im); }
       parts.push(st.lnps.re, st.lnps.im);
     }
+    if (this.moist) parts.push(this.q);
     const len = parts.reduce((a, p) => a + p.length, 0);
     const data = new Float64Array(len);
     let o = 0;
@@ -452,6 +577,7 @@ export class Dycore {
       st.lnps.re.set(s.data.subarray(o, o + st.lnps.re.length)); o += st.lnps.re.length;
       st.lnps.im.set(s.data.subarray(o, o + st.lnps.im.length)); o += st.lnps.im.length;
     }
+    if (this.moist) { this.q.set(s.data.subarray(o, o + this.q.length)); o += this.q.length; }
     if (o !== s.data.length) throw new Error('checkpoint size mismatch');
     this.time = s.time;
     this.steps = s.steps;

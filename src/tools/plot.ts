@@ -141,3 +141,48 @@ export function mapSvg(p: MapPlot, width = 900, height = 300): string {
   out.push('</svg>');
   return out.join('\n');
 }
+
+export interface LinePlot {
+  title: string;
+  x: number[];              // latitude, degrees (north -> south)
+  series: { name: string; values: number[]; color: string; dashed?: boolean }[];
+  units: string;
+}
+
+/** Line plot against latitude (north on the left). */
+export function lineSvg(p: LinePlot, width = 520, height = 280): string {
+  const ml = 48, mr = 16, mt = 28, mb = 48;
+  const W = width - ml - mr, H = height - mt - mb;
+  let lo = Infinity, hi = -Infinity;
+  for (const s of p.series) for (const v of s.values) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  if (lo > 0 && lo < 0.3 * hi) lo = 0;
+  const pad = (hi - lo) * 0.05 || 1;
+  lo -= pad; hi += pad;
+  const xOf = (lat: number): number => ml + (90 - lat) / 180 * W;
+  const yOf = (v: number): number => mt + (hi - v) / (hi - lo) * H;
+  const out: string[] = [];
+  out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" font-family="sans-serif" font-size="11">`);
+  out.push(`<rect width="100%" height="100%" fill="#fff"/>`);
+  out.push(`<text x="${ml}" y="16" font-size="13" font-weight="bold">${p.title} (${p.units})</text>`);
+  out.push(`<rect x="${ml}" y="${mt}" width="${W}" height="${H}" fill="none" stroke="#000"/>`);
+  const step = niceStep((hi - lo) / 5);
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    out.push(`<line x1="${ml}" x2="${ml + W}" y1="${yOf(v)}" y2="${yOf(v)}" stroke="#ddd"/>`);
+    out.push(`<text x="${ml - 4}" y="${yOf(v) + 4}" text-anchor="end">${+v.toPrecision(4)}</text>`);
+  }
+  for (const lat of [90, 60, 30, 0, -30, -60, -90]) out.push(`<text x="${xOf(lat)}" y="${mt + H + 14}" text-anchor="middle">${lat === 0 ? 'EQ' : lat > 0 ? lat + 'N' : -lat + 'S'}</text>`);
+  p.series.forEach((s, n) => {
+    const d = s.values.map((v, j) => `${j ? 'L' : 'M'}${xOf(p.x[j]!).toFixed(1)},${yOf(v).toFixed(1)}`).join('');
+    out.push(`<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.8" ${s.dashed ? 'stroke-dasharray="4,3"' : ''}/>`);
+    const lx = ml + n * 120;
+    out.push(`<line x1="${lx}" x2="${lx + 18}" y1="${height - 12}" y2="${height - 12}" stroke="${s.color}" stroke-width="2" ${s.dashed ? 'stroke-dasharray="4,3"' : ''}/><text x="${lx + 22}" y="${height - 8}">${s.name}</text>`);
+  });
+  out.push('</svg>');
+  return out.join('\n');
+}
+
+function niceStep(x: number): number {
+  const e = Math.pow(10, Math.floor(Math.log10(x)));
+  const m = x / e;
+  return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * e;
+}

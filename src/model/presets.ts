@@ -5,6 +5,8 @@ import { Dycore } from './dycore.js';
 import { HeldSuarezForcing, heldSuarezTeq } from './heldSuarez.js';
 import { uniformSigmaHalf } from './vertical.js';
 import { rng } from '../core/random.js';
+import { GrayAquaplanet } from './moist/aquaplanet.js';
+import { qsat } from './moist/thermo.js';
 
 export interface HeldSuarezConfig {
   trunc: number;   // spectral truncation (21, 42, 63, 85 ...)
@@ -49,4 +51,49 @@ export function createHeldSuarez(cfg: HeldSuarezConfig): Dycore {
   }
   model.setFromGrid(T, ps);
   return model;
+}
+
+// ---------------------------------------------------------------------------
+// Moist gray-radiation aquaplanet (Frierson et al. 2006 / Isca "frierson" test case)
+
+/** Frierson (2006) 25-level sigma half levels (top -> bottom). */
+export const FRIERSON_SIGMA_HALF = Float64Array.from([
+  0.000000, 0.0117665, 0.0196679, 0.0315244, 0.0485411, 0.0719344, 0.1027829, 0.1418581, 0.1894648,
+  0.2453219, 0.3085103, 0.3775033, 0.4502789, 0.5244989, 0.5977253, 0.6676441, 0.7322627, 0.7900587,
+  0.8400683, 0.8819111, 0.9157609, 0.9422770, 0.9625127, 0.9778177, 0.9897489, 1.0000000,
+]);
+
+export interface AquaplanetConfig { trunc: number; dt: number; seed: number }
+
+export const AQUA_PRESETS: Record<string, AquaplanetConfig> = {
+  AQUA_T21: { trunc: 21, dt: 1200, seed: 2 },
+  AQUA_T42: { trunc: 42, dt: 720, seed: 2 },
+};
+
+export function createAquaplanet(cfg: AquaplanetConfig): { model: Dycore; physics: GrayAquaplanet } {
+  const model = new Dycore({
+    trunc: cfg.trunc, sigmaHalf: FRIERSON_SIGMA_HALF, dt: cfg.dt, planet: EARTH, air: DRY_AIR,
+    tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : 0.1 * DAY, robert: 0.03, moist: true,
+  });
+  const tr = model.tr, ng = tr.gridSize, K = model.K;
+  const physics = new GrayAquaplanet(EARTH, DRY_AIR, tr.nlat, tr.nlon, K, tr.lat);
+  model.columnPhysics = physics;
+  const T = new Float64Array(ng * K), q = new Float64Array(ng * K), ps = new Float64Array(ng).fill(DRY_AIR.pRef);
+  const r = rng(cfg.seed);
+  const expo = DRY_AIR.rd * 0.0065 / EARTH.gravity;
+  for (let k = 0; k < K; k++) {
+    const sig = model.lev.sigma[k]!;
+    for (let j = 0; j < tr.nlat; j++) {
+      const c2 = 1 - tr.mu[j]! ** 2;
+      const ts = 270 + 35 * c2;
+      for (let i = 0; i < tr.nlon; i++) {
+        const idx = k * ng + j * tr.nlon + i;
+        T[idx] = Math.max(200, (ts - 5) * Math.pow(sig, expo)) + 0.1 * (r() - 0.5);
+        q[idx] = sig > 0.5 ? 0.5 * qsat(T[idx]!, sig * DRY_AIR.pRef) : 2e-6;
+      }
+    }
+  }
+  model.setFromGrid(T, ps);
+  model.setMoisture(q);
+  return { model, physics };
 }
