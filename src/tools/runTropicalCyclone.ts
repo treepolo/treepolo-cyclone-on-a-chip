@@ -1,24 +1,26 @@
 // Idealised tropical cyclone on an f-plane in the regional non-hydrostatic model (RE87 / BR09 style).
-// Usage: node dist/tools/runTropicalCyclone.js [days=8] [dx=15000] [L=1200000] [outDir=results/tc]
+// Usage: node dist/tools/runTropicalCyclone.js [days=8] [dx=15000] [L=1200000] [outDir=results/tc] [ice|kessler]
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { RegionalModel } from '../regional/core.js';
 import { KesslerMicrophysics, QR } from '../regional/kessler.js';
+import { IceMicrophysics } from '../regional/ice.js';
 import { RegionalPhysics } from '../regional/physics.js';
 import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../regional/tropical.js';
 import { xySvg, xzSvg } from './plot.js';
 
 const days = Number(process.argv[2] ?? 8), dx = Number(process.argv[3] ?? 15000), L = Number(process.argv[4] ?? 1200000);
 const outDir = process.argv[5] ?? 'results/tc';
+const ice = (process.argv[6] ?? 'ice') === 'ice';
 mkdirSync(outDir, { recursive: true });
 const nx = Math.round(L / dx), nz = 25, dz = 1000, f = 5e-5, sst = 301.15;
 const dt = Math.min(60, dx / 250);
-const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, tropicalSounding(sst), 3);
-const mp = new KesslerMicrophysics(m);
+const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, tropicalSounding(sst), ice ? 6 : 3);
+const mp: { rainAcc: Float64Array; apply(dt: number): void } = ice ? new IceMicrophysics(m) : new KesslerMicrophysics(m);
 const ph = new RegionalPhysics(m, { lh: 0.2 * dx, lv: 100, sst, ck: 1.2e-3, radTau: 12 * 3600, radMax: 2 / 86400 });
 insertVortex(m, f, 15);
 const lines: string[] = [];
 const say = (s: string): void => { console.log(s); lines.push(s); };
-say(`Tropical cyclone: ${nx}x${nx}x${nz}, dx=${dx / 1000} km, dz=${dz} m, dt=${dt} s, f=${f}, SST=${sst} K`);
+say(`Tropical cyclone: ${nx}x${nx}x${nz}, dx=${dx / 1000} km, dz=${dz} m, dt=${dt} s, f=${f}, SST=${sst} K, ${ice ? "six-class ice" : "Kessler warm-rain"} microphysics`);
 const t0 = Date.now();
 const every = Math.round(3 * 3600 / dt);
 while (m.time < days * 86400 - 1e-9) {

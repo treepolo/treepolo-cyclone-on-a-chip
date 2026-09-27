@@ -38,13 +38,16 @@ export function bunkersRightMover(wind: (z: number) => { u: number; v: number })
  *  the frame velocity. dx is the horizontal grid spacing, L the domain width. */
 export function tornadoExperiment(dx: number, L: number, nz: number, dz: number, dt: number, nsound = 6): { model: RegionalModel; physics: RegionalPhysicsConfig; frame: { u: number; v: number }; description: string } {
   const nx = Math.round(L / dx);
-  const cfg: RegionalConfig = { nx, ny: nx, nz, dx, dy: dx, dz, dt, nsound, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: Math.min(5000, 0.3 * nz * dz), dampRate: 1 / 300, kdiff2: 0 };
+  // open lateral boundaries relaxing toward the undisturbed environment, so the storm's outflow can
+  // leave the domain and fresh inflow enters (a periodic domain this small recycles the cold pool)
+  const cfg: RegionalConfig = { lateral: 'open', relaxCells: Math.max(6, Math.round(2500 / dx)), relaxTau: 300, nx, ny: nx, nz, dx, dy: dx, dz, dt, nsound, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: Math.min(5000, 0.3 * nz * dz), dampRate: 1 / 300, kdiff2: 0 };
   const m = new RegionalModel(cfg, weismanKlemp, 6);
   const frame = bunkersRightMover((z) => quarterCircleWind(z));
   m.setBaseWind((z) => { const w = quarterCircleWind(z); return { u: w.u - frame.u, v: w.v - frame.v }; });
   for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+  m.boundary = { u: Float64Array.from(m.u), v: Float64Array.from(m.v), th: Float64Array.from(m.th), qv: Float64Array.from(m.scalars[QV]!), pp: new Float64Array(m.size) };
   // warm bubble: 3 K, 5 km horizontal and 1.5 km vertical radius, centred at 1.5 km in the domain's left third
-  const xc = 0.4 * L, yc = 0.4 * L;
+  const xc = 0.5 * L, yc = 0.5 * L;
   for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
     const r = Math.sqrt((((i + 0.5) * dx - xc) / 5000) ** 2 + (((j + 0.5) * dx - yc) / 5000) ** 2 + ((m.zc[k]! - 1500) / 1500) ** 2);
     if (r < 1) m.th[m.idx(i, j, k)] = m.th[m.idx(i, j, k)]! + 3 * Math.cos(0.5 * Math.PI * r) ** 2;
@@ -60,43 +63,48 @@ export function tornadoExperiment(dx: number, L: number, nz: number, dz: number,
 }
 
 /**
- * Keeps a storm inside a periodic domain (measurement + exact symmetries only): locates the main
- * updraft at ~4 km, estimates its motion from successive positions, then (a) changes the frame
- * velocity by the storm's relative motion (Galilean shift) and (b) rolls the fields by whole cells
- * when the storm is more than L/8 from the centre. The caller applies the returned actions to the
- * model (RegionalModel.shiftFrame / roll) and to the physics frame velocity.
+ * Keeps a storm near the domain centre (measurement + an exact symmetry only): locates the main
+ * updraft at ~4 km (once locked, only within 8 km of its last position), estimates its motion and
+ * changes the frame velocity by half of the storm's relative motion plus a gentle pull toward the
+ * centre (time scale 20 min). With periodic boundaries the fields may also be rolled by whole cells.
  */
 export class StormTracker {
   private last: { x: number; y: number; t: number } | null = null;
 
   update(m: RegionalModel): { du: number; dv: number; di: number; dj: number; x: number; y: number } | null {
     const { nx, ny, nz, dx, dy } = m.c;
+    const periodic = m.c.lateral !== 'open';
     let k4 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 4000) < Math.abs(m.zc[k4]! - 4000)) k4 = k;
+    const Lx = nx * dx, Ly = ny * dy;
+    const dist = (x0: number, y0: number, x1: number, y1: number): [number, number] => {
+      let ddx = x1 - x0, ddy = y1 - y0;
+      if (periodic) { ddx -= Math.round(ddx / Lx) * Lx; ddy -= Math.round(ddy / Ly) * Ly; }
+      return [ddx, ddy];
+    };
     let wmax = 0, im = 0, jm = 0;
-    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const w = m.w[m.idx(i, j, k4)]!; if (w > wmax) { wmax = w; im = i; jm = j; } }
-    if (wmax < 5) { this.last = null; return null; }
-    // w-weighted centroid of strong updraft within 5 km of the maximum (periodic distances)
-    const Lx = nx * dx, Ly = ny * dy, rad = 5000;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      if (this.last) { const [a, b] = dist(this.last.x, this.last.y, (i + 0.5) * dx, (j + 0.5) * dy); if (Math.hypot(a, b) > 8000) continue; }
+      const w = m.w[m.idx(i, j, k4)]!; if (w > wmax) { wmax = w; im = i; jm = j; }
+    }
+    if (wmax < 5) return null;
+    // w-weighted centroid of strong updraft within 5 km of the maximum
     let sw = 0, sx = 0, sy = 0;
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const w = m.w[m.idx(i, j, k4)]!;
       if (w < 0.5 * wmax) continue;
-      let ddx = (i - im) * dx, ddy = (j - jm) * dy;
-      ddx -= Math.round(ddx / Lx) * Lx; ddy -= Math.round(ddy / Ly) * Ly;
-      if (Math.hypot(ddx, ddy) > rad) continue;
+      const [ddx, ddy] = dist((im + 0.5) * dx, (jm + 0.5) * dy, (i + 0.5) * dx, (j + 0.5) * dy);
+      if (Math.hypot(ddx, ddy) > 5000) continue;
       sw += w; sx += w * ddx; sy += w * ddy;
     }
     const x = (im + 0.5) * dx + sx / sw, y = (jm + 0.5) * dy + sy / sw, t = m.time;
     let du = 0, dv = 0;
     if (this.last && t > this.last.t) {
-      let ddx = x - this.last.x, ddy = y - this.last.y;
-      ddx -= Math.round(ddx / Lx) * Lx; ddy -= Math.round(ddy / Ly) * Ly;
-      // apply half of the measured relative motion per update (damps jumps of the updraft centroid)
-      du = 0.5 * ddx / (t - this.last.t); dv = 0.5 * ddy / (t - this.last.t);
+      const [ddx, ddy] = dist(this.last.x, this.last.y, x, y), tau = 1200;
+      du = 0.5 * ddx / (t - this.last.t) + (x - Lx / 2) / tau;
+      dv = 0.5 * ddy / (t - this.last.t) + (y - Ly / 2) / tau;
     }
-    // re-centre when more than L/8 from the middle
-    const offx = x - Lx / 2, offy = y - Ly / 2;
-    const di = Math.abs(offx) > Lx / 8 ? -Math.round(offx / dx) : 0, dj = Math.abs(offy) > Ly / 8 ? -Math.round(offy / dy) : 0;
+    const di = periodic && Math.abs(x - Lx / 2) > Lx / 8 ? -Math.round((x - Lx / 2) / dx) : 0;
+    const dj = periodic && Math.abs(y - Ly / 2) > Ly / 8 ? -Math.round((y - Ly / 2) / dy) : 0;
     this.last = { x: x + di * dx, y: y + dj * dy, t };
     return { du, dv, di, dj, x, y };
   }

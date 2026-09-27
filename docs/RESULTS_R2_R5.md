@@ -143,13 +143,13 @@ A 15 m/s vortex over a 28 °C sea gestates for 2–3 days, intensifies rapidly b
 `auto` 選在全球模式 6 小時降水極大處（24.9°N, 95.6°W，墨西哥灣西岸，27.5 mm/day），1200 km 見方、Δx 20 km、六類冰相；全球模式同時繼續積分，每 3 小時提供新的側邊界目標（時間內插）。
 `auto` picks the global model's 6-hour precipitation maximum (24.9°N, 95.6°W, western Gulf of Mexico coast, 27.5 mm/day); 1200 km square, Δx 20 km, six-class ice. The global model keeps running and supplies new lateral-boundary targets every 3 hours, interpolated in time.
 
-- 24 小時穩定，無邊界雜訊；區域平均降水 31.9 mm/day，全球模式在同一範圍 14.3 mm/day（只有 3 個全球格點）。符號與量級一致；區域模式的顯式微物理與較高解析度產生更強的降水，單向巢狀不強制與母模式水量一致。
-- 地表風最大 22 m/s，雲量 ~43%，最大上升 ~2 m/s（20 km 格距下的大尺度抬升）。
-- 較早的 Kessler 12 小時測試：18.8 vs 15.6 mm/day。
+- 24 小時穩定。第一版在側邊界鬆弛區出現大量假降水（邊緣 24 小時達 239 mm）：全球模式的水汽在區域模式的溫度／氣壓換算下略為過飽和，鬆弛不斷強迫凝結。修正：內插後的水汽以區域狀態的飽和值為上限。修正後邊界降水大幅減少，降水集中在內部的鋒面雨帶。
+- 內部（排除鬆弛區）平均降水 28.5 mm/day；全球模式在同一範圍 21.7 mm/day（T21 下只有 1 個格點，比較僅供參考）。
+- 地表風最大 22–24 m/s，雲量 ~40%，最大上升 ~2 m/s（20 km 格距下的大尺度抬升）。
 
-- Stable for 24 h with no boundary noise; domain-mean precipitation is 31.9 mm/day against 14.3 mm/day from the global model over the same box (only 3 global points). Same sign and order of magnitude: the explicit microphysics and finer grid produce heavier rain, and one-way nesting does not constrain the water budget to the parent's.
-- Maximum surface wind 22 m/s, cloud cover about 43%, maximum ascent about 2 m/s (resolved large-scale lift at 20 km).
-- An earlier 12-hour Kessler test gave 18.8 against 15.6 mm/day.
+- Stable for 24 h. The first version rained heavily in the lateral relaxation zone (up to 239 mm per 24 h at the edges): global humidity was slightly supersaturated under the regional temperature/pressure mapping, so the relaxation kept forcing condensation. Fix: interpolated vapour is capped at saturation for the regional state. Boundary rain is now much smaller and the precipitation is concentrated in the interior frontal band.
+- Interior mean (relaxation zone excluded) 28.5 mm/day; the global model gives 21.7 mm/day over the same box (only one T21 grid point, so indicative only).
+- Maximum surface wind 22–24 m/s, cloud cover about 40%, maximum ascent about 2 m/s (resolved large-scale lift at 20 km).
 
 ![rain](results/nest_rain_24h.svg)
 ![wind](results/nest_wind1km_24h.svg)

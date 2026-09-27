@@ -526,13 +526,14 @@ export class RegionalModel {
   }
 
   /**
-   * Galilean change of frame for periodic domains: the frame speeds up by (du, dv), so all winds
-   * (and the base / sponge wind) decrease by the same amount. Surface drag must use the updated
+   * Galilean change of frame: the frame speeds up by (du, dv), so all winds (the base / sponge wind
+   * and open-boundary targets included) decrease by the same amount. Surface drag must use the updated
    * ground-relative frame velocity (RegionalPhysicsConfig.frameVel). Exact for the equations.
    */
   shiftFrame(du: number, dv: number): void {
-    if (this.c.lateral === 'open') throw new Error('shiftFrame needs periodic lateral boundaries');
     for (let i = 0; i < this.size; i++) { this.u[i] = this.u[i]! - du; this.v[i] = this.v[i]! - dv; }
+    const b = this.boundary;
+    if (b) for (let i = 0; i < this.size; i++) { b.u[i] = b.u[i]! - du; b.v[i] = b.v[i]! - dv; }
     for (let k = 0; k < this.c.nz; k++) { this.ub[k] = this.ub[k]! - du; this.vb[k] = this.vb[k]! - dv; }
   }
 

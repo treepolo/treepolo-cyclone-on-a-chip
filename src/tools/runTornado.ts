@@ -9,7 +9,7 @@ import { RegionalPhysics } from '../regional/physics.js';
 import { xySvg } from './plot.js';
 
 const a = process.argv.slice(2).map(Number);
-const minutes = a[0] || 90, dx = a[1] || 500, L = a[2] || 30000, nz = a[3] || 40, dz = a[4] || 400, dt = a[5] || 3;
+const minutes = a[0] || 90, dx = a[1] || 500, L = a[2] || 40000, nz = a[3] || 40, dz = a[4] || 400, dt = a[5] || 3;
 const outDir = process.argv[9] ?? `results/tornado_${dx}m`;
 mkdirSync(outDir, { recursive: true });
 const e = tornadoExperiment(dx, L, nz, dz, dt, 6);

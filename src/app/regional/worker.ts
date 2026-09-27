@@ -42,8 +42,8 @@ function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; descripti
   frameVel = { u: 0, v: 0 };
   tracker = null;
   if (exp === 'tornado') {
-    // GPU: 200 m LES over 40 km; CPU: a 500 m preview (mesocyclone scale only)
-    const e = gpuOk ? tornadoExperiment(200, 40000, 64, 250, 2, 8) : tornadoExperiment(500, 30000, 40, 400, 3, 6);
+    // GPU: 250 m LES over 50 km; CPU: a 500 m preview over 40 km (mesocyclone scale only)
+    const e = gpuOk ? tornadoExperiment(250, 50000, 64, 250, 2, 8) : tornadoExperiment(500, 40000, 40, 400, 3, 6);
     m = e.model; mp = new IceMicrophysics(m); physCfg = e.physics; frameVel = e.frame;
     tracker = new StormTracker(); lastTrack = 0;
     new RegionalPhysics(m, physCfg);
