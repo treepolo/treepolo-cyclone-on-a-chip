@@ -29,6 +29,7 @@ const FIELD_STYLE: Record<FieldId, { div: boolean; range?: [number, number]; sym
   div: { div: true, sym: 1e-5, unit: 's⁻¹' },
   ps: { div: false, range: [970, 1030], unit: 'hPa' },
   precip: { div: false, range: [0, 40], unit: 'mm/day' },
+  snow: { div: false, range: [0, 20], unit: 'mm/day (water equivalent)' },
   sst: { div: false, unit: 'K' },
   q: { div: false, unit: 'g/kg' },
   olr: { div: false, range: [100, 320], unit: 'W/m²' },
@@ -45,7 +46,9 @@ function colourise(f: FrameMessage): void {
     $('legend').textContent = `±${scale.toPrecision(2)} ${st.unit}`;
   } else {
     const [a, b] = st.range && f.field !== 'ps' ? st.range : [lo, hi];
-    if (f.field === 'precip') {
+    if (f.field === 'snow') {
+      globe.setField(f.lat, f.nlon, f.scalar, (v) => v < 0.2 ? [0.06, 0.12, 0.24] : (() => { const t = Math.min(1, Math.log(v / 0.2) / Math.log(100)); return [0.7 + 0.3 * t, 0.72 + 0.28 * t, 0.9 + 0.1 * t] as [number, number, number]; })());
+    } else if (f.field === 'precip') {
       // rain: transparent-to-blue style ramp on a square-root scale
       globe.setField(f.lat, f.nlon, f.scalar, rainColour);
     } else globe.setField(f.lat, f.nlon, f.scalar, (v) => sequential((v - a) / ((b - a) || 1)));

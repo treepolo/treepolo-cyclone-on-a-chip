@@ -20,7 +20,7 @@ import { Recipe } from './transformGpu.js';
 const WG = 64;
 
 /** Surface-field slots in the SFC buffer (each NG long). */
-export const SFC = { ts: 0, bucket: 1, land: 2, precipConv: 3, precipLS: 4, evap: 5, olr: 6, precipRate: 7, olrNow: 8, runoff: 9, shf: 10, count: 11 };
+export const SFC = { ts: 0, bucket: 1, land: 2, precipConv: 3, precipLS: 4, evap: 5, olr: 6, precipRate: 7, olrNow: 8, runoff: 9, shf: 10, snowAcc: 11, count: 12 };
 
 export class GpuMoist {
   readonly q: GPUBuffer;
@@ -777,6 +777,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   S[${SFC.olr}u * NG + p] += olr * dt;
   S[${SFC.olrNow}u * NG + p] = olr;
   S[${SFC.precipRate}u * NG + p] = (rainConv + rainLS) / dt;
+  if (Tc[K - 1u] < 273.15) { S[${SFC.snowAcc}u * NG + p] += rainConv + rainLS; }
   // ---- increments (cos-weighted winds for the vector transform) and moisture
   for (var k = 0u; k < K; k++) {
     INC[k * NG + p] = (U[k] - u0[k]) * cl;

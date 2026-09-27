@@ -1,6 +1,6 @@
 // Messages between the UI thread and the simulation worker.
 
-export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip' | 'sst' | 'q' | 'olr';
+export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip' | 'snow' | 'sst' | 'q' | 'olr';
 
 export type ToWorker =
   | { type: 'init'; preset: string; backend: 'auto' | 'cpu' }

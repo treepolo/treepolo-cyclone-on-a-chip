@@ -80,6 +80,8 @@ export interface AquaplanetFields {
   accTime: number;            // s
   /** instantaneous */
   precipRate: Float64Array;   // kg m^-2 s^-1 (last step)
+  snowRate: Float64Array;     // kg m^-2 s^-1 (last step): precipitation reaching the ground as snow
+  snowAcc: Float64Array;      // kg m^-2 accumulated snowfall
   olrNow: Float64Array;       // W m^-2
   blDepth: Float64Array;      // m
 }
@@ -106,7 +108,7 @@ export class GrayPhysics implements ColumnPhysics {
     this.cfg = { ...AQUA, ...cfg };
     this.surface = surface ?? { land: new Uint8Array(ng), zsurf: new Float64Array(ng) };
     const z = (): Float64Array => new Float64Array(ng);
-    this.f = { sst: z(), bucket: z(), precipConv: z(), precipLS: z(), evap: z(), shf: z(), olr: z(), runoff: z(), tsAcc: z(), accTime: 0, precipRate: z(), olrNow: z(), blDepth: z() };
+    this.f = { sst: z(), bucket: z(), precipConv: z(), precipLS: z(), evap: z(), shf: z(), olr: z(), runoff: z(), tsAcc: z(), accTime: 0, precipRate: z(), snowRate: z(), snowAcc: z(), olrNow: z(), blDepth: z() };
     const c = (n: number): Float64Array => new Float64Array(n);
     this.col = {
       T: c(K), q: c(K), u: c(K), v: c(K), pf: c(K), ph: c(K + 1), zf: c(K), zh: c(K + 1),
@@ -139,7 +141,7 @@ export class GrayPhysics implements ColumnPhysics {
   }
 
   resetAccumulators(): void {
-    for (const a of [this.f.precipConv, this.f.precipLS, this.f.evap, this.f.shf, this.f.olr, this.f.runoff, this.f.tsAcc]) a.fill(0);
+    for (const a of [this.f.precipConv, this.f.precipLS, this.f.evap, this.f.shf, this.f.olr, this.f.runoff, this.f.tsAcc, this.f.snowAcc]) a.fill(0);
     this.f.accTime = 0;
   }
 
@@ -350,6 +352,10 @@ export class GrayPhysics implements ColumnPhysics {
     f.tsAcc[p] = f.tsAcc[p]! + f.sst[p]! * dt;
     f.olrNow[p] = olr;
     f.precipRate[p] = (rainConv + rainLS) / dt;
+    // precipitation phase at the ground (diagnostic; the gray benchmark physics has no latent heat of fusion)
+    const snow = T[K - 1]! < 273.15 ? rainConv + rainLS : 0;
+    f.snowRate[p] = snow / dt;
+    f.snowAcc[p] = f.snowAcc[p]! + snow;
   }
 
   /**

@@ -234,7 +234,8 @@ export function xySvg(p: XYPlot, size = 420): string {
     if (d) out.push(`<path d="${d}" stroke="${i < 0 ? '#333' : '#000'}" stroke-width="0.7" ${i < 0 ? 'stroke-dasharray="3,2"' : ''} fill="none"/>`);
   }
   out.push(`<rect x="${ml}" y="${mt}" width="${W}" height="${H}" fill="none" stroke="#000"/>`);
-  for (let km = 0; km <= nx * p.dx / 1000; km += 20) {
+  const Lkm = nx * p.dx / 1000, step = Lkm > 600 ? 200 : Lkm > 250 ? 50 : 20;
+  for (let km = 0; km <= Lkm; km += step) {
     out.push(`<text x="${ml + km * 1000 / p.dx * cw}" y="${mt + H + 14}" text-anchor="middle">${km}</text>`);
     out.push(`<text x="${ml - 4}" y="${mt + H - km * 1000 / p.dx * ch + 4}" text-anchor="end">${km}</text>`);
   }

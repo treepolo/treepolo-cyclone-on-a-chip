@@ -4,6 +4,7 @@
 import { DRY_AIR } from '../core/constants.js';
 import { RegionalModel } from './core.js';
 import { QV } from './kessler.js';
+import { rng } from '../core/random.js';
 
 const G = 9.80665, CP = DRY_AIR.cp, RD = DRY_AIR.rd, LV = 2.5e6, EPS = 0.622;
 const esat = (T: number): number => 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
@@ -54,7 +55,7 @@ export function re87Wind(r: number, f: number, vmax = 15, rm = 82500, r0 = 41250
  * Insert a balanced RE87 vortex centred in the domain: wind decreases linearly to zero at zTop;
  * pi' from gradient-wind balance (integrated inward from the outer radius), theta' from hydrostatic balance.
  */
-export function insertVortex(m: RegionalModel, f: number, vmax = 15, zTop = 20000): void {
+export function insertVortex(m: RegionalModel, f: number, vmax = 15, zTop = 20000, noiseK = 0.1, seed = 7): void {
   const { nx, ny, nz, dx, dy } = m.c;
   const xc = nx * dx / 2, yc = ny * dy / 2;
   const nr = 1000, dr = 500;
@@ -94,9 +95,12 @@ export function insertVortex(m: RegionalModel, f: number, vmax = 15, zTop = 2000
       m.th[q] = m.th0[k]! + CP * thv * thv / G * dpdz;
     }
   }
+  // random theta perturbations in the lowest 1 km break the grid's 4-fold symmetry
+  const r = rng(seed);
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const q = m.idx(i, j, k);
     if (m.scalars[QV]) m.scalars[QV]![q] = m.qv0[k]!;
+    if (m.zc[k]! < 1000) m.th[q] = m.th[q]! + noiseK * (2 * r() - 1);
   }
 }
 
