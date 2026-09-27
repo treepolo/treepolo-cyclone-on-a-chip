@@ -59,7 +59,9 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <input id="speed" type="range" min="1" max="24" value="6" />
 
 <h2>放大區域 / Zoom into a region</h2>
-<div class="muted">在地球上點一下選擇地點（黃框為 1200 km 區域），再開啟區域非靜力模式：以目前的全球場為初始與側邊界條件（單向巢狀），解析對流、颮線與氣旋內部結構。 / Click the globe to choose a point (yellow box: the 1200 km domain), then open the regional non-hydrostatic model there, initialised and driven at its boundaries by the current global fields (one-way nesting), to resolve convection, squall lines and storm structure.</div>
+<div class="muted">在地球上點一下選擇地點（黃框為區域範圍），再開啟區域非靜力模式：以目前的全球場為初始與側邊界條件（單向巢狀），解析對流、颮線與氣旋內部結構。 / Click the globe to choose a point (yellow box: the domain), then open the regional non-hydrostatic model there, initialised and driven at its boundaries by the current global fields (one-way nesting), to resolve convection, squall lines and storm structure.</div>
+<label for="nestSize">區域大小 / Domain</label>
+<select id="nestSize"><option value="meso">1200 km，Δx 12 km：鋒面、氣旋、季風雨帶 / fronts, cyclones, monsoon rain bands</option><option value="storm">480 km，Δx 4 km：可解析對流（需 GPU）/ convection-permitting (GPU)</option></select>
 <div class="row"><span>所選地點 / Selected point</span><span id="pick">—</span></div>
 <div class="controls"><button id="zoom" disabled>放大此區域 / Zoom in here</button></div>
 

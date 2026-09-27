@@ -1,7 +1,7 @@
 // Regional-model page: controls, 3-D volume view, statistics.
 import { VolumeView } from './volume.js';
 import { sequential, diverging } from '../colormap.js';
-import type { FromRegionalWorker, GroundField, NestPayload, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const log = (s: string): void => { const el = $('log'); el.textContent = `${s}\n${el.textContent ?? ''}`.slice(0, 3000); };
@@ -10,7 +10,7 @@ const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'modu
 const send = (m: ToRegionalWorker): void => worker.postMessage(m);
 let running = false, dt = 6, aspect = 0.3;
 let land: Uint8Array | null = null;
-let nest: { payload: NestPayload; lat0: number; lon0: number } | null = null;
+let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
 
 worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
@@ -56,7 +56,7 @@ const init = (): void => {
   if (exp === 'nest') {
     if (!nest) { log('等待全球模式傳送資料… / Waiting for the global model state…'); return; }
     log('建立巢狀區域模式中 / Building the nested regional model…');
-    send({ type: 'initNest', payload: nest.payload, lat0: nest.lat0, lon0: nest.lon0, backend });
+    send({ type: 'initNest', payload: nest.payload, lat0: nest.lat0, lon0: nest.lon0, size: nest.size, backend });
   } else send({ type: 'init', experiment: exp, backend });
 };
 $('exp').onchange = init;
@@ -70,7 +70,7 @@ if (new URLSearchParams(location.search).has('nest')) {
   sel.prepend(opt); sel.value = 'nest';
   window.addEventListener('message', (ev: MessageEvent) => {
     if (ev.origin !== location.origin || !ev.data || ev.data.type !== 'nest') return;
-    nest = { payload: ev.data.payload as NestPayload, lat0: ev.data.lat0 as number, lon0: ev.data.lon0 as number };
+    nest = { payload: ev.data.payload as NestPayload, lat0: ev.data.lat0 as number, lon0: ev.data.lon0 as number, size: (ev.data.size as NestSize) ?? 'meso' };
     sel.value = 'nest';
     init();
   });

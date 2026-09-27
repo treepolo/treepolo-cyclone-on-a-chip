@@ -88,6 +88,77 @@ export function sampleSurface(g: GlobalSnapshot, spec: NestSpec, f: ArrayLike<nu
   return out;
 }
 
+
+/** Global columns (sampled at the regional cell centres) -> regional fields on the model's grid,
+ *  using the regional model's fixed base state. Returns new arrays (prognostic layout). */
+function interpolateToNest(g: GlobalSnapshot, spec: NestSpec, m: RegionalModel, cols?: Column[]): BoundaryTargets {
+  const a = EARTH.radius, { nx, ny, nz } = m.c, kap = DRY_AIR.kappa;
+  if (!cols) {
+    cols = [];
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const x = (i + 0.5) * spec.dx - spec.L / 2, y = (j + 0.5) * spec.dx - spec.L / 2;
+      cols.push(sampleColumn(g, spec.lat0 + y / a, spec.lon0 + x / (a * Math.cos(spec.lat0))));
+    }
+  }
+  const zc = Array.from({ length: nz }, (_, k) => (k + 0.5) * spec.dz);
+  const th = new Float64Array(m.size), pp = new Float64Array(m.size), u = new Float64Array(m.size), v = new Float64Array(m.size);
+  const qvA = m.scalars.length > 0 ? new Float64Array(m.size) : null;
+  // fill fields: theta, qv, pi' at centres; u at x-faces and v at y-faces (averaged from neighbouring centres)
+  const uc = new Float64Array(nx * ny * nz), vc = new Float64Array(nx * ny * nz);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const c = cols[j * nx + i]!;
+    for (let k = 0; k < nz; k++) {
+      const z = zc[k]!, q = m.idx(i, j, k);
+      th[q] = interp(c, c.th, z);
+      if (qvA) qvA![q] = interp(c, c.q, z);
+      const p = Math.exp(interp(c, c.lnp, z, true));
+      pp[q] = Math.pow(p / DRY_AIR.pRef, kap) - m.pi0[k]!;
+      uc[(k * ny + j) * nx + i] = interp(c, c.u, z);
+      vc[(k * ny + j) * nx + i] = interp(c, c.v, z);
+    }
+  }
+  // Discrete hydrostatic balance in the regional model's own form: keep pi' from the interpolated
+  // pressure only at a reference level (~3 km, where global levels are dense) and integrate
+  //   cp theta_rho_face (pi'_k - pi'_{k-1}) / dz = g (theta_rho/theta_rho0 - 1)_face
+  // up and down from it, so the initial columns are exactly balanced.
+  {
+    const G = EARTH.gravity, cpd = DRY_AIR.cp, dz = spec.dz;
+    let kr = 0;
+    for (let k = 0; k < nz; k++) if (Math.abs(zc[k]! - 3000) < Math.abs(zc[kr]! - 3000)) kr = k;
+    const qv = qvA;
+    const thr = (q: number): number => th[q]! * (1 + 0.61 * (qv ? qv[q]! : 0));
+    const buoy = (q: number, k: number): number => { const t0 = m.th0[k]! * (1 + 0.61 * m.qv0[k]!); return G * (thr(q) - t0) / t0; };
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      for (let k = kr + 1; k < nz; k++) {
+        const q = m.idx(i, j, k), qm = q - m.plane;
+        const B = 0.5 * (buoy(q, k) + buoy(qm, k - 1)), tf = 0.5 * (thr(q) + thr(qm));
+        pp[q] = pp[qm]! + B * dz / (cpd * tf);
+      }
+      for (let k = kr - 1; k >= 0; k--) {
+        const q = m.idx(i, j, k), qp = q + m.plane;
+        const B = 0.5 * (buoy(qp, k + 1) + buoy(q, k)), tf = 0.5 * (thr(qp) + thr(q));
+        pp[q] = pp[qp]! - B * dz / (cpd * tf);
+      }
+    }
+  }
+  // remove the domain-mean pi' per level (the base state carries the mean)
+  for (let k = 0; k < nz; k++) {
+    let s = 0;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) s += pp[m.idx(i, j, k)]!;
+    s /= nx * ny;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) pp[m.idx(i, j, k)] = pp[m.idx(i, j, k)]! - s;
+  }
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const q = m.idx(i, j, k), o = (k * ny + j) * nx;
+    u[q] = i > 0 ? 0.5 * (uc[o + i - 1]! + uc[o + i]!) : uc[o + i]!;
+    v[q] = j > 0 ? 0.5 * (vc[((k * ny + j - 1) * nx) + i]! + vc[o + i]!) : vc[o + i]!;
+  }
+  return { u, v, th, qv: qvA, pp };
+}
+
+/** Refresh the lateral-boundary targets of a nested model from a newer global snapshot. */
+export function nestTargets(g: GlobalSnapshot, spec: NestSpec, m: RegionalModel): BoundaryTargets { return interpolateToNest(g, spec, m); }
+
 export interface NestedRegional { model: RegionalModel; boundary: BoundaryTargets; f: number; description: string }
 
 /** Build a regional model (open boundaries) initialised from a global snapshot. nScalars = 3 for Kessler moisture. */
@@ -115,59 +186,11 @@ export function nestFromGlobal(g: GlobalSnapshot, spec: NestSpec, nScalars = 3, 
     dampDepth: Math.min(6000, 0.25 * nz * spec.dz), dampRate: 1 / 300, kdiff2: 0, lateral: 'open', relaxCells: 8, relaxTau: 300, ...extra,
   };
   const m = new RegionalModel(cfg, sounding, nScalars);
-  const kap = DRY_AIR.kappa;
-  // fill fields: theta, qv, pi' at centres; u at x-faces and v at y-faces (averaged from neighbouring centres)
-  const uc = new Float64Array(nx * ny * nz), vc = new Float64Array(nx * ny * nz);
-  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    const c = cols[j * nx + i]!;
-    for (let k = 0; k < nz; k++) {
-      const z = zc[k]!, q = m.idx(i, j, k);
-      m.th[q] = interp(c, c.th, z);
-      if (nScalars > 0) m.scalars[0]![q] = interp(c, c.q, z);
-      const p = Math.exp(interp(c, c.lnp, z, true));
-      m.pp[q] = Math.pow(p / DRY_AIR.pRef, kap) - m.pi0[k]!;
-      uc[(k * ny + j) * nx + i] = interp(c, c.u, z);
-      vc[(k * ny + j) * nx + i] = interp(c, c.v, z);
-    }
-  }
-  // Discrete hydrostatic balance in the regional model's own form: keep pi' from the interpolated
-  // pressure only at a reference level (~3 km, where global levels are dense) and integrate
-  //   cp theta_rho_face (pi'_k - pi'_{k-1}) / dz = g (theta_rho/theta_rho0 - 1)_face
-  // up and down from it, so the initial columns are exactly balanced.
-  {
-    const G = EARTH.gravity, cpd = DRY_AIR.cp, dz = spec.dz;
-    let kr = 0;
-    for (let k = 0; k < nz; k++) if (Math.abs(zc[k]! - 3000) < Math.abs(zc[kr]! - 3000)) kr = k;
-    const qv = nScalars > 0 ? m.scalars[0]! : null;
-    const thr = (q: number): number => m.th[q]! * (1 + 0.61 * (qv ? qv[q]! : 0));
-    const buoy = (q: number, k: number): number => { const t0 = m.th0[k]! * (1 + 0.61 * m.qv0[k]!); return G * (thr(q) - t0) / t0; };
-    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-      for (let k = kr + 1; k < nz; k++) {
-        const q = m.idx(i, j, k), qm = q - m.plane;
-        const B = 0.5 * (buoy(q, k) + buoy(qm, k - 1)), tf = 0.5 * (thr(q) + thr(qm));
-        m.pp[q] = m.pp[qm]! + B * dz / (cpd * tf);
-      }
-      for (let k = kr - 1; k >= 0; k--) {
-        const q = m.idx(i, j, k), qp = q + m.plane;
-        const B = 0.5 * (buoy(qp, k + 1) + buoy(q, k)), tf = 0.5 * (thr(qp) + thr(q));
-        m.pp[q] = m.pp[qp]! - B * dz / (cpd * tf);
-      }
-    }
-  }
-  // remove the domain-mean pi' per level (the base state carries the mean)
-  for (let k = 0; k < nz; k++) {
-    let s = 0;
-    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) s += m.pp[m.idx(i, j, k)]!;
-    s /= nx * ny;
-    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) m.pp[m.idx(i, j, k)] = m.pp[m.idx(i, j, k)]! - s;
-  }
-  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    const q = m.idx(i, j, k), o = (k * ny + j) * nx;
-    m.u[q] = i > 0 ? 0.5 * (uc[o + i - 1]! + uc[o + i]!) : uc[o + i]!;
-    m.v[q] = j > 0 ? 0.5 * (vc[((k * ny + j - 1) * nx) + i]! + vc[o + i]!) : vc[o + i]!;
-  }
+  const t = interpolateToNest(g, spec, m, cols);
+  m.u.set(t.u); m.v.set(t.v); m.th.set(t.th); m.pp.set(t.pp!);
+  if (nScalars > 0 && t.qv) m.scalars[0]!.set(t.qv);
   for (let k = 0; k < nz; k++) { m.ub[k] = 0; m.vb[k] = 0; }
-  const boundary: BoundaryTargets = { u: Float64Array.from(m.u), v: Float64Array.from(m.v), th: Float64Array.from(m.th), qv: nScalars > 0 ? Float64Array.from(m.scalars[0]!) : null, pp: Float64Array.from(m.pp) };
+  const boundary: BoundaryTargets = t;
   m.boundary = boundary;
   const description = `nest at ${(lat0 * 180 / Math.PI).toFixed(1)}°, ${(lon0 * 180 / Math.PI).toFixed(1)}°, ${(spec.L / 1000).toFixed(0)} km, dx ${(spec.dx / 1000).toFixed(1)} km`;
   return { model: m, boundary, f, description };

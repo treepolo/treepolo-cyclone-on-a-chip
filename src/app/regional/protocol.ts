@@ -13,11 +13,14 @@ export interface NestPayload {
   wet: Float32Array | null;      // surface wetness: 1 over sea, bucket fraction over land
   land: Uint8Array | null;
 }
+/** 'meso': 1200 km at 12 km (fronts, cyclones, monsoon rain bands); 'storm': 480 km at 4 km (convection-permitting) */
+export type NestSize = 'meso' | 'storm';
+export const NEST_HALF_WIDTH_KM: Record<NestSize, number> = { meso: 600, storm: 240 };
 export type GroundField = 'rain' | 'wind' | 'theta';
 
 export type ToRegionalWorker =
   | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu' }
-  | { type: 'initNest'; payload: NestPayload; lat0: number; lon0: number; backend: 'auto' | 'cpu' }
+  | { type: 'initNest'; payload: NestPayload; lat0: number; lon0: number; size: NestSize; backend: 'auto' | 'cpu' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
   | { type: 'ground'; field: GroundField };

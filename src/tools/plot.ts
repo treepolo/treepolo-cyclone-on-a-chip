@@ -208,7 +208,12 @@ function niceStep(x: number): number {
   return (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10) * e;
 }
 
-export interface XYPlot { title: string; nx: number; ny: number; dx: number; values: number[]; units: string; diverging: boolean; contourStep: number }
+export interface XYPlot {
+  title: string; nx: number; ny: number; dx: number; values: number[]; units: string; diverging: boolean; contourStep: number;
+  outline?: ArrayLike<number> | null;            // 0/1 mask (e.g. land) drawn as cell-edge boundaries
+  vectors?: { u: number[]; v: number[]; stride: number; scale: number } | null;   // arrows (m/s -> px per m/s)
+  range?: [number, number];
+}
 
 /** Horizontal (x-y) section of a regional-model field, y upward. */
 export function xySvg(p: XYPlot, size = 420): string {
@@ -216,12 +221,13 @@ export function xySvg(p: XYPlot, size = 420): string {
   const nx = p.nx, ny = p.ny;
   let vmin = Infinity, vmax = -Infinity, amax = 0;
   for (const v of p.values) { vmin = Math.min(vmin, v); vmax = Math.max(vmax, v); amax = Math.max(amax, Math.abs(v)); }
+  if (p.range) { vmin = p.range[0]; vmax = p.range[1]; amax = Math.max(Math.abs(vmin), Math.abs(vmax)); }
   const cw = W / nx, ch = H / ny;
   const out: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="${W + ml + mr}" height="${H + mt + mb}" font-family="sans-serif" font-size="11">`,
     `<rect width="100%" height="100%" fill="#fff"/>`, `<text x="${ml}" y="16" font-size="13" font-weight="bold">${p.title} (${p.units})</text>`];
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const v = p.values[j * nx + i]!;
-    const t = p.diverging ? v / (amax || 1) : (v - vmin) / ((vmax - vmin) || 1);
+    const t = Math.max(-1, Math.min(1, p.diverging ? v / (amax || 1) : (v - vmin) / ((vmax - vmin) || 1)));
     if (!p.diverging && t < 0.02) continue;
     out.push(`<rect x="${(ml + i * cw).toFixed(1)}" y="${(mt + H - (j + 1) * ch).toFixed(1)}" width="${(cw + 0.5).toFixed(1)}" height="${(ch + 0.5).toFixed(1)}" fill="${color(t, p.diverging)}"/>`);
   }
@@ -232,6 +238,27 @@ export function xySvg(p: XYPlot, size = 420): string {
     if (i === 0) continue;
     const d = contours(xs, ys, val, i * p.contourStep);
     if (d) out.push(`<path d="${d}" stroke="${i < 0 ? '#333' : '#000'}" stroke-width="0.7" ${i < 0 ? 'stroke-dasharray="3,2"' : ''} fill="none"/>`);
+  }
+  if (p.outline) {
+    const o = p.outline, seg: string[] = [];
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const a = o[j * nx + i]!;
+      const x0 = ml + i * cw, y0 = mt + H - j * ch;
+      if (i + 1 < nx && o[j * nx + i + 1]! !== a) seg.push(`M${(x0 + cw).toFixed(1)},${y0.toFixed(1)}v${(-ch).toFixed(1)}`);
+      if (j + 1 < ny && o[(j + 1) * nx + i]! !== a) seg.push(`M${x0.toFixed(1)},${(y0 - ch).toFixed(1)}h${cw.toFixed(1)}`);
+    }
+    if (seg.length) out.push(`<path d="${seg.join('')}" stroke="#7a4a12" stroke-width="1.4" fill="none"/>`);
+  }
+  if (p.vectors) {
+    const { u, v, stride, scale } = p.vectors, arr: string[] = [];
+    for (let j = Math.floor(stride / 2); j < ny; j += stride) for (let i = Math.floor(stride / 2); i < nx; i += stride) {
+      const x = ml + (i + 0.5) * cw, y = mt + H - (j + 0.5) * ch, du = u[j * nx + i]! * scale, dv = -v[j * nx + i]! * scale;
+      const L = Math.hypot(du, dv);
+      if (L < 0.5) continue;
+      const hx = du / L, hy = dv / L, h = Math.min(4, 0.35 * L);
+      arr.push(`M${x.toFixed(1)},${y.toFixed(1)}l${du.toFixed(1)},${dv.toFixed(1)}m${(-h * hx - 0.6 * h * hy).toFixed(1)},${(-h * hy + 0.6 * h * hx).toFixed(1)}l${(h * hx + 0.6 * h * hy).toFixed(1)},${(h * hy - 0.6 * h * hx).toFixed(1)}l${(-h * hx + 0.6 * h * hy).toFixed(1)},${(-h * hy - 0.6 * h * hx).toFixed(1)}`);
+    }
+    if (arr.length) out.push(`<path d="${arr.join('')}" stroke="#123" stroke-width="0.9" fill="none"/>`);
   }
   out.push(`<rect x="${ml}" y="${mt}" width="${W}" height="${H}" fill="none" stroke="#000"/>`);
   const Lkm = nx * p.dx / 1000, step = Lkm > 600 ? 200 : Lkm > 250 ? 50 : 20;

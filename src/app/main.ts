@@ -4,6 +4,7 @@ import { Globe } from './globe.js';
 import { diverging, sequential } from './colormap.js';
 import { drawSection } from './section.js';
 import type { FieldId, FrameMessage, FromWorker, ToWorker, ZonalMessage } from './protocol.js';
+import { NEST_HALF_WIDTH_KM, type NestSize } from './regional/protocol.js';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('globe');
@@ -23,10 +24,11 @@ let running = false;
 let pick: { lat: number; lon: number } | null = null;
 let nestWin: Window | null = null, nestReady = false;
 let pendingNest: import('./regional/protocol.js').NestPayload | null = null;
-const NEST_HALF = 600e3 / 6.371e6;       // half-width of the 1200 km nest (radians of arc)
+const nestSize = (): NestSize => $<HTMLSelectElement>('nestSize').value as NestSize;
+const nestHalf = (): number => NEST_HALF_WIDTH_KM[nestSize()] * 1e3 / 6.371e6;   // radians of arc
 function deliverNest(): void {
   if (!nestWin || !nestReady || !pendingNest || !pick) return;
-  nestWin.postMessage({ type: 'nest', payload: pendingNest, lat0: pick.lat, lon0: pick.lon }, location.origin);
+  nestWin.postMessage({ type: 'nest', payload: pendingNest, lat0: pick.lat, lon0: pick.lon, size: nestSize() }, location.origin);
   pendingNest = null;
   log('已傳送全球模式狀態到區域模式 / Global state sent to the regional model');
 }
@@ -201,7 +203,7 @@ $('level').oninput = pushView;
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 globe.onPick = (lat, lon): void => {
   pick = { lat, lon };
-  globe.setMarker(lat, lon, NEST_HALF);
+  globe.setMarker(lat, lon, nestHalf());
   const lonD = lon * 180 / Math.PI;
   $('pick').textContent = `${Math.abs(lat * 180 / Math.PI).toFixed(1)}°${lat >= 0 ? 'N' : 'S'}, ${(lonD > 180 ? 360 - lonD : lonD).toFixed(1)}°${lonD > 180 ? 'W' : 'E'}`;
   $<HTMLButtonElement>('zoom').disabled = false;
@@ -215,6 +217,7 @@ $('zoom').onclick = (): void => {
   send({ type: 'snapshot' });
   log('擷取全球模式狀態中 / Capturing the global model state…');
 };
+$('nestSize').onchange = (): void => { if (pick) globe.setMarker(pick.lat, pick.lon, nestHalf()); };
 $('resetAvg').onclick = (): void => { send({ type: 'resetAverage' }); log('重設緯向平均 / Zonal average reset'); };
 $('preset').onchange = (): void => init();
 $('backendSel').onchange = (): void => init();

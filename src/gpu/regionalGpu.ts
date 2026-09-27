@@ -35,8 +35,8 @@ export class GpuRegional {
   readonly device: GPUDevice;
   readonly cpu: RegionalModel;
   readonly S: GPUBuffer; readonly S0: GPUBuffer; readonly F: GPUBuffer;
-  readonly aux: GPUBuffer;
-  B: GPUBuffer | null = null;    // open-boundary relaxation targets: u, v, theta, qv, pi'       // [0] ppOld, [1] eddy-viscosity deformation, [2] rain accumulation (2-D, level 0)
+  readonly aux: GPUBuffer;       // [0] ppOld, [1] eddy-viscosity deformation, [2] rain accumulation (2-D, level 0)
+  B: GPUBuffer | null = null;    // open-boundary relaxation targets: u, v, theta, qv, pi'
   time = 0;
   steps = 0;
   private readonly params: GPUBuffer[];
@@ -166,6 +166,14 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     });
     if (opts.moist) seq.push(kes);
     this.passes = seq;
+  }
+
+  /** Replace the open-boundary relaxation targets (time-dependent one-way nesting). */
+  setBoundary(b: BoundaryTargets): void {
+    if (!this.B) throw new Error('model was not built with open boundaries');
+    const size = this.cpu.size, bd = new Float32Array(5 * size);
+    [b.u, b.v, b.th, b.qv, b.pp].forEach((a, f) => { if (a) for (let i = 0; i < size; i++) bd[f * size + i] = a[i]!; });
+    this.device.queue.writeBuffer(this.B, 0, bd);
   }
 
   /** Copy the CPU model state to the GPU. */

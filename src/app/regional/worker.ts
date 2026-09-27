@@ -7,7 +7,7 @@ import { tropicalSounding, insertVortex, tcMetrics } from '../../regional/tropic
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, sampleSurface, NestSpec } from '../../regional/nest.js';
-import type { FromRegionalWorker, GroundField, NestPayload, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 let m: RegionalModel | null = null;
 let mp: KesslerMicrophysics | null = null;
@@ -63,9 +63,11 @@ function build(exp: RegionalExperiment): { dt: number; description: string } {
 
 /** One-way nest inside the global model at (lat0, lon0): initial and lateral-boundary fields from the
  *  global snapshot, surface skin temperature and wetness from the global surface model. */
-function buildNest(g: NestPayload, lat0: number, lon0: number, fine: boolean): { dt: number; description: string; land: Uint8Array | null } {
+function buildNest(g: NestPayload, lat0: number, lon0: number, size: NestSize, gpuOk: boolean): { dt: number; description: string; land: Uint8Array | null } {
   experiment = 'nest';
-  const spec: NestSpec = fine ? { lat0, lon0, L: 1200000, dx: 12000, nz: 30, dz: 600, dt: 60, nsound: 6 } : { lat0, lon0, L: 1200000, dx: 20000, nz: 24, dz: 750, dt: 60, nsound: 6 };
+  const spec: NestSpec = size === 'storm'
+    ? (gpuOk ? { lat0, lon0, L: 480000, dx: 4000, nz: 40, dz: 450, dt: 20, nsound: 6 } : { lat0, lon0, L: 480000, dx: 8000, nz: 30, dz: 600, dt: 40, nsound: 6 })
+    : (gpuOk ? { lat0, lon0, L: 1200000, dx: 12000, nz: 30, dz: 600, dt: 60, nsound: 6 } : { lat0, lon0, L: 1200000, dx: 20000, nz: 24, dz: 750, dt: 60, nsound: 6 });
   const nest = nestFromGlobal(g, spec, 3);
   m = nest.model;
   mp = new KesslerMicrophysics(m);
@@ -104,11 +106,11 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
       const device = msg.backend === 'cpu' ? null : await getGpu();
-      const info = buildNest(msg.payload, msg.lat0, msg.lon0, !!device);
+      const info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, !!device);
       gpu = null;
       let note = '';
       if (device) { gpu = new GpuRegional(device, m!, { moist: true, physics: physCfg }); gpu.uploadFrom(m!); }
-      else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的 20 km 網格 / the CPU uses a coarser 20 km grid';
+      else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
       post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land });
       await sendFrame();
