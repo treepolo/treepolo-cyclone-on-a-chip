@@ -164,13 +164,34 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
       }
       let note = '';
       const device = m.backend === 'cpu' ? null : await getGpu();
+      let gpuBackend: GpuBackend | null = null;
       if (device) {
-        const gd = new GpuDycore(device, model, { heldSuarez: !!HS_PRESETS[m.preset] });
-        const gm = physics ? new GpuMoist(device, gd, model, physics) : null;
-        gd.uploadFrom(model);
-        gm?.uploadFrom(model);
-        backend = new GpuBackend(model, device, gd, gm, physics);
-      } else {
+        // Build and trial-run the GPU model; any GPU error (shader compilation, limits, out of memory)
+        // or an implausible first state falls back to the CPU, with the reason in the log.
+        const scopes = ['validation', 'internal', 'out-of-memory'] as const;
+        for (const sc of scopes) device.pushErrorScope(sc);
+        let reason = '';
+        try {
+          const gd = new GpuDycore(device, model, { heldSuarez: !!HS_PRESETS[m.preset] });
+          const gm = physics ? new GpuMoist(device, gd, model, physics) : null;
+          gd.uploadFrom(model);
+          gm?.uploadFrom(model);
+          const trial = new GpuBackend(model, device, gd, gm, physics);
+          await trial.advance(2);
+          const snap = await trial.snapshot();
+          const bad = (a: Float32Array | null, lo: number, hi: number): boolean => { if (!a) return false; for (let i = 0; i < a.length; i += 7) if (!(a[i]! > lo && a[i]! < hi)) return true; return false; };
+          if (bad(snap.T, 150, 350) || bad(snap.ps, 3e4, 1.2e5) || bad(snap.ts, 150, 350)) reason = 'GPU 試跑結果不合理 / implausible GPU trial state';
+          gpuBackend = trial;
+        } catch (e) { reason = String(e); }
+        for (let i = 0; i < scopes.length; i++) { const err = await device.popErrorScope(); if (err && !reason) reason = err.message; }
+        if (reason) {
+          gpuBackend = null;
+          note = `WebGPU 在這個裝置上失敗，改用 CPU / WebGPU failed on this device, using the CPU: ${reason.slice(0, 300)}`;
+        }
+      }
+      if (gpuBackend) backend = gpuBackend;
+      else if (device) backend = new CpuBackend(model, physics);
+      else {
         backend = new CpuBackend(model, physics);
         if (m.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       }

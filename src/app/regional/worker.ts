@@ -34,6 +34,29 @@ async function getGpu(): Promise<GPUDevice | null> {
   return gpuDevice;
 }
 
+const gpuFailNote = (r: string): string => `WebGPU 在這個裝置上失敗，改用 CPU（較粗網格）/ WebGPU failed on this device, using the CPU (coarser grid): ${r.slice(0, 300)}`;
+
+/** Build the GPU model for the current CPU model and trial-run one step; on any GPU error or an
+ *  implausible state leave gpu = null and return the reason. */
+async function tryGpu(device: GPUDevice): Promise<string> {
+  const scopes = ['validation', 'internal', 'out-of-memory'] as const;
+  for (const sc of scopes) device.pushErrorScope(sc);
+  let reason = '';
+  try {
+    const g = new GpuRegional(device, m!, { moist: true, physics: physCfg, ice: true });
+    g.uploadFrom(m!);
+    g.step(1);
+    const st = await g.readState(), size = m!.size;
+    let bad = false;
+    for (let i = 3 * size; i < 4 * size; i += 13) if (!Number.isFinite(st[i]!)) { bad = true; break; }
+    if (bad) reason = 'GPU 試跑結果出現非數值 / GPU trial produced non-finite values';
+    gpu = g;
+  } catch (e) { reason = String(e); }
+  for (let i = 0; i < scopes.length; i++) { const err = await device.popErrorScope(); if (err && !reason) reason = err.message; }
+  if (reason) { gpu?.destroy(); gpu = null; }
+  return reason;
+}
+
 const post = (msg: FromRegionalWorker, tr: Transferable[] = []): void => (self as unknown as Worker).postMessage(msg, tr);
 
 function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; description: string } {
@@ -106,11 +129,13 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
       const device = msg.backend === 'cpu' ? null : await getGpu();
-      const info = build(msg.experiment, !!device);
+      let info = build(msg.experiment, !!device);
       gpu = null;
       let note = '';
-      if (device) { gpu = new GpuRegional(device, m!, { moist: true, physics: physCfg, ice: true }); gpu.uploadFrom(m!); }
-      else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
+      if (device) {
+        const reason = await tryGpu(device);
+        if (reason) { note = gpuFailNote(reason); info = build(msg.experiment, false); }
+      } else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr' || msg.experiment === 'tornado')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
       const c = m!.c;
       post({ type: 'ready', land: null, experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note });
@@ -120,11 +145,13 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
       const device = msg.backend === 'cpu' ? null : await getGpu();
-      const info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, !!device);
+      let info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, !!device);
       gpu = null;
       let note = '';
-      if (device) { gpu = new GpuRegional(device, m!, { moist: true, physics: physCfg, ice: true }); gpu.uploadFrom(m!); }
-      else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
+      if (device) {
+        const reason = await tryGpu(device);
+        if (reason) { note = gpuFailNote(reason); info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, false); }
+      } else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
       post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land });
       await sendFrame();

@@ -132,7 +132,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
       const pRelax = pipe(RELAX_WGSL);
       relax = disp(pRelax, bg(pRelax, [this.S, this.F, this.B, baseBuf]), nx * ny * nz);
     }
-    const pTurbK = ph ? pipe(TURBK_WGSL) : null, pTurb = ph ? pipe(TURB_WGSL) : null, pSfc = sfc ? pipe(SURFACE_WGSL) : null;
+    const pTurbK = ph ? pipe(TURBK_WGSL) : null, pTurb = ph ? pipe(TURB_WGSL) : null, pSfc = sfc ? pipe(surfaceWgsl((ph?.z0 ?? 0) > 0)) : null;
     let sfcBuf: GPUBuffer | null = null;
     if (sfc) {
       const sd = new Float32Array(2 * nx * ny); sd.set(sfc.tsk); sd.set(sfc.wet, nx * ny);
@@ -584,13 +584,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 // bulk sea-surface fluxes at the lowest level (adds to F); one thread per column
-const SURFACE_WGSL = /* wgsl */`
+const surfaceWgsl = (logDrag: boolean): string => /* wgsl */`
 @group(0) @binding(0) var<storage, read> S: array<f32>;
 @group(0) @binding(1) var<storage, read_write> F: array<f32>;
 @group(0) @binding(2) var<storage, read> SF: array<f32>;   // skin temperature, wetness (per column)
 fn cdrag(spd: f32) -> f32 {
-  if (Z0 > 0.0) { let l = 0.4 / log(0.5 * DZ / Z0); return l * l; }
-  return min(2.4e-3, 1.0e-3 * (1.0 + 0.07 * spd));
+  ${logDrag ? 'let l = 0.4 / log(0.5 * DZ / Z0); return l * l;' : 'return min(2.4e-3, 1.0e-3 * (1.0 + 0.07 * spd));'}
 }
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
