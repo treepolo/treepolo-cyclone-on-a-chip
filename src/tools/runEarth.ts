@@ -7,6 +7,7 @@
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { DAY, EARTH } from '../core/constants.js';
 import { EARTH_PRESETS, EarthData, createEarth } from '../model/presets.js';
+import type { GrayPhysicsConfig } from '../model/moist/aquaplanet.js';
 import { ZonalMeanAccumulator, summarize } from '../model/diagnostics.js';
 import { mapSvg, sectionSvg } from './plot.js';
 
@@ -20,23 +21,27 @@ const cfg = cfgMaybe;
 mkdirSync(outDir, { recursive: true });
 const data = JSON.parse(readFileSync('data/earth_t42.json', 'utf8')) as EarthData;
 
-const { model, physics } = createEarth(cfg, data);
+// optional physics overrides for sensitivity experiments, e.g. PHYS='{"albedoLand":0.3}'
+const overrides = process.env.PHYS ? JSON.parse(process.env.PHYS) as Partial<GrayPhysicsConfig> : {};
+const { model, physics } = createEarth(cfg, data, overrides);
 const tr = model.tr, ng = model.ng, K = model.K, nlat = tr.nlat, nlon = tr.nlon;
 const year = physics.cfg.yearLength;
 const ckpt = `${outDir}/checkpoint.bin`;
 if (existsSync(ckpt)) {
   const buf = readFileSync(ckpt);
   const all = new Float64Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-  const nState = all.length - 2 - 2 * ng;
+  const nState = model.exportState().data.length;
   model.importState({ time: all[0]!, steps: all[1]!, data: all.subarray(2, 2 + nState) });
   physics.f.sst.set(all.subarray(2 + nState, 2 + nState + ng));
-  physics.f.bucket.set(all.subarray(2 + nState + ng));
+  physics.f.bucket.set(all.subarray(2 + nState + ng, 2 + nState + 2 * ng));
+  if (all.length >= 2 + nState + 3 * ng) physics.f.ice.set(all.subarray(2 + nState + 2 * ng, 2 + nState + 3 * ng));
   console.log(`resumed from checkpoint at day ${(model.time / DAY).toFixed(2)}`);
 }
 const saveCheckpoint = (): void => {
   const s = model.exportState();
-  const out = new Float64Array(2 + s.data.length + 2 * ng);
+  const out = new Float64Array(2 + s.data.length + 3 * ng);
   out[0] = s.time; out[1] = s.steps; out.set(s.data, 2); out.set(physics.f.sst, 2 + s.data.length); out.set(physics.f.bucket, 2 + s.data.length + ng);
+  out.set(physics.f.ice, 2 + s.data.length + 2 * ng);
   writeFileSync(ckpt, Buffer.from(out.buffer));
 };
 

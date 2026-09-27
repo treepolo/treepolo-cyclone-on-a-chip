@@ -17,6 +17,7 @@ interface Snapshot {
   u: Float32Array; v: Float32Array; T: Float32Array; vor: Float32Array; div: Float32Array; ps: Float32Array;
   q: Float32Array | null; ts: Float32Array | null; olr: Float32Array | null; precipAcc: Float32Array | null; snowAcc: Float32Array | null;
   wet: Float32Array | null;   // surface evaporation efficiency (1 sea, bucket fraction on land)
+  ice: Float32Array | null;   // sea-ice thickness, m
 }
 
 interface Backend {
@@ -48,6 +49,7 @@ class CpuBackend implements Backend {
       u: Float32Array.from(g.u), v: Float32Array.from(g.v), T: Float32Array.from(g.T), vor, div, ps: Float32Array.from(g.ps),
       q: m.moist ? Float32Array.from(m.q) : null, ts: ph ? Float32Array.from(ph.f.sst) : null,
       olr: ph ? Float32Array.from(ph.f.olrNow) : null, precipAcc, snowAcc,
+      ice: ph ? Float32Array.from(ph.f.ice) : null,
       wet: ph ? Float32Array.from({ length: ng }, (_, p) => ph.surface.land[p] ? Math.min(1, ph.f.bucket[p]! / (0.75 * ph.cfg.bucketMax)) : 1) : null,
     };
   }
@@ -72,7 +74,7 @@ class GpuBackend implements Backend {
     }
     const ps = new Float32Array(ng);
     for (let p = 0; p < ng; p++) ps[p] = Math.exp(G[5 * K * ng + p]!);
-    let q: Float32Array | null = null, ts: Float32Array | null = null, olr: Float32Array | null = null, precipAcc: Float32Array | null = null, snowAcc: Float32Array | null = null, wet: Float32Array | null = null;
+    let q: Float32Array | null = null, ts: Float32Array | null = null, olr: Float32Array | null = null, precipAcc: Float32Array | null = null, snowAcc: Float32Array | null = null, wet: Float32Array | null = null, ice: Float32Array | null = null;
     if (this.gm) {
       q = await this.gm.readQ();
       const s = await this.gm.readSurface();
@@ -81,10 +83,11 @@ class GpuBackend implements Backend {
       precipAcc = new Float32Array(ng);
       for (let p = 0; p < ng; p++) precipAcc[p] = s[SFC.precipConv * ng + p]! + s[SFC.precipLS * ng + p]!;
       snowAcc = s.slice(SFC.snowAcc * ng, (SFC.snowAcc + 1) * ng);
+      ice = s.slice(SFC.ice * ng, (SFC.ice + 1) * ng);
       const ph = this.physics;
       if (ph) wet = Float32Array.from({ length: ng }, (_, p) => ph.surface.land[p] ? Math.min(1, s[SFC.bucket * ng + p]! / (0.75 * ph.cfg.bucketMax)) : 1);
     }
-    return { u, v, T: G.slice(4 * K * ng, 5 * K * ng), vor: G.slice(2 * K * ng, 3 * K * ng), div: G.slice(3 * K * ng, 4 * K * ng), ps, q, ts, olr, precipAcc, snowAcc, wet };
+    return { u, v, T: G.slice(4 * K * ng, 5 * K * ng), vor: G.slice(2 * K * ng, 3 * K * ng), div: G.slice(3 * K * ng, 4 * K * ng), ps, q, ts, olr, precipAcc, snowAcc, wet, ice };
   }
 }
 
@@ -268,11 +271,12 @@ async function sendFrame(): Promise<void> {
   const scalar = new Float32Array(ng), u = s.u.slice(o, o + ng), v = s.v.slice(o, o + ng);
   let maxWind = 0;
   for (let q = 0; q < s.u.length; q++) maxWind = Math.max(maxWind, Math.hypot(s.u[q]!, s.v[q]!));
-  if ((field === 'precip' || field === 'snow' || field === 'sst' || field === 'olr' || field === 'q') && !s.ts) field = 'T';
+  if ((field === 'precip' || field === 'snow' || field === 'sst' || field === 'olr' || field === 'q' || field === 'ice') && !s.ts) field = 'T';
   if (field === 'precip') { if (precipRate) for (let q = 0; q < ng; q++) scalar[q] = precipRate[q]! * 86400; }
   else if (field === 'snow') { if (snowRate) for (let q = 0; q < ng; q++) scalar[q] = snowRate[q]! * 86400; }
   else if (field === 'sst') scalar.set(s.ts!);
   else if (field === 'olr') scalar.set(s.olr!);
+  else if (field === 'ice') scalar.set(s.ice!);
   else if (field === 'q') { for (let q = 0; q < ng; q++) scalar[q] = s.q![o + q]! * 1000; }
   else if (field === 'vor') scalar.set(s.vor.subarray(o, o + ng));
   else if (field === 'div') scalar.set(s.div.subarray(o, o + ng));

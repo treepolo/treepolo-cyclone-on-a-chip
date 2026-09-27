@@ -28,7 +28,10 @@ export interface GrayPhysicsConfig {
   yearLength: number;        // s
   albedo: number;            // surface albedo, ocean
   albedoLand: number;
-  albedoIce: number;         // ocean colder than freezing
+  albedoIce: number;         // sea ice (or ocean colder than freezing without seaIce)
+  /** zero-layer thermodynamic sea ice (Semtner 1976): the mixed layer freezes at 271.35 K, ice grows
+   *  and melts from the conductive, surface and ocean (q-flux) heat budgets */
+  seaIce: boolean;
   atmAbs: number;            // shortwave optical depth at the surface
   tauEq: number;             // Frierson longwave optical depth at the surface, equator
   tauPole: number;
@@ -56,6 +59,7 @@ export const AQUA: GrayPhysicsConfig = {
   byrneA: 0.8678, byrneB: 1997.9,
   mixedLayerDepth: 2.5, landHeatCapacity: 1e6, roughness: 3.21e-5, roughnessLand: 3.21e-5, bucketMax: 0.15,
   qflux: false, qfluxAmp: 30, qfluxWidthDeg: 16,
+  seaIce: false,
   richCrit: 1.0, fracInner: 0.1, spongePBottom: 5000, spongeTau: 0.25 * DAY, useConvection: true,
 };
 
@@ -69,6 +73,7 @@ export interface AquaplanetFields {
   /** surface (skin / mixed-layer) temperature, K — SST over ocean, ground temperature over land */
   sst: Float64Array;
   bucket: Float64Array;       // soil water, m (land only)
+  ice: Float64Array;          // sea-ice thickness, m (ocean only, seaIce)
   /** running accumulations since the last reset (per grid point) */
   precipConv: Float64Array;   // kg m^-2
   precipLS: Float64Array;
@@ -108,7 +113,7 @@ export class GrayPhysics implements ColumnPhysics {
     this.cfg = { ...AQUA, ...cfg };
     this.surface = surface ?? { land: new Uint8Array(ng), zsurf: new Float64Array(ng) };
     const z = (): Float64Array => new Float64Array(ng);
-    this.f = { sst: z(), bucket: z(), precipConv: z(), precipLS: z(), evap: z(), shf: z(), olr: z(), runoff: z(), tsAcc: z(), accTime: 0, precipRate: z(), snowRate: z(), snowAcc: z(), olrNow: z(), blDepth: z() };
+    this.f = { sst: z(), bucket: z(), ice: z(), precipConv: z(), precipLS: z(), evap: z(), shf: z(), olr: z(), runoff: z(), tsAcc: z(), accTime: 0, precipRate: z(), snowRate: z(), snowAcc: z(), olrNow: z(), blDepth: z() };
     const c = (n: number): Float64Array => new Float64Array(n);
     this.col = {
       T: c(K), q: c(K), u: c(K), v: c(K), pf: c(K), ph: c(K + 1), zf: c(K), zh: c(K + 1),
@@ -219,7 +224,10 @@ export class GrayPhysics implements ColumnPhysics {
     const sw = C.sw!;
     for (let k = 0; k <= K; k++) { const x = ph[k]! / 1e5; sw[k] = insol * Math.exp(-cfg.atmAbs * x * x * x * x); }
     let albedo = isLand ? cfg.albedoLand : cfg.albedo;
-    if (!isLand && cfg.albedoIce !== cfg.albedo) {
+    if (!isLand && cfg.seaIce) {
+      // bare-ice albedo reached at 0.5 m thickness
+      albedo = cfg.albedo + Math.min(1, f.ice[p]! / 0.5) * (cfg.albedoIce - cfg.albedo);
+    } else if (!isLand && cfg.albedoIce !== cfg.albedo) {
       // simple sea-ice albedo: linear ramp from open water at 273.15 K to ice at 263.15 K
       const w = Math.max(0, Math.min(1, (273.15 - ts) / 10));
       albedo = cfg.albedo + w * (cfg.albedoIce - cfg.albedo);
@@ -299,7 +307,8 @@ export class GrayPhysics implements ColumnPhysics {
     // surface energy budget
     const heatCap = isLand ? cfg.landHeatCapacity : MOIST.rhoWater * MOIST.cpWater * cfg.mixedLayerDepth;
     const net = swSfc * (1 - albedo) + lwd[K]! - MOIST.stefan * ts ** 4 - fluxS - lh + (isLand ? 0 : qflux);
-    f.sst[p] = ts + dt * net / heatCap;
+    if (!isLand && cfg.seaIce) seaIceStep(f, p, ts, net, qflux, heatCap, dt);
+    else f.sst[p] = ts + dt * net / heatCap;
 
     // ---------------- 4. sponge above 50 hPa (kinetic energy lost is returned as heat)
     for (let k = 0; k < K; k++) {
@@ -381,6 +390,38 @@ export class GrayPhysics implements ColumnPhysics {
     for (let k = K - 2; k >= 0; k--) X[k] = dd[k]! - cc[k]! * X[k + 1]!;
     return a[K]! * (xs - X[K - 1]!);
   }
+}
+
+/** Sea-ice constants: freezing point of sea water, melting point, ice density, latent heat of fusion,
+ *  conductivity, heat capacity of the ice surface layer, minimum thickness in the conduction term. */
+export const SEA_ICE = { TF: 271.35, TMELT: 273.15, RHOI: 917, LF: 3.34e5, KI: 2.03, CS: 1e6, HMIN: 0.05 };
+
+/**
+ * One step of the zero-layer thermodynamic sea-ice / mixed-layer model for ocean point p.
+ * Open water: the mixed layer (heat capacity cml) absorbs the net surface flux `net` (including the
+ * ocean heat convergence qflux); cooling below TF freezes ice with latent heat LF.
+ * Ice: the surface layer (heat capacity CS) takes the atmospheric flux plus conduction k (TF - Ts)/h
+ * from the ocean at TF; surface warming above TMELT melts ice; at the base the conductive loss minus
+ * qflux freezes (or melts) ice. Ice that melts away returns its leftover energy to the mixed layer.
+ * Conserved: E = C_ml (T - TF) (open water) or CS (Ts - TF) (ice), minus rho_i L_f h; dE/dt = net.
+ */
+export function seaIceStep(f: { sst: Float64Array; ice: Float64Array }, p: number, ts: number, net: number, qflux: number, cml: number, dt: number): void {
+  const I = SEA_ICE, h = f.ice[p]!, rl = I.RHOI * I.LF;
+  if (h <= 0) {
+    let tml = ts + dt * net / cml;
+    let hn = 0;
+    if (tml < I.TF) { hn = cml * (I.TF - tml) / rl; tml = I.TF; }
+    f.sst[p] = tml; f.ice[p] = hn;
+    return;
+  }
+  const cond = I.KI * (I.TF - ts) / Math.max(h, I.HMIN);
+  let tsn = ts + dt * (net - qflux + cond) / I.CS;
+  let hn = h;
+  if (tsn > I.TMELT) { hn -= I.CS * (tsn - I.TMELT) / rl; tsn = I.TMELT; }
+  hn += dt * (cond - qflux) / rl;
+  // melted out: the leftover latent energy and the surface layer's heat go to the mixed layer
+  if (hn <= 0) { tsn = I.TF + (-hn * rl + I.CS * (tsn - I.TF)) / cml; hn = 0; }
+  f.sst[p] = tsn; f.ice[p] = hn;
 }
 
 /** The Frierson et al. (2006) moist gray aquaplanet (Isca "frierson" test-case settings). */

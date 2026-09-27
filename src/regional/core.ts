@@ -31,6 +31,8 @@ export interface RegionalConfig {
   lateral?: 'periodic' | 'open';
   relaxCells?: number;                      // relaxation-zone width (cells), open boundaries
   relaxTau?: number;                        // relaxation time scale at the outer boundary (s)
+  /** positive-definite flux limiter for the moisture scalars in the final RK3 stage (default on) */
+  positiveDefinite?: boolean;
 }
 
 /** Boundary targets for open lateral boundaries (same layout as the prognostic arrays). */
@@ -56,6 +58,7 @@ export class RegionalModel {
   private readonly th0s: Float64Array; private readonly pp0: Float64Array;
   private readonly fu: Float64Array; private readonly fv: Float64Array; private readonly fw: Float64Array;
   private readonly fth: Float64Array; private readonly fpp: Float64Array;
+  private readonly fxF: Float64Array; private readonly fyF: Float64Array; private readonly fzF: Float64Array; private readonly pdRatio: Float64Array;
   private readonly sc0: Float64Array[]; private readonly fsc: Float64Array[];
   private readonly ppOld: Float64Array;
   private readonly flux: Float64Array;
@@ -85,6 +88,7 @@ export class RegionalModel {
     this.u = z(); this.v = z(); this.w = z(); this.th = z(); this.pp = z();
     this.u0 = z(); this.v0 = z(); this.w0 = z(); this.th0s = z(); this.pp0 = z();
     this.fu = z(); this.fv = z(); this.fw = z(); this.fth = z(); this.fpp = z();
+    this.fxF = z(); this.fyF = z(); this.fzF = z(); this.pdRatio = z();
     this.ppOld = z(); this.flux = z(); this.thr = z();
     this.scalars = Array.from({ length: nScalars }, z);
     this.sc0 = Array.from({ length: nScalars }, z);
@@ -153,14 +157,14 @@ export class RegionalModel {
     }
   }
 
-  /** theta_rho from theta and moisture scalars (qv, qc, qr by convention in slots 0, 1, 2). */
+  /** theta_rho = theta (1 + 0.61 qv - sum of condensates); scalar slot 0 is qv, all further slots are
+   *  condensate (qc, qr and, with ice microphysics, qi, qs, qg). */
   private computeThetaRho(): void {
-    const n = this.size, th = this.th, qv = this.scalars[0], qc = this.scalars[1], qr = this.scalars[2], t = this.thr;
+    const n = this.size, th = this.th, qv = this.scalars[0], cond = this.scalars.slice(1), t = this.thr;
     for (let i = 0; i < n; i++) {
       let f = 1;
       if (qv) f += 0.61 * qv[i]!;
-      if (qc) f -= qc[i]!;
-      if (qr) f -= qr[i]!;
+      for (const c of cond) f -= c[i]!;
       t[i] = th[i]! * f;
     }
     this.fillHalo(t, this.c.nz);
@@ -186,26 +190,51 @@ export class RegionalModel {
    * Advective tendency of a scalar field phi (cell centres), flux form with rho0 weighting and the
    * divergence correction, accumulated into out: out += -(1/rho0) div(rho0 V phi) + phi (1/rho0) div(rho0 V).
    */
-  private advectScalar(phi: Float64Array, out: Float64Array): void {
+  private advectScalar(phi: Float64Array, out: Float64Array, pd: { phi0: Float64Array; dt: number } | null = null): void {
     const { nx, ny, nz, dx, dy, dz } = this.c, sx = this.sx, pl = this.plane;
     const u = this.u, v = this.v, w = this.w;
+    // face fluxes: fxF at the west face of cell q, fyF at the south face, fzF at the bottom face (rho0f w phi)
+    const fxF = this.fxF, fyF = this.fyF, fzF = this.fzF;
+    for (let k = 0; k < nz; k++) for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) {
+      const q = this.idx(i, j, k);
+      if (j < ny) { const ul = u[q]!; fxF[q] = ul * RegionalModel.f5(phi[q - 3]!, phi[q - 2]!, phi[q - 1]!, phi[q]!, phi[q + 1]!, phi[q + 2]!, ul); }
+      if (i < nx) { const vl = v[q]!; fyF[q] = vl * RegionalModel.f5(phi[q - 3 * sx]!, phi[q - 2 * sx]!, phi[q - sx]!, phi[q]!, phi[q + sx]!, phi[q + 2 * sx]!, vl); }
+    }
+    for (let k = 0; k <= nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const q = this.idx(i, j, k);
+      fzF[q] = k === 0 || k === nz ? 0 : w[q]! * this.rho0f[k]! * this.zface(phi, q, k, w[q]!);
+    }
+    if (pd) {
+      // Positive-definite flux limiter (Skamarock 2006, MWR): scale each cell's outgoing fluxes so the
+      // outflow over the step cannot exceed its content at time level n.
+      const ratio = this.pdRatio;
+      for (let k = 0; k < nz; k++) {
+        const r0 = this.rho0[k]!;
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+          const q = this.idx(i, j, k);
+          const outflow = (Math.max(fxF[q + 1]!, 0) - Math.min(fxF[q]!, 0)) / dx + (Math.max(fyF[q + sx]!, 0) - Math.min(fyF[q]!, 0)) / dy
+            + (Math.max(fzF[q + pl]!, 0) - Math.min(fzF[q]!, 0)) / (r0 * dz);
+          const avail = Math.max(pd.phi0[q]!, 0);
+          ratio[q] = outflow * pd.dt > avail ? avail / (outflow * pd.dt) : 1;
+        }
+      }
+      this.fillHalo(ratio, nz);
+      for (let k = 0; k < nz; k++) for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) {
+        const q = this.idx(i, j, k);
+        if (j < ny) fxF[q] = fxF[q]! * (fxF[q]! > 0 ? ratio[q - 1]! : ratio[q]!);
+        if (i < nx) fyF[q] = fyF[q]! * (fyF[q]! > 0 ? ratio[q - sx]! : ratio[q]!);
+      }
+      for (let k = 1; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const q = this.idx(i, j, k);
+        fzF[q] = fzF[q]! * (fzF[q]! > 0 ? ratio[q - pl]! : ratio[q]!);
+      }
+    }
     for (let k = 0; k < nz; k++) {
       const r0 = this.rho0[k]!;
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const q = this.idx(i, j, k);
-        // x faces (i-1/2 at u[q], i+1/2 at u[q+1])
-        const ul = u[q]!, ur = u[q + 1]!;
-        const fl = ul * RegionalModel.f5(phi[q - 3]!, phi[q - 2]!, phi[q - 1]!, phi[q]!, phi[q + 1]!, phi[q + 2]!, ul);
-        const fr = ur * RegionalModel.f5(phi[q - 2]!, phi[q - 1]!, phi[q]!, phi[q + 1]!, phi[q + 2]!, phi[q + 3]!, ur);
-        const vl = v[q]!, vr = v[q + sx]!;
-        const gl = vl * RegionalModel.f5(phi[q - 3 * sx]!, phi[q - 2 * sx]!, phi[q - sx]!, phi[q]!, phi[q + sx]!, phi[q + 2 * sx]!, vl);
-        const gr = vr * RegionalModel.f5(phi[q - 2 * sx]!, phi[q - sx]!, phi[q]!, phi[q + sx]!, phi[q + 2 * sx]!, phi[q + 3 * sx]!, vr);
-        // z faces (k at w[q] bottom, k+1 at w[q+pl] top), rho0f weighted
-        const wb = w[q]! * this.rho0f[k]!, wt = w[q + pl]! * this.rho0f[k + 1]!;
-        const hb = k === 0 ? 0 : wb * this.zface(phi, q, k, w[q]!);
-        const ht = k === nz - 1 ? 0 : wt * this.zface(phi, q + pl, k + 1, w[q + pl]!);
-        const div = (ur - ul) / dx + (vr - vl) / dy + (wt - wb) / (r0 * dz);
-        out[q] = out[q]! - ((fr - fl) / dx + (gr - gl) / dy + (ht - hb) / (r0 * dz)) + phi[q]! * div;
+        const div = (u[q + 1]! - u[q]!) / dx + (v[q + sx]! - v[q]!) / dy + (w[q + pl]! * this.rho0f[k + 1]! - w[q]! * this.rho0f[k]!) / (r0 * dz);
+        out[q] = out[q]! - ((fxF[q + 1]! - fxF[q]!) / dx + (fyF[q + sx]! - fyF[q]!) / dy + (fzF[q + pl]! - fzF[q]!) / (r0 * dz)) + phi[q]! * div;
       }
     }
   }
@@ -293,14 +322,14 @@ export class RegionalModel {
   // ----------------------------------------------------------------------------------------
   // Slow tendencies (advection, Coriolis, buoyancy, damping, diffusion) from the current state
 
-  private slowTendencies(): void {
+  private slowTendencies(pdDt = 0): void {
     const { nx, ny, nz, f, dz } = this.c, sx = this.sx, pl = this.plane, g = EARTH.gravity;
     for (const a of [this.fu, this.fv, this.fw, this.fth, this.fpp, ...this.fsc]) a.fill(0);
     for (const a of [this.u, this.v, this.w, this.th, this.pp, ...this.scalars]) this.fillHalo(a, nz + 1);
     this.advectMomentum();
     this.advectScalar(this.th, this.fth);
     this.advectScalar(this.pp, this.fpp);
-    for (let s = 0; s < this.scalars.length; s++) this.advectScalar(this.scalars[s]!, this.fsc[s]!);
+    for (let s = 0; s < this.scalars.length; s++) this.advectScalar(this.scalars[s]!, this.fsc[s]!, pdDt > 0 && this.c.positiveDefinite !== false ? { phi0: this.sc0[s]!, dt: pdDt } : null);
     const u = this.u, v = this.v;
     // Coriolis (f-plane), buoyancy
     const buoy = this.flux;
@@ -482,7 +511,7 @@ export class RegionalModel {
     for (let s = 0; s < this.scalars.length; s++) this.sc0[s]!.set(this.scalars[s]!);
     const stages: [number, number][] = [[dt / 3, Math.max(1, Math.round(nsound / 3))], [dt / 2, Math.max(1, Math.round(nsound / 2))], [dt, nsound]];
     for (const [dts, ns] of stages) {
-      this.slowTendencies();
+      this.slowTendencies(dts === dt ? dt : 0);
       // theta and scalars: slow only (from time n)
       for (let i = 0; i < this.size; i++) this.th[i] = this.th0s[i]! + dts * this.fth[i]!;
       for (let s = 0; s < this.scalars.length; s++) {

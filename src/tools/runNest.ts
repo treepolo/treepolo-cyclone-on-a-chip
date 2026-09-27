@@ -34,10 +34,11 @@ if (!existsSync(ckpt)) throw new Error(`no checkpoint at ${ckpt}`);
 {
   const buf = readFileSync(ckpt);
   const all = new Float64Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-  const nState = all.length - 2 - 2 * ng;
+  const nState = gm.exportState().data.length;
   gm.importState({ time: all[0]!, steps: all[1]!, data: all.subarray(2, 2 + nState) });
   physics.f.sst.set(all.subarray(2 + nState, 2 + nState + ng));
-  physics.f.bucket.set(all.subarray(2 + nState + ng));
+  physics.f.bucket.set(all.subarray(2 + nState + ng, 2 + nState + 2 * ng));
+  if (all.length >= 2 + nState + 3 * ng) physics.f.ice.set(all.subarray(2 + nState + 2 * ng, 2 + nState + 3 * ng));
 }
 const log: string[] = [];
 const say = (s: string): void => { console.log(s); log.push(s); };

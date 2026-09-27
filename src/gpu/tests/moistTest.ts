@@ -1,5 +1,5 @@
 // GPU moist aquaplanet vs CPU Float64 (T21 L25).
-import { createAquaplanet, AQUA_PRESETS } from '../../model/presets.js';
+import { createAquaplanet, AQUA_PRESETS, createEarth, EARTH_PRESETS, EarthData } from '../../model/presets.js';
 import { GpuDycore } from '../dycoreGpu.js';
 import { GpuMoist, SFC } from '../moistGpu.js';
 import { gcheck, getDevice } from './harness.js';
@@ -62,4 +62,30 @@ export async function moistTests(): Promise<void> {
   gcheck('aquaplanet T21 GPU: 20 days finite, q >= 0', finite && qmin >= 0, qmin);
   gcheck('aquaplanet T21 GPU: precipitation 2–7 mm/day, E ≈ P within 15%', P / 20 > 2 && P / 20 < 7 && Math.abs(E - P) / P < 0.15, `P ${(P / 20).toFixed(2)} E ${(E / 20).toFixed(2)} mm/day`);
   void q0; void K;
+}
+
+/** Earth configuration (land, orography, seasons, sea ice): GPU vs CPU after a CPU spin-up. */
+export async function earthTests(): Promise<void> {
+  const device = await getDevice();
+  const data = await (await fetch('data/earth_t42.json')).json() as EarthData;
+  const { model: cpu, physics } = createEarth(EARTH_PRESETS.EARTH_T21!, data);
+  for (let i = 0; i < 72 * 10; i++) cpu.step();      // 10 days: sea ice forming at high latitudes
+  const ng = cpu.ng;
+  let iceN = 0; for (let p = 0; p < ng; p++) if (physics.f.ice[p]! > 0) iceN++;
+  gcheck('Earth T21 CPU: sea ice present after 10 days', iceN > 0, `${iceN} points`);
+  const gd = new GpuDycore(device, cpu, { heldSuarez: false });
+  const gm = new GpuMoist(device, gd, cpu, physics);
+  gd.uploadFrom(cpu);
+  gm.uploadFrom(cpu);
+  let done = 0;
+  for (const n of [1, 10]) {
+    for (let i = done; i < n; i++) cpu.step();
+    gd.step(n - done);
+    done = n;
+    const s = await gm.readSurface();
+    const dts = rel(s, physics.f.sst, SFC.ts * ng, ng), dice = rel(s, physics.f.ice, SFC.ice * ng, ng), db = rel(s, physics.f.bucket, SFC.bucket * ng, ng);
+    gcheck(`Earth T21 after ${n} steps: surface temperature GPU vs CPU rel L2 < 1e-4`, dts < 1e-4, dts);
+    gcheck(`Earth T21 after ${n} steps: sea-ice thickness rel L2 < 1e-2`, dice < 1e-2, dice);
+    gcheck(`Earth T21 after ${n} steps: soil water rel L2 < 1e-3`, db < 1e-3, db);
+  }
 }

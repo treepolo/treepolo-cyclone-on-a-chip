@@ -52,6 +52,7 @@ const FIELD_STYLE: Record<FieldId, { div: boolean; range?: [number, number]; sym
   sst: { div: false, unit: 'K' },
   q: { div: false, unit: 'g/kg' },
   olr: { div: false, range: [100, 320], unit: 'W/m²' },
+  ice: { div: false, range: [0, 3], unit: 'm' },
 };
 
 function colourise(f: FrameMessage): void {

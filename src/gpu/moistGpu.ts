@@ -11,7 +11,7 @@
 //   global dry-mass fixer on ln ps
 
 import { Dycore } from '../model/dycore.js';
-import { GrayPhysics } from '../model/moist/aquaplanet.js';
+import { GrayPhysics, SEA_ICE } from '../model/moist/aquaplanet.js';
 import { SBM } from '../model/moist/sbm.js';
 import { MOIST, EPS } from '../model/moist/thermo.js';
 import { GpuDycore } from './dycoreGpu.js';
@@ -20,7 +20,7 @@ import { Recipe } from './transformGpu.js';
 const WG = 64;
 
 /** Surface-field slots in the SFC buffer (each NG long). */
-export const SFC = { ts: 0, bucket: 1, land: 2, precipConv: 3, precipLS: 4, evap: 5, olr: 6, precipRate: 7, olrNow: 8, runoff: 9, shf: 10, snowAcc: 11, count: 12 };
+export const SFC = { ts: 0, bucket: 1, land: 2, precipConv: 3, precipLS: 4, evap: 5, olr: 6, precipRate: 7, olrNow: 8, runoff: 9, shf: 10, snowAcc: 11, ice: 12, count: 13 };
 
 export class GpuMoist {
   readonly q: GPUBuffer;
@@ -134,6 +134,7 @@ struct MP { dt: f32, decl: f32, radius: f32, g: f32, psTarget: f32, p1: f32, p2:
     const s = new Float32Array(SFC.count * ng);
     s.set(Float32Array.from(f.sst), SFC.ts * ng);
     s.set(Float32Array.from(f.bucket), SFC.bucket * ng);
+    s.set(Float32Array.from(f.ice), SFC.ice * ng);
     s.set(Float32Array.from(this.physics.surface.land), SFC.land * ng);
     tr.write(this.sfc, s);
   }
@@ -660,7 +661,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   ${insol}
   for (var k = 0u; k <= K; k++) { let x = ph[k] / 1.0e5; sw[k] = insol * exp(-${f(c.atmAbs)} * x * x * x * x); }
   var albedo = select(${f(c.albedo)}, ${f(c.albedoLand)}, isLand);
-  if (!isLand && ${f(c.albedoIce)} != ${f(c.albedo)}) {
+  if (${c.seaIce} && !isLand) {
+    albedo = ${f(c.albedo)} + min(1.0, S[${SFC.ice}u * NG + p] / 0.5) * (${f(c.albedoIce)} - ${f(c.albedo)});
+  } else if (!isLand && ${f(c.albedoIce)} != ${f(c.albedo)}) {
     let wi = clamp((273.15 - ts) / 10.0, 0.0, 1.0);
     albedo = ${f(c.albedo)} + wi * (${f(c.albedoIce)} - ${f(c.albedo)});
   }
@@ -734,7 +737,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let lh = LV * fluxQ;
   let heatCap = select(RHOW * CPW * ${f(c.mixedLayerDepth)}, ${f(c.landHeatCapacity)}, isLand);
   let net = swSfc * (1.0 - albedo) + lwd[K] - STEF * ts * ts * ts * ts - fluxS - lh + select(qflux, 0.0, isLand);
-  S[${SFC.ts}u * NG + p] = ts + dt * net / heatCap;
+  if (${c.seaIce} && !isLand) {
+    // zero-layer thermodynamic sea ice (see seaIceStep in aquaplanet.ts)
+    let rl = ${f(SEA_ICE.RHOI * SEA_ICE.LF)};
+    let hi = S[${SFC.ice}u * NG + p];
+    var tsn = 0.0; var hn = 0.0;
+    if (hi <= 0.0) {
+      tsn = ts + dt * net / heatCap;
+      if (tsn < ${f(SEA_ICE.TF)}) { hn = heatCap * (${f(SEA_ICE.TF)} - tsn) / rl; tsn = ${f(SEA_ICE.TF)}; }
+    } else {
+      let cond = ${f(SEA_ICE.KI)} * (${f(SEA_ICE.TF)} - ts) / max(hi, ${f(SEA_ICE.HMIN)});
+      tsn = ts + dt * (net - qflux + cond) / ${f(SEA_ICE.CS)};
+      hn = hi;
+      if (tsn > ${f(SEA_ICE.TMELT)}) { hn -= ${f(SEA_ICE.CS)} * (tsn - ${f(SEA_ICE.TMELT)}) / rl; tsn = ${f(SEA_ICE.TMELT)}; }
+      hn += dt * (cond - qflux) / rl;
+      if (hn <= 0.0) { tsn = ${f(SEA_ICE.TF)} + (-hn * rl + ${f(SEA_ICE.CS)} * (tsn - ${f(SEA_ICE.TF)})) / heatCap; hn = 0.0; }
+    }
+    S[${SFC.ts}u * NG + p] = tsn;
+    S[${SFC.ice}u * NG + p] = hn;
+  } else {
+    S[${SFC.ts}u * NG + p] = ts + dt * net / heatCap;
+  }
   // ---- sponge
   for (var k = 0u; k < K; k++) {
     if (pf[k] >= ${f(c.spongePBottom)}) { break; }

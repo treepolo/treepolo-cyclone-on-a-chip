@@ -1,7 +1,7 @@
 import { gdone } from './harness.js';
 import { transformTests } from './transformTest.js';
 import { dycoreTests } from './dycoreTest.js';
-import { moistTests } from './moistTest.js';
+import { moistTests, earthTests } from './moistTest.js';
 import { regionalTests, regionalNestTests } from './regionalTest.js';
 import { regionalDebug } from './regionalDebug.js';
 
@@ -11,6 +11,7 @@ async function main(): Promise<void> {
     if (!which || which === 'transform') await transformTests();
     if (!which || which === 'dycore') await dycoreTests();
     if (!which || which === 'moist') await moistTests();
+    if (!which || which === 'earth') await earthTests();
     if (!which || which === 'regional') await regionalTests();
     if (!which || which === 'regional' || which === 'nest') await regionalNestTests();
     if (which === 'rdebug') await regionalDebug();

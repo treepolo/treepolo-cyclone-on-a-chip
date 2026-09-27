@@ -5,7 +5,7 @@ import { SpectralTransform } from '../spectral/transform.js';
 import { buildSigmaLevels } from '../model/vertical.js';
 import { FRIERSON_SIGMA_HALF, createAquaplanet, AQUA_PRESETS } from '../model/presets.js';
 import { sbmColumn, sbmWork } from '../model/moist/sbm.js';
-import { GrayAquaplanet } from '../model/moist/aquaplanet.js';
+import { GrayAquaplanet, seaIceStep, SEA_ICE } from '../model/moist/aquaplanet.js';
 import { MOIST, qsat } from '../model/moist/thermo.js';
 import { check, summary, rng } from './assert.js';
 
@@ -126,6 +126,28 @@ const sl = new SemiLagrangian({ nlat, nlon, K, lat: tr.lat, lon: tr.lon, sigma: 
   let qmin = Infinity;
   for (const x of model.q) qmin = Math.min(qmin, x);
   check('aquaplanet T21: 5 days finite, q >= 0', model.isFinite() && qmin >= 0, qmin);
+}
+
+// 6. thermodynamic sea ice: energy conservation through freeze-up, growth, surface melt and melt-out
+{
+  const I = SEA_ICE, cml = 1000 * 4186 * 20, dt = 1200, rl = I.RHOI * I.LF;
+  const f = { sst: new Float64Array([272.5]), ice: new Float64Array(1) };
+  const energy = (): number => (f.ice[0]! > 0 ? I.CS * (f.sst[0]! - I.TF) - rl * f.ice[0]! : cml * (f.sst[0]! - I.TF));
+  const e0 = energy();
+  let inp = 0, maxH = 0, froze = false, melted = false;
+  for (let s = 0; s < 72 * 360; s++) {
+    // seasonal flux: strong winter loss, summer gain; linear feedback on the surface temperature
+    const day = s / 72, qflux = 5;
+    const net = -60 * Math.cos(2 * Math.PI * day / 360) + 20 - 4 * (f.sst[0]! - I.TF) + qflux;
+    seaIceStep(f, 0, f.sst[0]!, net, qflux, cml, dt);
+    inp += net * dt;
+    maxH = Math.max(maxH, f.ice[0]!);
+    if (f.ice[0]! > 0) froze = true;
+    if (froze && f.ice[0]! === 0) melted = true;
+  }
+  const err = Math.abs(energy() - e0 - inp) / Math.abs(inp || 1);
+  check('sea ice: forms, grows and melts out over a seasonal cycle', froze && melted && maxH > 0.1, `max thickness ${maxH.toFixed(2)} m`);
+  check('sea ice: energy conserved (mixed layer + surface layer - latent) to 1e-10', Math.abs(energy() - e0 - inp) < 1e-10 * 1e9, err);
 }
 
 summary('moist');

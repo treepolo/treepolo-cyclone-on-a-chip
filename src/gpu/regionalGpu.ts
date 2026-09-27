@@ -2,13 +2,13 @@
 // src/regional/{core,kessler,physics}.ts. All prognostic fields live in one buffer (field-major,
 // same halo layout as the CPU model), the RK3 time-level-n copy in a second and tendencies in a third.
 //
-// Field slots: 0 u, 1 v, 2 w, 3 theta, 4 pi', 5 qv, 6 qc, 7 qr.
+// Field slots: 0 u, 1 v, 2 w, 3 theta, 4 pi', then the moisture species: 5 qv, 6 qc, 7 qr and, with ice
+// microphysics, 8 qi, 9 qs, 10 qg.
 
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { RegionalPhysicsConfig, surfaceState } from '../regional/physics.js';
 
 const WG = 64;
-const NF = 8;
 
 /** Base-state accessors (only for shaders that bind `base`). */
 const BASE_FNS = `
@@ -29,14 +29,27 @@ fn brtf(k: u32) -> f32 { return base[13u * L + k]; }
 `;
 
 /** boundary: relaxation targets for open lateral boundaries (defaults to the CPU model's own targets). */
-export interface GpuRegionalOptions { moist: boolean; physics: RegionalPhysicsConfig | null; boundary?: BoundaryTargets | null }
+/** theta_rho = theta (1 + 0.61 qv - sum of condensates in slots 6 .. 5+NQ-1); for shaders that bind S. */
+const THR_FNS = `
+fn thr(q: u32) -> f32 {
+  var f = 1.0;
+  if (MOIST) { f += 0.61 * S[5u * SIZE + q]; for (var s = 6u; s < 5u + NQ; s++) { f -= S[s * SIZE + q]; } }
+  return S[3u * SIZE + q] * f;
+}
+`;
+
+export interface GpuRegionalOptions { moist: boolean; physics: RegionalPhysicsConfig | null; boundary?: BoundaryTargets | null; ice?: boolean }
 
 export class GpuRegional {
   readonly device: GPUDevice;
   readonly cpu: RegionalModel;
   readonly S: GPUBuffer; readonly S0: GPUBuffer; readonly F: GPUBuffer;
   readonly aux: GPUBuffer;       // [0] ppOld, [1] eddy-viscosity deformation, [2] rain accumulation (2-D, level 0)
-  B: GPUBuffer | null = null;    // open-boundary relaxation targets: u, v, theta, qv, pi'
+  B: GPUBuffer | null = null;
+  R: GPUBuffer | null = null;    // positive-definite limiter ratios (moisture species)    // open-boundary relaxation targets: u, v, theta, qv, pi'
+  /** number of prognostic fields (5 + moisture species) */
+  readonly nf: number;
+  readonly nq: number;
   time = 0;
   steps = 0;
   private readonly params: GPUBuffer[];
@@ -47,6 +60,10 @@ export class GpuRegional {
     this.cpu = m;
     const { nx, ny, nz, dx, dy, dz, f, beta, divDamp, nsound, dt } = m.c;
     const size = m.size;
+    this.nq = opts.moist ? (opts.ice ? 6 : 3) : 0;
+    if (this.nq > m.scalars.length) throw new Error(`GPU regional model needs ${this.nq} scalars, CPU model has ${m.scalars.length}`);
+    const NF = 5 + this.nq;
+    this.nf = NF;
     const buf = (bytes: number): GPUBuffer => device.createBuffer({ size: Math.max(16, bytes), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.S = buf(NF * size * 4); this.S0 = buf(NF * size * 4); this.F = buf(NF * size * 4);
     this.aux = buf(3 * size * 4);
@@ -80,7 +97,7 @@ const SX: u32 = ${m.sx}u; const SY: u32 = ${m.sy}u; const PL: u32 = ${m.plane}u;
 const DX: f32 = ${dx}; const DY: f32 = ${dy}; const DZ: f32 = ${dz}; const FCOR: f32 = ${f};
 const CP: f32 = ${cp}; const RD: f32 = ${rd}; const G: f32 = 9.80665; const XLV: f32 = 2.5e6;
 const BETA: f32 = ${beta}; const DIVD: f32 = ${divDamp};
-const MOIST: bool = ${opts.moist}; const PHYS: bool = ${!!ph};
+const MOIST: bool = ${opts.moist}; const PHYS: bool = ${!!ph}; const NQ: u32 = ${this.nq}u; const NFLD: u32 = ${NF}u;
 const OPEN: bool = ${open}; const NEST: bool = ${!!bnd}; const HASPP: bool = ${!!bnd?.pp};
 const NRELAX: u32 = ${m.c.relaxCells ?? 5}u; const RTAU: f32 = ${m.c.relaxTau ?? 300};
 const LH2: f32 = ${ph ? ph.lh * ph.lh : 0}; const LV2: f32 = ${ph ? ph.lv * ph.lv : 0};
@@ -102,7 +119,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     const bg = (p: GPUComputePipeline, bufs: GPUBuffer[]): GPUBindGroup => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: bufs.map((b, i) => ({ binding: i, resource: { buffer: b } })) });
     const disp = (p: GPUComputePipeline, g: GPUBindGroup, n: number) => (pass: GPUComputePassEncoder): void => { pass.setPipeline(p); pass.setBindGroup(0, g); pass.dispatchWorkgroups(Math.ceil(n / WG)); };
 
-    const pHalo = pipe(HALO_WGSL), pMom = pipe(MOM_WGSL), pSca = pipe(SCALAR_WGSL), pStage = pipe(STAGE_WGSL);
+    const pHalo = pipe(HALO_WGSL), pMom = pipe(MOM_WGSL), pSca = pipe(scalarWgsl(false)), pScaPD = this.nq > 0 ? pipe(scalarWgsl(true)) : null, pPD = this.nq > 0 ? pipe(PDRATIO_WGSL) : null, pStage = pipe(STAGE_WGSL);
     const pAh = pipe(ACOUSTIC_H_WGSL), pAv = pipe(ACOUSTIC_V_WGSL), pCopyPP = pipe(COPYPP_WGSL), pSave = pipe(SAVE_WGSL);
     const pKes = pipe(KESSLER_WGSL);
     let relax: ((p: GPUComputePassEncoder) => void) | null = null;
@@ -140,6 +157,8 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     const haloThQ = disp(pHalo, bg(pHalo, [this.S, haloParams(3, 5, nz)]), haloN(5, nz));
     const haloPPold = disp(pHalo, bg(pHalo, [this.aux, haloParams(0, 1, nz)]), haloN(1, nz));
     const haloK = disp(pHalo, bg(pHalo, [this.aux, haloParams(1, 1, nz)]), haloN(1, nz));
+    if (this.nq > 0) this.R = buf(this.nq * size * 4);
+    const haloR = this.R ? disp(pHalo, bg(pHalo, [this.R, haloParams(0, this.nq, nz)]), haloN(this.nq, nz)) : null;
     const nInt = nx * ny * nz, nInt1 = nx * ny * (nz + 1), nCol = nx * ny;
     const save = disp(pSave, bg(pSave, [this.S, this.S0]), NF * size);
     const kes = disp(pKes, bg(pKes, [this.S, baseBuf, this.aux, this.params[2]!]), nCol);
@@ -149,7 +168,11 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
       const prm = this.params[s]!;
       seq.push(haloAll);
       seq.push(disp(pMom, bg(pMom, [this.S, this.F, baseBuf]), nInt1));
-      seq.push(disp(pSca, bg(pSca, [this.S, this.F, baseBuf]), nInt));
+      if (s === 2 && pScaPD && pPD) {
+        seq.push(disp(pPD, bg(pPD, [this.S, this.S0, this.R!, baseBuf, prm]), nInt));
+        seq.push(haloR!);
+        seq.push(disp(pScaPD, bg(pScaPD, [this.S, this.F, baseBuf, this.R!]), nInt));
+      } else seq.push(disp(pSca, bg(pSca, [this.S, this.F, baseBuf]), nInt));
       if (ph) {
         seq.push(disp(pTurbK!, bg(pTurbK!, [this.S, this.aux]), nInt));
         seq.push(haloK);
@@ -178,8 +201,8 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
 
   /** Copy the CPU model state to the GPU. */
   uploadFrom(m: RegionalModel): void {
-    const size = m.size, d = new Float32Array(NF * size);
-    const fields = [m.u, m.v, m.w, m.th, m.pp, m.scalars[0], m.scalars[1], m.scalars[2]];
+    const size = m.size, d = new Float32Array(this.nf * size);
+    const fields = [m.u, m.v, m.w, m.th, m.pp, ...m.scalars.slice(0, this.nq)];
     fields.forEach((a, f) => { if (a) d.set(Float32Array.from(a), f * size); });
     this.device.queue.writeBuffer(this.S, 0, d);
     this.device.queue.writeBuffer(this.aux, 0, new Float32Array(3 * size));
@@ -199,7 +222,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
   }
 
   async readState(): Promise<Float32Array> {
-    const bytes = NF * this.cpu.size * 4;
+    const bytes = this.nf * this.cpu.size * 4;
     const st = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.device.createCommandEncoder();
     enc.copyBufferToBuffer(this.S, 0, st, 0, bytes);
@@ -274,7 +297,7 @@ const SAVE_WGSL = /* wgsl */`
 @group(0) @binding(0) var<storage, read> S: array<f32>;
 @group(0) @binding(1) var<storage, read_write> S0: array<f32>;
 @compute @workgroup_size(${WG})
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) { if (gid.x < 8u * SIZE) { S0[gid.x] = S[gid.x]; } }
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) { if (gid.x < NFLD * SIZE) { S0[gid.x] = S[gid.x]; } }
 `;
 
 // momentum slow tendencies: advection, Coriolis, buoyancy, Rayleigh damping (overwrites F[u,v,w])
@@ -286,11 +309,7 @@ ${BASE_FNS}
 fn U(q: u32) -> f32 { return S[q]; }
 fn V(q: u32) -> f32 { return S[SIZE + q]; }
 fn W(q: u32) -> f32 { return S[2u * SIZE + q]; }
-fn thr(q: u32) -> f32 {
-  var f = 1.0;
-  if (MOIST) { f += 0.61 * S[5u * SIZE + q] - S[6u * SIZE + q] - S[7u * SIZE + q]; }
-  return S[3u * SIZE + q] * f;
-}
+${THR_FNS}
 fn buoy(q: u32, k: u32) -> f32 { return G * (thr(q) - bthv(k)) / bthv(k); }
 fn zfaceU(q: u32, kf: u32, vel: f32, off: u32) -> f32 {
   if (kf >= 3u && kf <= NZ - 3u) { return f5(S[off + q - 3u * PL], S[off + q - 2u * PL], S[off + q - PL], S[off + q], S[off + q + PL], S[off + q + 2u * PL], vel); }
@@ -374,16 +393,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 // scalar slow tendencies (theta, pi', qv, qc, qr): flux-form advection + theta damping / radiation (overwrite)
-const SCALAR_WGSL = /* wgsl */`
+// With pd = true (final RK3 stage) the moisture species use the positive-definite flux limiter
+// (Skamarock 2006): full face fluxes scaled by the donor cell's ratio R from PDRATIO, as in the CPU core.
+const scalarWgsl = (pd: boolean): string => /* wgsl */`
+const PD: bool = ${pd};
 @group(0) @binding(0) var<storage, read> S: array<f32>;
 @group(0) @binding(1) var<storage, read_write> F: array<f32>;
 @group(0) @binding(2) var<storage, read> base: array<f32>;
+${pd ? '@group(0) @binding(3) var<storage, read> R: array<f32>;' : ''}
 ${BASE_FNS}
-fn zface(off: u32, qf: u32, kf: u32, vel: f32, c0: f32) -> f32 {
-  if (kf >= 3u && kf <= NZ - 3u) { return f5(S[off + qf - 3u * PL] - c0, S[off + qf - 2u * PL] - c0, S[off + qf - PL] - c0, S[off + qf] - c0, S[off + qf + PL] - c0, S[off + qf + 2u * PL] - c0, vel); }
-  if (kf >= 2u && kf <= NZ - 2u) { return f3(S[off + qf - 2u * PL] - c0, S[off + qf - PL] - c0, S[off + qf] - c0, S[off + qf + PL] - c0, vel); }
-  return 0.5 * (S[off + qf - PL] + S[off + qf]) - c0;
-}
+${ZFACE_FN}
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
@@ -396,9 +415,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let wb = S[2u * SIZE + q] * brho0f(k); let wt = S[2u * SIZE + q + PL] * brho0f(k + 1u);
   let dv = (ur - ul) / DX + (vr - vl) / DY + (wt - wb) / (r0 * DZ);
   var nf = 2u;
-  if (MOIST) { nf = 5u; }
+  if (MOIST) { nf = 2u + NQ; }
   for (var s = 0u; s < nf; s++) {
     let off = (3u + s) * SIZE;
+    ${pd ? `if (s >= 2u) {
+      let rs = (s - 2u) * SIZE;
+      var fL = ul * f5(S[off + q - 3u], S[off + q - 2u], S[off + q - 1u], S[off + q], S[off + q + 1u], S[off + q + 2u], ul);
+      var fR = ur * f5(S[off + q - 2u], S[off + q - 1u], S[off + q], S[off + q + 1u], S[off + q + 2u], S[off + q + 3u], ur);
+      var gL = vl * f5(S[off + q - 3u * SX], S[off + q - 2u * SX], S[off + q - SX], S[off + q], S[off + q + SX], S[off + q + 2u * SX], vl);
+      var gR = vr * f5(S[off + q - 2u * SX], S[off + q - SX], S[off + q], S[off + q + SX], S[off + q + 2u * SX], S[off + q + 3u * SX], vr);
+      var hB = 0.0; var hT = 0.0;
+      if (k > 0u) { hB = wb * zface(off, q, k, S[2u * SIZE + q], 0.0); }
+      if (k < NZ - 1u) { hT = wt * zface(off, q + PL, k + 1u, S[2u * SIZE + q + PL], 0.0); }
+      fL *= select(R[rs + q], R[rs + q - 1u], fL > 0.0);
+      fR *= select(R[rs + q + 1u], R[rs + q], fR > 0.0);
+      gL *= select(R[rs + q], R[rs + q - SX], gL > 0.0);
+      gR *= select(R[rs + q + SX], R[rs + q], gR > 0.0);
+      hB *= select(R[rs + q], R[rs + q - PL], hB > 0.0);
+      hT *= select(R[rs + q + PL], R[rs + q], hT > 0.0);
+      F[off + q] = -((fR - fL) / DX + (gR - gL) / DY + (hT - hB) / (r0 * DZ)) + S[off + q] * dv;
+      continue;
+    }` : ''}
     // advect the deviation from the cell's own value: exact for this flux form with the divergence
     // correction (constants are advected exactly) and free of f32 cancellation for theta ~ 300 K
     let c0 = S[off + q];
@@ -415,6 +452,51 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (PHYS && RADTAU > 0.0) { tend += max(-(S[off + q] - bth0(k)) / RADTAU, -RADMAX / bpi0(k)); }
     }
     F[off + q] = tend;
+  }
+}
+`;
+
+/** z-face interpolation of field slot `off` (values relative to c0), shared by the scalar kernels. */
+const ZFACE_FN = `
+fn zface(off: u32, qf: u32, kf: u32, vel: f32, c0: f32) -> f32 {
+  if (kf >= 3u && kf <= NZ - 3u) { return f5(S[off + qf - 3u * PL] - c0, S[off + qf - 2u * PL] - c0, S[off + qf - PL] - c0, S[off + qf] - c0, S[off + qf + PL] - c0, S[off + qf + 2u * PL] - c0, vel); }
+  if (kf >= 2u && kf <= NZ - 2u) { return f3(S[off + qf - 2u * PL] - c0, S[off + qf - PL] - c0, S[off + qf] - c0, S[off + qf + PL] - c0, vel); }
+  return 0.5 * (S[off + qf - PL] + S[off + qf]) - c0;
+}
+`;
+
+// positive-definite limiter ratios for the moisture species (final RK3 stage): outflow over dt from the
+// unlimited face fluxes of the current stage vs. the content at time level n (S0) -> R
+const PDRATIO_WGSL = /* wgsl */`
+@group(0) @binding(0) var<storage, read> S: array<f32>;
+@group(0) @binding(1) var<storage, read> S0: array<f32>;
+@group(0) @binding(2) var<storage, read_write> R: array<f32>;
+@group(0) @binding(3) var<storage, read> base: array<f32>;
+@group(0) @binding(4) var<uniform> p: P;
+${BASE_FNS}
+${ZFACE_FN}
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= NX * NY * NZ) { return; }
+  let k = t / (NX * NY); let r = t % (NX * NY); let j = r / NX; let i = r % NX;
+  let q = ix(i, j, k);
+  let r0 = brho0(k);
+  let ul = S[q]; let ur = S[q + 1u];
+  let vl = S[SIZE + q]; let vr = S[SIZE + q + SX];
+  let wb = S[2u * SIZE + q] * brho0f(k); let wt = S[2u * SIZE + q + PL] * brho0f(k + 1u);
+  for (var s = 0u; s < NQ; s++) {
+    let off = (5u + s) * SIZE;
+    let fL = ul * f5(S[off + q - 3u], S[off + q - 2u], S[off + q - 1u], S[off + q], S[off + q + 1u], S[off + q + 2u], ul);
+    let fR = ur * f5(S[off + q - 2u], S[off + q - 1u], S[off + q], S[off + q + 1u], S[off + q + 2u], S[off + q + 3u], ur);
+    let gL = vl * f5(S[off + q - 3u * SX], S[off + q - 2u * SX], S[off + q - SX], S[off + q], S[off + q + SX], S[off + q + 2u * SX], vl);
+    let gR = vr * f5(S[off + q - 2u * SX], S[off + q - SX], S[off + q], S[off + q + SX], S[off + q + 2u * SX], S[off + q + 3u * SX], vr);
+    var hB = 0.0; var hT = 0.0;
+    if (k > 0u) { hB = wb * zface(off, q, k, S[2u * SIZE + q], 0.0); }
+    if (k < NZ - 1u) { hT = wt * zface(off, q + PL, k + 1u, S[2u * SIZE + q + PL], 0.0); }
+    let outflow = (max(fR, 0.0) - min(fL, 0.0)) / DX + (max(gR, 0.0) - min(gL, 0.0)) / DY + (max(hT, 0.0) - min(hB, 0.0)) / (r0 * DZ);
+    let avail = max(S0[off + q], 0.0);
+    R[s * SIZE + q] = select(1.0, avail / (outflow * p.dtBig), outflow * p.dtBig > avail);
   }
 }
 `;
@@ -460,9 +542,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let k = t / (NX * NY); let r = t % (NX * NY); let j = r / NX; let i = r % NX;
   let q = ix(i, j, k);
   if (k < NZ) {
-    for (var f = 0u; f < 8u; f++) {
+    for (var f = 0u; f < NFLD; f++) {
       if (f == 2u || f == 4u) { continue; }
-      if (!MOIST && f >= 5u) { continue; }
       let pr = select(1.0 / 3.0, 1.0, f < 2u);
       let off = f * SIZE;
       let b0 = bval(f, k);
@@ -571,7 +652,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let q = gid.x;
   if (q >= SIZE) { return; }
   S[3u * SIZE + q] = S0[3u * SIZE + q] + p.dtStage * F[3u * SIZE + q];
-  if (MOIST) { for (var f = 5u; f < 8u; f++) { S[f * SIZE + q] = S0[f * SIZE + q] + p.dtStage * F[f * SIZE + q]; } }
+  for (var f = 5u; f < NFLD; f++) { S[f * SIZE + q] = S0[f * SIZE + q] + p.dtStage * F[f * SIZE + q]; }
   S[q] = S0[q]; S[SIZE + q] = S0[SIZE + q]; S[2u * SIZE + q] = S0[2u * SIZE + q]; S[4u * SIZE + q] = S0[4u * SIZE + q];
   A[q] = S0[4u * SIZE + q];
 }
@@ -583,11 +664,7 @@ const ACOUSTIC_H_WGSL = /* wgsl */`
 @group(0) @binding(1) var<storage, read> F: array<f32>;
 @group(0) @binding(2) var<storage, read> A: array<f32>;
 @group(0) @binding(3) var<uniform> p: P;
-fn thr(q: u32) -> f32 {
-  var f = 1.0;
-  if (MOIST) { f += 0.61 * S[5u * SIZE + q] - S[6u * SIZE + q] - S[7u * SIZE + q]; }
-  return S[3u * SIZE + q] * f;
-}
+${THR_FNS}
 fn pstar(q: u32) -> f32 { let pp = S[4u * SIZE + q]; return pp + DIVD * (pp - A[q]); }
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -616,11 +693,7 @@ const ACOUSTIC_V_WGSL = /* wgsl */`
 @group(0) @binding(2) var<storage, read> base: array<f32>;
 ${BASE_FNS}
 @group(0) @binding(3) var<uniform> p: P;
-fn thr(q: u32) -> f32 {
-  var f = 1.0;
-  if (MOIST) { f += 0.61 * S[5u * SIZE + q] - S[6u * SIZE + q] - S[7u * SIZE + q]; }
-  return S[3u * SIZE + q] * f;
-}
+${THR_FNS}
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
