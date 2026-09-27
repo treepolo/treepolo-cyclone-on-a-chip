@@ -66,20 +66,23 @@ $('exp').onchange = init;
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
-// Nesting: opened from the global page with ?nest=1; the opener posts the global state and the chosen point.
-if (new URLSearchParams(location.search).has('nest')) {
+// Nesting: embedded by the global page (in-page overlay, #nest...) or opened with ?nest=1; the
+// parent/opener posts the global state and the chosen point.
+const host = window.parent !== window ? window.parent : (window.opener as Window | null);
+if (location.hash.startsWith('#nest') || new URLSearchParams(location.search).has('nest')) {
   const sel = $<HTMLSelectElement>('exp'), opt = document.createElement('option');
   opt.value = 'nest'; opt.textContent = '全球模式巢狀區域 / Nest in the global model';
   sel.prepend(opt); sel.value = 'nest';
   window.addEventListener('message', (ev: MessageEvent) => {
-    if (ev.origin !== location.origin || !ev.data || ev.data.type !== 'nest') return;
+    if (!host || ev.source !== host || !ev.data || ev.data.type !== 'nest') return;
     nest = { payload: ev.data.payload as NestPayload, lat0: ev.data.lat0 as number, lon0: ev.data.lon0 as number, size: (ev.data.size as NestSize) ?? 'meso' };
     sel.value = 'nest';
     init();
   });
-  if (window.opener) (window.opener as Window).postMessage({ type: 'nest-ready' }, location.origin);
+  if (host) host.postMessage({ type: 'nest-ready' }, '*');
   else log('找不到全球模式視窗；請從全球模式頁面點選地點後開啟 / No global-model window found; open this page from the global model after picking a point');
 }
+if (window.parent !== window) { const back = document.getElementById('backLink'); if (back) back.hidden = true; }
 init();
 function tick(): void { view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); requestAnimationFrame(tick); }
 requestAnimationFrame(tick);

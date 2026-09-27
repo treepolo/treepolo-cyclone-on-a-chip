@@ -1,6 +1,7 @@
 // WebGL2 volume renderer for the regional model: front-to-back ray marching through a 3-D texture
 // (R = cloud water, G = rain water) with single-scattering sun lighting and self-shadowing,
 // a coloured ground plane (surface field) and an orbit camera. Vertical scale is exaggerated.
+import { attachOrbit } from '../orbitControls.js';
 
 const VS = `#version 300 es
 in vec2 aPos; out vec2 vUv;
@@ -81,11 +82,10 @@ export class VolumeView {
     gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
     this.vol = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
-    let drag = false, lx = 0, ly = 0;
-    canvas.addEventListener('pointerdown', (e) => { drag = true; lx = e.clientX; ly = e.clientY; canvas.setPointerCapture(e.pointerId); });
-    canvas.addEventListener('pointerup', () => { drag = false; });
-    canvas.addEventListener('pointermove', (e) => { if (!drag) return; this.yaw -= (e.clientX - lx) * 0.006; this.pitch = Math.max(0.05, Math.min(1.5, this.pitch + (e.clientY - ly) * 0.006)); lx = e.clientX; ly = e.clientY; });
-    canvas.addEventListener('wheel', (e) => { e.preventDefault(); this.dist = Math.max(0.6, Math.min(6, this.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    attachOrbit(canvas, {
+      rotate: (dx, dy) => { this.yaw -= dx * 0.006; this.pitch = Math.max(0.05, Math.min(1.5, this.pitch + dy * 0.006)); },
+      zoom: (f) => { this.dist = Math.max(0.6, Math.min(6, this.dist * f)); },
+    });
   }
 
   /** Upload cloud/rain volume [k][j][i] (bytes) and set the box aspect (x, y normalised to 1). */

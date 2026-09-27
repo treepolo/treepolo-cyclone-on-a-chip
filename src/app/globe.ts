@@ -1,5 +1,6 @@
 // WebGL2 globe: colour-shaded model field on a sphere mesh whose rows are the model's
 // Gaussian latitudes, plus wind tracer streaks and a graticule. Orbit camera.
+import { attachOrbit } from './orbitControls.js';
 
 export type Rgb = [number, number, number];
 
@@ -63,21 +64,11 @@ export class Globe {
   }
 
   private attachControls(): void {
-    let drag = false, lx = 0, ly = 0, moved = 0;
-    const c = this.canvas;
-    c.addEventListener('pointerdown', (e) => { drag = true; moved = 0; lx = e.clientX; ly = e.clientY; c.setPointerCapture(e.pointerId); });
-    c.addEventListener('pointerup', (e) => {
-      drag = false;
-      if (moved < 5 && this.onPick) { const p = this.pick(e.clientX, e.clientY); if (p) this.onPick(p.lat, p.lon); }
+    attachOrbit(this.canvas, {
+      rotate: (dx, dy) => { this.yaw -= dx * 0.006; this.pitch = Math.max(-1.5, Math.min(1.5, this.pitch + dy * 0.006)); },
+      zoom: (f) => { this.dist = Math.max(1.4, Math.min(8, this.dist * f)); },
+      tap: (x, y) => { if (this.onPick) { const p = this.pick(x, y); if (p) this.onPick(p.lat, p.lon); } },
     });
-    c.addEventListener('pointermove', (e) => {
-      if (!drag) return;
-      moved += Math.abs(e.clientX - lx) + Math.abs(e.clientY - ly);
-      this.yaw -= (e.clientX - lx) * 0.006;
-      this.pitch = Math.max(-1.5, Math.min(1.5, this.pitch + (e.clientY - ly) * 0.006));
-      lx = e.clientX; ly = e.clientY;
-    });
-    c.addEventListener('wheel', (e) => { e.preventDefault(); this.dist = Math.max(1.4, Math.min(8, this.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
   }
 
   /** Screen point -> (lat, lon) on the unit sphere, or null when the ray misses it. */

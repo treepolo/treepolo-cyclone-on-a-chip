@@ -29,12 +29,13 @@ const nestSize = (): NestSize => $<HTMLSelectElement>('nestSize').value as NestS
 const nestHalf = (): number => NEST_HALF_WIDTH_KM[nestSize()] * 1e3 / 6.371e6;   // radians of arc
 function deliverNest(): void {
   if (!nestWin || !nestReady || !pendingNest || !pick) return;
-  nestWin.postMessage({ type: 'nest', payload: pendingNest, lat0: pick.lat, lon0: pick.lon, size: nestSize() }, location.origin);
+  // target '*': inside a sandboxed host the origin may be opaque; the receiver checks the message source
+  nestWin.postMessage({ type: 'nest', payload: pendingNest, lat0: pick.lat, lon0: pick.lon, size: nestSize() }, '*');
   pendingNest = null;
   log('已傳送全球模式狀態到區域模式 / Global state sent to the regional model');
 }
 window.addEventListener('message', (ev: MessageEvent) => {
-  if (ev.origin !== location.origin || ev.source !== nestWin || !ev.data || ev.data.type !== 'nest-ready') return;
+  if (!nestWin || ev.source !== nestWin || !ev.data || ev.data.type !== 'nest-ready') return;
   nestReady = true;
   deliverNest();
 });
@@ -223,10 +224,19 @@ $('zoom').onclick = (): void => {
   if (!pick) return;
   if (Math.abs(pick.lat) > 80 * Math.PI / 180) { log('極區附近無法巢狀（切平面近似）/ Nesting is not available within 10° of the poles (tangent-plane approximation)'); return; }
   nestReady = false;
-  nestWin = window.open('regional.html?nest=1', '_blank');
-  if (!nestWin) { log('瀏覽器阻擋了新視窗 / The browser blocked the new window'); return; }
+  // the regional model opens in an in-page overlay (works on phones and inside sandboxed hosts)
+  running = false; syncRun();
+  const frame = $<HTMLIFrameElement>('nestFrame');
+  frame.src = `regional.html#nest-${Date.now()}`;
+  $('nestOverlay').hidden = false;
+  nestWin = frame.contentWindow;
   send({ type: 'snapshot' });
   log('擷取全球模式狀態中 / Capturing the global model state…');
+};
+$('nestClose').onclick = (): void => {
+  $('nestOverlay').hidden = true;
+  $<HTMLIFrameElement>('nestFrame').src = 'about:blank';
+  nestWin = null;
 };
 $('nestSize').onchange = (): void => { if (pick) globe.setMarker(pick.lat, pick.lon, nestHalf()); };
 $('resetAvg').onclick = (): void => { send({ type: 'resetAverage' }); log('重設緯向平均 / Zonal average reset'); };
