@@ -33,11 +33,13 @@ a{color:#8fc1ff}
 <option value="supercell_hr">超大胞 1 km（需 GPU）/ Supercell 1 km (GPU)</option>
 <option value="tc_hr">熱帶氣旋 5 km（需 GPU）/ Tropical cyclone 5 km (GPU)</option>
 <option value="tornado">龍捲尺度超大胞 250 m（需高階 GPU）/ Tornado-scale supercell 250 m (fast GPU)</option>
+<option value="tornado_c">龍捲超大胞：1 km 快速起轉，可細化到 250 m / Tornadic supercell: 1 km spin-up, refine to 250 m</option>
 </select>
 <label for="backendSel">計算後端 / Compute backend</label>
 <select id="backendSel"><option value="auto">自動：可用時用 WebGPU / Auto: WebGPU when available</option><option value="cpu">CPU Float64</option></select>
 <div id="desc" class="muted"></div>
-<p><button id="run">執行 / Run</button></p>
+<p><button id="run">執行 / Run</button> <button id="refine" disabled>細化 / Refine</button></p>
+<div class="muted">先粗後細：用粗網格快速跑到有趣的階段，再按「細化」接著用細網格算（15 km → 5 km 颱風、2 km → 1 km 超大胞、1 km → 250 m 龍捲盒子，自動對準風暴）。/ Coarse to fine: spin up quickly on the coarse grid, then press Refine to continue on the finer grid (the 250 m tornado box is centred on the storm).</div>
 <label for="speed">每輪步數 / Steps per tick</label><input id="speed" type="range" min="1" max="12" value="1" />
 <label><input id="adaptive" type="checkbox" checked /> 自動時間步長（依風速調整 Δt，GPU）/ Adaptive time step (Δt from the Courant number, GPU)</label>
 <label for="ground">地面場 / Ground field</label>

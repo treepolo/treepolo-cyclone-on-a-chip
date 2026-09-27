@@ -236,3 +236,48 @@ export async function regionalFlagDebug(): Promise<void> {
     gcheck(`flag debug after ${g.steps} steps: columns with any condensate`, true, `${raw}/${nx * nx}; log10 max histogram ${[...hist].sort((a, b) => a[0] - b[0]).map(([b, c]) => `${b}:${c}`).join(' ')}`);
   }
 }
+
+/** Coarse-to-fine refinement of a developed storm (2 km -> 1 km on the GPU): the updraft and the
+ *  condensate carry over and the fine run continues without a jump or blow-up. */
+export async function regionalRefineTest(): Promise<void> {
+  const { refineInto } = await import('../../regional/refine.js');
+  const device = await getDevice();
+  const L = 80000;
+  const mk = (dx: number, nz: number, dz: number, dt: number): RegionalModel => {
+    const nx = L / dx;
+    const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 5000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, 6);
+    m.setBaseWind((z) => ({ u: 30 * Math.tanh(z / 3000) - 15, v: 0 }));
+    for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+    return m;
+  };
+  const mc = mk(2000, 30, 500, 6);
+  for (let k = 0; k < 30; k++) for (let j = 0; j < 40; j++) for (let i = 0; i < 40; i++) {
+    const r = Math.sqrt((((i + 0.5) * 2000 - 0.4 * L) / 10000) ** 2 + (((j + 0.5) * 2000 - 0.5 * L) / 10000) ** 2 + ((mc.zc[k]! - 1400) / 1400) ** 2);
+    if (r < 1) mc.th[mc.idx(i, j, k)] = mc.th[mc.idx(i, j, k)]! + 2 * Math.cos(0.5 * Math.PI * r) ** 2;
+  }
+  const stats = async (g: GpuRegional, nx: number): Promise<{ w: number; c: number }> => {
+    const d = await g.readDisplay([0]); let w = 0, c = 0;
+    for (let i = 0; i < nx * nx; i++) { w = Math.max(w, d.col[4 * i]!); c = Math.max(c, d.col[4 * i + 2]!); }
+    return { w, c };
+  };
+  const gc = new GpuRegional(device, mc, { moist: true, physics: null, ice: true });
+  gc.uploadFrom(mc);
+  gc.step(300); await device.queue.onSubmittedWorkDone();                 // 30 min
+  const before = await stats(gc, 40);
+  const st = await gc.readState();
+  [mc.u, mc.v, mc.w, mc.th, mc.pp, ...mc.scalars].forEach((a, f) => { for (let i = 0; i < mc.size; i++) a[i] = st[f * mc.size + i]!; });
+  mc.time = gc.time; gc.destroy();
+  const mf = mk(1000, 45, 333.3333, 3);
+  refineInto(mc, mf);
+  const gf = new GpuRegional(device, mf, { moist: true, physics: null, ice: true });
+  gf.uploadFrom(mf); gf.time = mf.time;
+  gf.step(1); await device.queue.onSubmittedWorkDone();
+  const just = await stats(gf, 80);
+  gf.step(99); await device.queue.onSubmittedWorkDone();                  // +5 min
+  const after = await stats(gf, 80);
+  gf.destroy();
+  gcheck('refine GPU: storm developed on the coarse grid (w max > 15 m/s at 30 min)', before.w > 15, before.w.toFixed(1));
+  gcheck('refine GPU: updraft carried over (w max within 30 % right after refining)', Math.abs(just.w - before.w) < 0.3 * before.w, `${just.w.toFixed(1)} vs ${before.w.toFixed(1)} m/s`);
+  gcheck('refine GPU: condensate carried over (within 30 %)', Math.abs(just.c - before.c) < 0.3 * before.c, `${(just.c * 1e3).toFixed(2)} vs ${(before.c * 1e3).toFixed(2)} g/kg`);
+  gcheck('refine GPU: fine run continues (5 min later: storm alive, no blow-up)', Number.isFinite(after.w) && after.w > 0.5 * before.w && after.w < 80, `${after.w.toFixed(1)} m/s at t = ${(gf.time / 60).toFixed(0)} min`);
+}

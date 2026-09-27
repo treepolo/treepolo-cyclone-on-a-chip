@@ -4,7 +4,8 @@ import { RegionalModel, RegionalConfig } from '../regional/core.js';
 import { check, summary } from './assert.js';
 import { KesslerMicrophysics, weismanKlemp, QV, QC, QR } from '../regional/kessler.js';
 import { IceMicrophysics, cellProcesses, ICE, QI, QS, QG } from '../regional/ice.js';
-import { eyewallProfile } from '../regional/tropical.js';
+import { eyewallProfile, tropicalSounding, insertVortex } from '../regional/tropical.js';
+import { refineInto } from '../regional/refine.js';
 
 const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200, dt: 1, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 0, dampRate: 0, kdiff2: 0 };
 
@@ -214,6 +215,48 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
   let d = 0;
   for (const [x, y] of [[a.u, b.u], [a.w, b.w], [a.th, b.th], [a.pp, b.pp]] as const) for (let k = 0; k < 10; k++) for (let j = 0; j < 12; j++) for (let i = 0; i < 16; i++) d = Math.max(d, Math.abs(x[a.idx(i, j, k)]! - y[a.idx(i, j, k)]!));
   check('regional: periodic roll commutes with time stepping (exact)', d < 1e-12, d);
+}
+
+// coarse-to-fine refinement: (a) linear fields are reproduced exactly at the staggered positions of a
+// sub-box; (b) a tropical-cyclone vortex keeps its strength and continues stably on a 3x finer grid
+{
+  const open: RegionalConfig = { ...base, lateral: 'open', nx: 20, ny: 20, nz: 10, dx: 3000, dy: 3000, dz: 1000, dt: 10, nsound: 6 };
+  const mc = new RegionalModel(open, (z) => ({ theta: 300 + 0.004 * z, qv: 0 }), 1);
+  const lin = (x: number, y: number, z: number): number => 1 + 2e-5 * x - 3e-5 * y + 1e-4 * z;
+  for (let k = 0; k <= 10; k++) for (let j = -2; j < 23; j++) for (let i = -2; i < 23; i++) {
+    const q = mc.idx(i, j, k);
+    if (q < 0 || q >= mc.size) continue;
+    mc.u[q] = lin(i * 3000, (j + 0.5) * 3000, (k + 0.5) * 1000);
+    mc.w[q] = lin((i + 0.5) * 3000, (j + 0.5) * 3000, k * 1000);
+    mc.scalars[0]![q] = lin((i + 0.5) * 3000, (j + 0.5) * 3000, (k + 0.5) * 1000);
+  }
+  const mf = new RegionalModel({ ...open, nx: 30, ny: 30, nz: 20, dx: 1000, dy: 1000, dz: 500 }, (z) => ({ theta: 300 + 0.004 * z, qv: 0 }), 1);
+  const x0 = 12000, y0 = 15000;
+  refineInto(mc, mf, x0, y0);
+  let e = 0;
+  for (let k = 1; k < 19; k++) for (let j = 1; j < 29; j++) for (let i = 1; i < 29; i++) {
+    e = Math.max(e, Math.abs(mf.u[mf.idx(i, j, k)]! - lin(x0 + i * 1000, y0 + (j + 0.5) * 1000, (k + 0.5) * 500)));
+    e = Math.max(e, Math.abs(mf.w[mf.idx(i, j, k)]! - lin(x0 + (i + 0.5) * 1000, y0 + (j + 0.5) * 1000, k * 500)));
+    e = Math.max(e, Math.abs(mf.scalars[0]![mf.idx(i, j, k)]! - lin(x0 + (i + 0.5) * 1000, y0 + (j + 0.5) * 1000, (k + 0.5) * 500)));
+  }
+  check('refine: linear fields reproduced exactly at staggered sub-box points', e < 1e-12, e);
+}
+{
+  const f = 5e-5, sst = 301.15;
+  const cfg: RegionalConfig = { ...base, nx: 30, ny: 30, nz: 12, dx: 12000, dy: 12000, dz: 1500, dt: 45, nsound: 6, f, dampDepth: 5000, dampRate: 1 / 300 };
+  const mc = new RegionalModel(cfg, tropicalSounding(sst), 3);
+  insertVortex(mc, f, 15);
+  for (let s = 0; s < 4; s++) mc.step();
+  const mf = new RegionalModel({ ...cfg, nx: 90, ny: 90, nz: 24, dx: 4000, dy: 4000, dz: 750, dt: 15 }, tropicalSounding(sst), 3);
+  refineInto(mc, mf);
+  const vmax = (m: RegionalModel): number => { let v = 0; for (let j = 0; j < m.c.ny; j++) for (let i = 0; i < m.c.nx; i++) { const q = m.idx(i, j, 0); v = Math.max(v, Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!), 0.5 * (m.v[q]! + m.v[q + m.sx]!))); } return v; };
+  const ppmin = (m: RegionalModel): number => { let p = 0; for (let j = 0; j < m.c.ny; j++) for (let i = 0; i < m.c.nx; i++) p = Math.min(p, m.pp[m.idx(i, j, 0)]!); return p; };
+  const vc = vmax(mc), vf = vmax(mf), pc = ppmin(mc), pf = ppmin(mf);
+  check('refine: vortex max wind carried over (within 10 %)', Math.abs(vf - vc) < 0.1 * vc, `${vf.toFixed(2)} vs ${vc.toFixed(2)} m/s`);
+  check('refine: central pi\' deficit carried over (within 10 %)', Math.abs(pf - pc) < 0.1 * Math.abs(pc), `${pf.toExponential(3)} vs ${pc.toExponential(3)}`);
+  for (let s = 0; s < 8; s++) mf.step();
+  const v2 = vmax(mf);
+  check('refine: fine run continues stably (2 min), vortex kept', Number.isFinite(v2) && Math.abs(v2 - vf) < 0.15 * vf && mf.time === mc.time + 120, `${v2.toFixed(2)} m/s at t = ${mf.time} s`);
 }
 
 void DRY_AIR;

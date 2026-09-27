@@ -93,3 +93,35 @@ export async function earthTests(): Promise<void> {
     gcheck(`Earth T21 after ${n} steps: soil water rel L2 < 1e-3`, db < 1e-3, db);
   }
 }
+
+/** Start from the spun-up state (data/spinup_earth_t42q.bin) at T21 and compare 10 steps GPU vs CPU. */
+export async function spinupGpuTest(): Promise<void> {
+  for (const preset of ['EARTH_T21', 'EARTH_T85'] as const) await spinupGpuCase(preset);
+}
+async function spinupGpuCase(preset: 'EARTH_T21' | 'EARTH_T85'): Promise<void> {
+  const { applySpinup } = await import('../../model/spinup.js');
+  const device = await getDevice();
+  const data = await (await fetch(preset === 'EARTH_T85' ? 'data/earth_512.json' : 'data/earth_t42.json')).json() as EarthData;
+  const qflux = await (await fetch('data/qflux_gray_t21.json')).json();
+  const buf = await (await fetch('data/spinup_earth_t42q.bin')).arrayBuffer();
+  const { model: cpu, physics } = createEarth(EARTH_PRESETS[preset]!, data, { qflux: false }, { qflux });
+  applySpinup(cpu, physics, buf);
+  const ng = cpu.ng;
+  const gd = new GpuDycore(device, cpu, { heldSuarez: false });
+  const gm = new GpuMoist(device, gd, cpu, physics);
+  gd.uploadFrom(cpu); gm.uploadFrom(cpu);
+  for (let i = 0; i < 10; i++) cpu.step();
+  gd.step(10); await device.queue.onSubmittedWorkDone();
+  const s = await gm.readSurface();
+  let gp = 0, cp = 0, nan = 0;
+  for (let p = 0; p < ng; p++) {
+    const g = s[SFC.precipConv * ng + p]! + s[SFC.precipLS * ng + p]!;
+    if (!Number.isFinite(g)) nan++; else gp += g / ng;
+    cp += (physics.f.precipConv[p]! + physics.f.precipLS[p]!) / ng;
+  }
+  const dts = rel(s, physics.f.sst, SFC.ts * ng, ng);
+  gcheck(`spin-up ${preset}: GPU precipitation finite`, nan === 0, `${nan} non-finite`);
+  gcheck(`spin-up ${preset}: GPU vs CPU mean precipitation over 10 steps within 20 %`, Math.abs(gp - cp) < 0.2 * cp, `${gp.toFixed(3)} vs ${cp.toFixed(3)} kg/m2`);
+  gcheck(`spin-up ${preset}: GPU vs CPU surface temperature rel L2 < 1e-4`, dts < 1e-4, dts);
+  gcheck(`spin-up ${preset}: GPU time starts at the spin-up time`, Math.abs(gd.time - cpu.time) < 1, `${(gd.time / 86400).toFixed(3)} vs ${(cpu.time / 86400).toFixed(3)} d`);
+}

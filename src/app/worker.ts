@@ -297,13 +297,16 @@ async function sendFrame(): Promise<void> {
   if (s.precipAcc) {
     if (precipPrev && t > precipPrevT) {
       const dtf = t - precipPrevT, a = Math.min(1, dtf / (6 * 3600));
+      // 6-hour running mean of the rate; the first value is the instantaneous rate
+      const first = !precipRate;
       if (!precipRate) precipRate = new Float32Array(ng);
-      for (let p = 0; p < ng; p++) precipRate[p] = precipRate[p]! * (1 - a) + a * (s.precipAcc[p]! - precipPrev[p]!) / dtf;
+      for (let p = 0; p < ng; p++) precipRate[p] = first ? (s.precipAcc[p]! - precipPrev[p]!) / dtf : precipRate[p]! * (1 - a) + a * (s.precipAcc[p]! - precipPrev[p]!) / dtf;
     }
     if (s.snowAcc && snowPrev && t > precipPrevT) {
       const dtf = t - precipPrevT, a = Math.min(1, dtf / (6 * 3600));
+      const first = !snowRate;
       if (!snowRate) snowRate = new Float32Array(ng);
-      for (let p = 0; p < ng; p++) snowRate[p] = snowRate[p]! * (1 - a) + a * (s.snowAcc[p]! - snowPrev[p]!) / dtf;
+      for (let p = 0; p < ng; p++) snowRate[p] = first ? (s.snowAcc[p]! - snowPrev[p]!) / dtf : snowRate[p]! * (1 - a) + a * (s.snowAcc[p]! - snowPrev[p]!) / dtf;
     }
     if (!precipPrev || t > precipPrevT) { precipPrev = s.precipAcc; snowPrev = s.snowAcc; precipPrevT = t; }
   }

@@ -8,8 +8,9 @@ import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../..
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
+import { refineInto } from '../../regional/refine.js';
 import { tornadoExperiment, StormTracker } from '../../regional/supercell.js';
-import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import { REFINE_TO, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
 
 let m: RegionalModel | null = null;
 let mp: IceMicrophysics | null = null;
@@ -98,9 +99,11 @@ function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; descripti
   physCfg = null;
   frameVel = { u: 0, v: 0 };
   tracker = null;
-  if (exp === 'tornado') {
-    // GPU: 250 m LES over 50 km; CPU: a 500 m preview over 40 km (mesocyclone scale only)
-    const e = gpuOk ? tornadoExperiment(250, 50000, 64, 250, 2, 8) : tornadoExperiment(500, 40000, 40, 400, 3, 6);
+  if (exp === 'tornado' || exp === 'tornado_c') {
+    // GPU: 250 m LES over 50 km; CPU: a 500 m preview over 40 km (mesocyclone scale only);
+    // tornado_c: 1 km spin-up over 100 km (same environment), refined to the 250 m box later
+    const e = exp === 'tornado_c' ? tornadoExperiment(1000, 100000, 40, 400, 6, 6)
+      : gpuOk ? tornadoExperiment(250, 50000, 64, 250, 2, 8) : tornadoExperiment(500, 40000, 40, 400, 3, 6);
     m = e.model; mp = new IceMicrophysics(m); physCfg = e.physics; frameVel = e.frame;
     tracker = new StormTracker(); lastTrack = 0;
     new RegionalPhysics(m, physCfg);
@@ -176,7 +179,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr' || msg.experiment === 'tornado')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
       const c = m!.c;
       dt0 = c.dt;
-      post({ type: 'ready', land: null, experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note });
+      post({ type: 'ready', land: null, experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, refineTo: REFINE_TO[msg.experiment] ?? null });
       await sendFrame();
     }
     else if (msg.type === 'initNest') {
@@ -192,12 +195,48 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       } else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
       dt0 = c.dt;
-      post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land });
+      post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land, refineTo: null });
       await sendFrame();
     }
     else if (msg.type === 'run') running = msg.running;
     else if (msg.type === 'speed') stepsPerTick = Math.max(1, msg.stepsPerTick | 0);
     else if (msg.type === 'ground') { ground = msg.field; sendFrame(); }
+    else if (msg.type === 'refine') {
+      const target = REFINE_TO[experiment];
+      if (!target || !m || !mp) return;
+      const wasRunning = running; running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        await syncFromGpu();
+        const mc = m, mpc = mp, fromDx = mc.c.dx, frameC = { ...frameVel }, trackC = tracker?.position ?? null;
+        const device = gpu ? gpu.device : null;
+        gpu?.destroy(); gpu = null;
+        const info = build(target, !!device);
+        const mf = m!;
+        // moving-frame experiments: bring the fine model into the coarse model's current frame
+        if (tracker && (frameC.u !== frameVel.u || frameC.v !== frameVel.v)) {
+          mf.shiftFrame(frameC.u - frameVel.u, frameC.v - frameVel.v);
+          frameVel = frameC; if (physCfg) physCfg.frameVel = frameVel;
+        }
+        // sub-box around the storm when the fine domain is smaller
+        const Lc = mc.c.nx * mc.c.dx, Lf = mf.c.nx * mf.c.dx;
+        const cx = trackC?.x ?? Lc / 2, cy = trackC?.y ?? Lc / 2;
+        const x0 = Math.max(0, Math.min(Lc - Lf, cx - Lf / 2)), y0 = Math.max(0, Math.min(Lc - Lf, cy - Lf / 2));
+        refineInto(mc, mf, x0, y0, { rain: mpc.rainAcc, snow: mpc.snowAcc }, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+        let note = `已從 Δx ${fromDx >= 1000 ? `${fromDx / 1000} km` : `${fromDx} m`} 細化 / refined from Δx ${fromDx >= 1000 ? `${fromDx / 1000} km` : `${fromDx} m`} at t = ${(mc.time / 60).toFixed(0)} min`;
+        if (device) {
+          const reason = await tryGpu(device);
+          if (reason) note += ' · ' + gpuFailNote(reason);
+        }
+        dt0 = mf.c.dt;
+        const c = mf.c;
+        post({ type: 'ready', land: null, experiment: target, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, refineTo: REFINE_TO[target] ?? null });
+        busy = false;
+        await sendFrame();
+      } catch (e) { post({ type: 'error', message: `細化失敗 / refinement failed: ${String(e)}` }); }
+      busy = false; running = wasRunning;
+    }
     else if (msg.type === 'adaptive') {
       adaptive = msg.on;
       if (!adaptive && gpu) { while (busy) await new Promise((r) => setTimeout(r, 5)); gpu.setDt(dt0); }

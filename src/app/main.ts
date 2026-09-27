@@ -97,7 +97,7 @@ const RAIN_STOPS: [number, [number, number, number]][] = [
   [20, [0.98, 0.55, 0.15]], [40, [0.85, 0.15, 0.15]], [80, [0.8, 0.2, 0.8]],
 ];
 function rainColour(v: number): [number, number, number] | [number, number, number, number] {
-  if (v < RAIN_STOPS[0]![0]) return [0, 0, 0, 0];
+  if (!(v >= RAIN_STOPS[0]![0])) return [0, 0, 0, 0];     // also NaN
   for (let i = 1; i < RAIN_STOPS.length; i++) {
     const [x1, c1] = RAIN_STOPS[i]!, [x0, c0] = RAIN_STOPS[i - 1]!;
     if (v <= x1) {

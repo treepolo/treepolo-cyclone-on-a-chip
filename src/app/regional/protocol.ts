@@ -1,6 +1,8 @@
 // Messages between the regional-model UI and its worker.
 
-export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest' | 'tornado';
+export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest' | 'tornado' | 'tornado_c';
+/** coarse-to-fine refinement: each coarse spin-up experiment and the finer experiment it continues as */
+export const REFINE_TO: Partial<Record<RegionalExperiment, RegionalExperiment>> = { supercell: 'supercell_hr', tc: 'tc_hr', tornado_c: 'tornado' };
 
 /** Global-model state handed to the regional page for one-way nesting. Grid arrays are [k][lat][lon]. */
 export interface NestPayload {
@@ -29,7 +31,9 @@ export type ToRegionalWorker =
   | { type: 'boundary'; payload: NestPayload }
   /** time every GPU kernel for a few steps and report */
   | { type: 'profile' }
-  | { type: 'adaptive'; on: boolean };
+  | { type: 'adaptive'; on: boolean }
+  /** continue the running simulation on the finer grid of REFINE_TO[experiment] */
+  | { type: 'refine' };
 
 export interface RegionalFrame {
   type: 'frame';
@@ -49,6 +53,6 @@ export interface RegionalFrame {
 
 export type FromRegionalWorker =
   | RegionalFrame
-  | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null }
+  | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null; refineTo: RegionalExperiment | null }
   | { type: 'profile'; text: string }
   | { type: 'error'; message: string };

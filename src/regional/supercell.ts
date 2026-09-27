@@ -70,6 +70,8 @@ export function tornadoExperiment(dx: number, L: number, nz: number, dz: number,
  */
 export class StormTracker {
   private last: { x: number; y: number; t: number } | null = null;
+  /** last located storm position (m from the domain origin), or null before the storm is found */
+  get position(): { x: number; y: number } | null { return this.last ? { x: this.last.x, y: this.last.y } : null; }
 
   update(m: RegionalModel): { du: number; dv: number; di: number; dj: number; x: number; y: number } | null {
     const { nx, ny, nz, dx, dy } = m.c;

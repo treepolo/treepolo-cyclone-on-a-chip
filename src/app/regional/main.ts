@@ -3,6 +3,8 @@ import { VolumeView } from './volume.js';
 import { sequential, diverging } from '../colormap.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
+const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tornado: '250 m' };
+
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const log = (s: string): void => { const el = $('log'); el.textContent = `${s}\n${el.textContent ?? ''}`.slice(0, 3000); };
 const view = new VolumeView($<HTMLCanvasElement>('view'));
@@ -19,10 +21,14 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     land = m.land;
     // vertical exaggeration so that the troposphere is visible
     aspect = Math.min(0.45, (m.nz * m.dz) / (m.nx * m.dx) * (m.nx * m.dx > 500000 ? 12 : 2.5));
-    $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${(m.dx / 1000).toFixed(1)} km, Δz ${m.dz.toFixed(0)} m, Δt ${m.dt} s`;
+    $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${m.dx >= 1000 ? `${(m.dx / 1000).toFixed(1)} km` : `${m.dx.toFixed(0)} m`}, Δz ${m.dz.toFixed(0)} m, Δt ${m.dt} s`;
     $('backend').textContent = m.backend === 'gpu' ? 'WebGPU（f32）' : 'CPU（Float64）';
     if (m.note) log(m.note);
     $('desc').textContent = m.description;
+    const rb = $<HTMLButtonElement>('refine');
+    rb.disabled = !m.refineTo;
+    rb.textContent = m.refineTo ? `細化到 ${REFINE_LABEL[m.refineTo] ?? ''} / Refine to ${REFINE_LABEL[m.refineTo] ?? ''}` : '細化 / Refine';
+    if ((m.experiment as string) !== 'nest') $<HTMLSelectElement>('exp').value = m.experiment;
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
     view.setVolume(m.nx, m.ny, m.nz, m.cloud, m.rain, aspect);
@@ -90,3 +96,4 @@ init();
 function tick(): void { view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); requestAnimationFrame(tick); }
 requestAnimationFrame(tick);
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
+$('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
