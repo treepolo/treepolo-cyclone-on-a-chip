@@ -16,7 +16,9 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     dt = m.dt;
     // vertical exaggeration so that the troposphere is visible
     aspect = Math.min(0.45, (m.nz * m.dz) / (m.nx * m.dx) * (m.nx * m.dx > 500000 ? 12 : 2.5));
-    $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${(m.dx / 1000).toFixed(1)} km, Δz ${m.dz} m, Δt ${m.dt} s`;
+    $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${(m.dx / 1000).toFixed(1)} km, Δz ${m.dz.toFixed(0)} m, Δt ${m.dt} s`;
+    $('backend').textContent = m.backend === 'gpu' ? 'WebGPU（f32）' : 'CPU（Float64）';
+    if (m.note) log(m.note);
     $('desc').textContent = m.description;
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
@@ -45,9 +47,11 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
 };
 function sync(): void { $('run').textContent = running ? '暫停 / Pause' : '執行 / Run'; send({ type: 'run', running }); }
 $('run').onclick = (): void => { running = !running; sync(); };
-$('exp').onchange = (): void => { running = false; sync(); send({ type: 'init', experiment: $<HTMLSelectElement>('exp').value as RegionalExperiment }); };
+const init = (): void => { running = false; sync(); send({ type: 'init', experiment: $<HTMLSelectElement>('exp').value as RegionalExperiment, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' }); };
+$('exp').onchange = init;
+$('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
-send({ type: 'init', experiment: 'supercell' });
+init();
 function tick(): void { view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); requestAnimationFrame(tick); }
 requestAnimationFrame(tick);

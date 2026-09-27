@@ -16,7 +16,8 @@ v0.1 是一次**完整重新設計**（原因與路線圖見 [`docs/ARCHITECTURE
 - ✅ 濕大氣水球（R2）：形狀保持半拉格朗日水汽輸送、灰體輻射、邊界層、Simplified Betts–Miller 對流、大尺度凝結；水收支逐欄閉合。
 - 🔄 地球設定（R3）：真實海陸與地形、季節日照、隨水汽變化的灰體輻射、陸地 bucket 水文、海冰反照率；季風氣候驗收中。
 - ✅ WebGPU 後端（R4）：整個模式（動力、水汽輸送、柱物理）可在 GPU 上執行，並對 CPU Float64 參考解驗證；瀏覽器自動使用 WebGPU。
-- ⏭ 之後：季風與季節驗收 → 高解析（T85+）熱帶氣旋自然生成 → 區域非靜力巢狀模式（颱風眼牆、超大胞、龍捲）。
+- ✅ 區域非靜力模式（R5）：全可壓縮 RK3 + 聲波分裂步、Kessler 暖雨、Smagorinsky 亂流、海面通量；通過 Straka 密度流基準，Weisman–Klemp 超大胞自然分裂；有 WebGPU 版本與 3D 雲體積檢視（`regional.html`）。
+- ⏭ 之後：熱帶氣旋（眼、眼牆、雙眼牆、眼牆置換）驗收 → 冰相微物理 → 由全球模式驅動的巢狀網格 → 龍捲尺度 LES。
 
 ## 執行 / Run
 
@@ -24,7 +25,7 @@ v0.1 是一次**完整重新設計**（原因與路線圖見 [`docs/ARCHITECTURE
 npm install
 npm test          # CPU 驗收（轉換、動力核心、水汽物理）/ CPU regressions
 npm run test:gpu  # WebGPU 驗收（headless Chromium + SwiftShader）/ GPU regressions
-npm run serve     # http://127.0.0.1:5173/
+npm run serve     # 全球模式 http://127.0.0.1:5173/ · 區域模式 http://127.0.0.1:5173/regional.html
 ```
 
 長期氣候積分 / Long climate runs (Node, writes `results/<preset>/`)：
@@ -52,7 +53,8 @@ npm run earth -- EARTH_T21 2 1             # 地球：季節、季風 / Earth: s
 | `src/model/moist/` | 濕熱力學、灰體輻射柱物理、Simplified Betts–Miller 對流 |
 | `src/gpu/` | WebGPU 版本：轉換、動力核心、水汽與柱物理；`src/gpu/tests/` GPU 驗收 |
 | `data/earth_t42.json` | ERA 地表高度與海陸遮罩（T42） |
-| `src/app/` | 瀏覽器介面：WebGL2 地球、Web Worker 模式（WebGPU/CPU）、剖面圖 |
+| `src/regional/` | 區域全可壓縮非靜力模式、Kessler 微物理、次網格／海面物理、熱帶氣旋設定 |
+| `src/app/` | 瀏覽器介面：WebGL2 地球、Web Worker 模式（WebGPU/CPU）、剖面圖；`src/app/regional/` 3D 雲體積檢視 |
 | `src/tools/` | Node 長期積分與 SVG 繪圖 |
 | `src/tests/` | 驗收測試 |
 | `docs/` | 架構與路線圖、物理規格、驗收計畫、UI 規格 |

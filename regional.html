@@ -30,7 +30,11 @@ a{color:#8fc1ff}
 <select id="exp">
 <option value="supercell">超大胞（Weisman–Klemp）/ Supercell (Weisman–Klemp)</option>
 <option value="tc">熱帶氣旋（f 平面，15 km）/ Tropical cyclone (f-plane, 15 km)</option>
+<option value="supercell_hr">超大胞 1 km（需 GPU）/ Supercell 1 km (GPU)</option>
+<option value="tc_hr">熱帶氣旋 5 km（需 GPU）/ Tropical cyclone 5 km (GPU)</option>
 </select>
+<label for="backendSel">計算後端 / Compute backend</label>
+<select id="backendSel"><option value="auto">自動：可用時用 WebGPU / Auto: WebGPU when available</option><option value="cpu">CPU Float64</option></select>
 <div id="desc" class="muted"></div>
 <p><button id="run">執行 / Run</button></p>
 <label for="speed">每輪步數 / Steps per tick</label><input id="speed" type="range" min="1" max="12" value="1" />
@@ -40,6 +44,7 @@ a{color:#8fc1ff}
 <label for="cloudK">雲的不透明度 / Cloud opacity</label><input id="cloudK" type="range" min="2" max="80" value="35" />
 <h2>診斷 / Diagnostics</h2>
 <div class="row"><span>網格 / Grid</span><span id="grid">—</span></div>
+<div class="row"><span>計算後端 / Backend</span><span id="backend">—</span></div>
 <div class="row"><span>模式時間 / Model time</span><span id="time">0</span></div>
 <div class="row"><span>速度 / Speed</span><span id="rate">—</span></div>
 <div class="row"><span>垂直速度 / Vertical velocity</span><span id="w">—</span></div>

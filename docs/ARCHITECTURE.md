@@ -72,11 +72,15 @@ The hydrostatic approximation is a scale-justified approximation of the real equ
 - `npm run test:gpu`：以 headless Chromium + SwiftShader 軟體 WebGPU 執行。Held–Suarez T21 100 步後 GPU/CPU 相對 L2 1.4e-5；濕水球 72 步後 T 6.6e-5、q 2.1e-3；GPU 單獨 20 天 P = E = 4.40 mm/day。
 - 瀏覽器 worker 自動使用 WebGPU（不可用時退回 CPU），新增 T85 設定。實際 GPU 速度需在使用者裝置上量測。
 
-### R5 區域非靜力巢狀模式 / Regional non-hydrostatic nest
-- 全可壓縮非靜力方程、笛卡兒 C 網格、分裂顯式聲波 + 垂直隱式（CM1/WRF 類）。
-- 一向巢狀：由全球模式提供側邊界與初始場。
-- 雲微物理（暖雨 → 冰相：雲冰、雪、霰）、邊界層亂流。
-- 驗收：熱泡、密度流、Weisman–Klemp 超大胞；颱風眼、眼牆、同心眼牆與眼牆置換的自然演化。
+### R5 區域非靜力模式 / Regional non-hydrostatic model — **核心、濕物理、GPU 已完成；熱帶氣旋驗收中 / core, moist physics and GPU done; TC validation running**
+- `src/regional/core.ts`：全可壓縮非靜力方程（u, v, w, θ, Exner 擾動 π′；靜力平衡基本態），笛卡兒 C 網格，Wicker–Skamarock RK3 + 分裂顯式聲波步，垂直隱式（偏心 Crank–Nicolson）w–π′ 求解，散度阻尼，5 階迎風通量型平流，f 平面科氏力，模式頂 Rayleigh 吸收層，週期側邊界。
+- `src/regional/kessler.ts`：Kessler 暖雨（自動轉換、碰併、飽和調整與潛熱、雨滴蒸發、KW78 終端落速沉降）。
+- `src/regional/physics.ts`：Smagorinsky–Lilly 次網格亂流（水平／垂直混合長度、Ri 修正）、海面 bulk 通量、Newtonian 輻射冷卻（上限 2 K/day）。
+- `src/regional/tropical.ts`：濕熱帶探空、Rotunno–Emanuel (1987) 平衡初始渦旋、颱風診斷。
+- `src/gpu/regionalGpu.ts`：完整 WebGPU 版本（f32），對 CPU 驗證：濕對流 10 步 u 相對誤差 1.3e-6、雨水 1.7e-5。
+- 驗收：靜止大氣保持靜止；Straka (1993) 密度流 100 m：θ′ 最低 −9.79 K（參考 −9.77）、鋒面 15.15 km（參考 15.54）；聲速與伽利略不變性檢查；Weisman–Klemp 超大胞在單向風切中分裂成左右移動的旋轉超大胞，上升氣流 25–34 m/s 維持 2 小時；總水量守恆 9e-4。
+- `regional.html`：雲（白）與雨（藍）的體積光線追蹤 3D 檢視，WebGPU 可用時自動使用；1 km 超大胞與 5 km 熱帶氣旋設定需 GPU。
+- 下一步：冰相微物理（雲冰、雪、霰）、較高解析颱風（眼牆、雙眼牆與眼牆置換）、由全球模式提供側邊界的一向巢狀。
 
 ### R6 局地 LES / Local LES
 - 50–250 m 格距的超大胞環境，觀察龍捲風旋生（tornadogenesis）是否自然出現。
