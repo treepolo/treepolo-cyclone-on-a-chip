@@ -8,6 +8,7 @@ import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../..
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, sampleSurface, NestSpec } from '../../regional/nest.js';
+import { tornadoExperiment, StormTracker } from '../../regional/supercell.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 let m: RegionalModel | null = null;
@@ -20,6 +21,8 @@ let gpu: GpuRegional | null = null;
 let gpuDevice: GPUDevice | null = null;
 let busy = false;
 let physCfg: RegionalPhysicsConfig | null = null;
+let frameVel = { u: 0, v: 0 };
+let tracker: StormTracker | null = null, lastTrack = 0;
 
 async function getGpu(): Promise<GPUDevice | null> {
   if (gpuDevice) return gpuDevice;
@@ -33,9 +36,19 @@ async function getGpu(): Promise<GPUDevice | null> {
 
 const post = (msg: FromRegionalWorker, tr: Transferable[] = []): void => (self as unknown as Worker).postMessage(msg, tr);
 
-function build(exp: RegionalExperiment): { dt: number; description: string } {
+function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; description: string } {
   experiment = exp;
   physCfg = null;
+  frameVel = { u: 0, v: 0 };
+  tracker = null;
+  if (exp === 'tornado') {
+    // GPU: 200 m LES over 40 km; CPU: a 500 m preview (mesocyclone scale only)
+    const e = gpuOk ? tornadoExperiment(200, 40000, 64, 250, 2, 8) : tornadoExperiment(500, 30000, 40, 400, 3, 6);
+    m = e.model; mp = new IceMicrophysics(m); physCfg = e.physics; frameVel = e.frame;
+    tracker = new StormTracker(); lastTrack = 0;
+    new RegionalPhysics(m, physCfg);
+    return { dt: m.c.dt, description: e.description };
+  }
   if (exp === 'supercell' || exp === 'supercell_hr') {
     const hr = exp === 'supercell_hr';
     const L = 120000, dx = hr ? 1000 : 2000, nx = L / dx, nz = hr ? 60 : 40, dz = hr ? 333.3333 : 500, dtm = hr ? 3 : 6;
@@ -92,13 +105,13 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     if (msg.type === 'init') {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
-      const info = build(msg.experiment);
+      const device = msg.backend === 'cpu' ? null : await getGpu();
+      const info = build(msg.experiment, !!device);
       gpu = null;
       let note = '';
-      const device = msg.backend === 'cpu' ? null : await getGpu();
       if (device) { gpu = new GpuRegional(device, m!, { moist: true, physics: physCfg, ice: true }); gpu.uploadFrom(m!); }
       else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
-      if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
+      if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr' || msg.experiment === 'tornado')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
       const c = m!.c;
       post({ type: 'ready', land: null, experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note });
       await sendFrame();
@@ -129,6 +142,7 @@ async function loop(): Promise<void> {
       try {
         if (gpu) { gpu.step(stepsPerTick * 2); rateSteps += stepsPerTick * 2; await gpu.device.queue.onSubmittedWorkDone(); }
         else for (let s = 0; s < stepsPerTick; s++) { m.step(); mp.apply(m.c.dt); rateSteps++; }
+        if (tracker && m.time - lastTrack >= 600) { lastTrack = m.time; await followStorm(); }
         if (performance.now() - lastFrame > 300) await sendFrame();
       } catch (e) { running = false; post({ type: 'error', message: String(e) }); }
       busy = false;
@@ -140,6 +154,23 @@ async function loop(): Promise<void> {
 }
 void loop();
 
+/** Keep the storm inside the periodic domain: Galilean frame shift and whole-cell re-centring
+ *  (exact symmetries); on the GPU the model is rebuilt with the new frame velocity. */
+async function followStorm(): Promise<void> {
+  if (!m || !mp || !tracker || !physCfg) return;
+  await syncFromGpu();
+  const a = tracker.update(m);
+  if (!a || (!a.du && !a.dv && !a.di && !a.dj)) return;
+  if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; physCfg.frameVel = frameVel; }
+  if (a.di || a.dj) m.roll(a.di, a.dj, [mp.rainAcc, mp.snowAcc]);
+  if (gpu) {
+    const device = gpu.device;
+    gpu.destroy();
+    gpu = new GpuRegional(device, m, { moist: true, physics: physCfg, ice: true });
+    gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
+  }
+}
+
 /** Copy the GPU state into the CPU model arrays (display and diagnostics reuse the CPU code). */
 async function syncFromGpu(): Promise<void> {
   if (!gpu || !m || !mp) return;
@@ -148,7 +179,7 @@ async function syncFromGpu(): Promise<void> {
   arrs.forEach((a, f) => { for (let i = 0; i < size; i++) a[i] = st[f * size + i]!; });
   const rain = await gpu.readRain(), snow = await gpu.readSnow();
   for (let j = 0; j < m.c.ny; j++) for (let i = 0; i < m.c.nx; i++) { mp.rainAcc[j * m.c.nx + i] = rain[m.idx(i, j, 0)]!; mp.snowAcc[j * m.c.nx + i] = snow[m.idx(i, j, 0)]!; }
-  m.time = gpu.time;
+  m.time = gpu.time; m.steps = gpu.steps;
 }
 
 async function sendFrame(): Promise<void> {
@@ -184,6 +215,14 @@ async function sendFrame(): Promise<void> {
   else { lo = 0; hi = Math.max(hi, ground === 'rain' || ground === 'snow' ? 5 : 10); }
   let dp: number | null = null, rmw: number | null = null, eyewalls: { r: number; v: number }[] | null = null;
   if (experiment === 'tc' || experiment === 'tc_hr') { const r = tcMetrics(m); dp = r.pmin - dpEnv; rmw = r.rmw; eyewalls = eyewallProfile(m).peaks; }
+  // lowest-level vertical vorticity (cell corners) and ground-relative wind
+  let zetaMax = 0, vGround = 0;
+  for (let j = 1; j < ny; j++) for (let i = 1; i < nx; i++) {
+    const q = m.idx(i, j, 0);
+    const zeta = (m.v[q]! - m.v[q - 1]!) / dx - (m.u[q]! - m.u[q - m.sx]!) / m.c.dy;
+    zetaMax = Math.max(zetaMax, zeta);
+    vGround = Math.max(vGround, Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!) + frameVel.u, 0.5 * (m.v[q]! + m.v[q + m.sx]!) + frameVel.v));
+  }
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
-    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls }, stepsPerSecond: rate }, [cloud.buffer, rain.buffer, g.buffer]);
+    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround }, stepsPerSecond: rate }, [cloud.buffer, rain.buffer, g.buffer]);
 }

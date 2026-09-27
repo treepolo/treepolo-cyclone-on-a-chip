@@ -22,6 +22,19 @@ export interface RegionalPhysicsConfig {
   /** per-column surface (nx*ny, row-major j*nx+i): skin temperature (K) and moisture availability
    *  (1 = sea, bucket fraction over land). Overrides the uniform sst (nested runs). */
   surface?: { tsk: ArrayLike<number>; wet: ArrayLike<number> } | null;
+  /** land roughness length (m): if set, the drag coefficient is the neutral log-law value
+   *  (kappa / ln(z1/z0))^2 at the lowest model level z1 instead of the sea-surface formula */
+  z0?: number;
+  /** ground-relative velocity of the model frame (m/s) when the domain translates with a storm:
+   *  surface drag and fluxes use the ground-relative wind */
+  frameVel?: { u: number; v: number };
+}
+
+/** Drag coefficient at the lowest level: neutral log law over land (z0 given) or the Donelan-type
+ *  sea-surface formula 1e-3 (1 + 0.07 U) capped at 2.4e-3. */
+export function dragCoefficient(c: RegionalPhysicsConfig, z1: number, spd: number): number {
+  if (c.z0 && c.z0 > 0) return (0.4 / Math.log(z1 / c.z0)) ** 2;
+  return Math.min(2.4e-3, 1e-3 * (1 + 0.07 * spd));
 }
 
 /** Surface state used by the bulk fluxes: per-column skin temperature and wetness, surface Exner
@@ -113,10 +126,11 @@ export class RegionalPhysics {
         const esS = 611.2 * Math.exp(17.67 * (tsk - 273.15) / (tsk - 29.65));
         const qsS = 0.622 * esS / (sf.psfc - 0.378 * esS);
         const thS = tsk / sf.pis;
-        const ua = 0.5 * (u[q]! + u[q + 1]!), va = 0.5 * (v[q]! + v[q + sx]!);
+        // ground-relative wind (the model frame may translate with a storm at frameVel)
+        const ua = 0.5 * (u[q]! + u[q + 1]!) + (c.frameVel?.u ?? 0), va = 0.5 * (v[q]! + v[q + sx]!) + (c.frameVel?.v ?? 0);
         const spd = Math.max(Math.hypot(ua, va), 1);
         // drag coefficient: 1e-3 (1 + 0.07 U) capped at 2.4e-3 (Donelan-type saturation)
-        const cd = Math.min(2.4e-3, 1e-3 * (1 + 0.07 * spd));
+        const cd = dragCoefficient(c, 0.5 * dz, spd);
         const taux = cd * spd * ua, tauy = cd * spd * va;
         t.fu[q] = t.fu[q]! - 0.5 * taux / dz; t.fu[q + 1] = t.fu[q + 1]! - 0.5 * taux / dz;
         t.fv[q] = t.fv[q]! - 0.5 * tauy / dz; t.fv[q + sx] = t.fv[q + sx]! - 0.5 * tauy / dz;

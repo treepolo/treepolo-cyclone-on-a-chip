@@ -102,7 +102,7 @@ const MOIST: bool = ${opts.moist}; const PHYS: bool = ${!!ph}; const NQ: u32 = $
 const OPEN: bool = ${open}; const NEST: bool = ${!!bnd}; const HASPP: bool = ${!!bnd?.pp};
 const NRELAX: u32 = ${m.c.relaxCells ?? 5}u; const RTAU: f32 = ${m.c.relaxTau ?? 300};
 const LH2: f32 = ${ph ? ph.lh * ph.lh : 0}; const LV2: f32 = ${ph ? ph.lv * ph.lv : 0};
-const PIS: f32 = ${sfc ? sfc.pis : 1}; const PSFC: f32 = ${sfc ? sfc.psfc : 1e5}; const CK: f32 = ${ph ? ph.ck : 0}; const RADTAU: f32 = ${ph ? ph.radTau : 0}; const RADMAX: f32 = ${ph ? ph.radMax : 0};
+const Z0: f32 = ${ph?.z0 ?? 0}; const FRU: f32 = ${ph?.frameVel?.u ?? 0}; const FRV: f32 = ${ph?.frameVel?.v ?? 0}; const PIS: f32 = ${sfc ? sfc.pis : 1}; const PSFC: f32 = ${sfc ? sfc.psfc : 1e5}; const CK: f32 = ${ph ? ph.ck : 0}; const RADTAU: f32 = ${ph ? ph.radTau : 0}; const RADMAX: f32 = ${ph ? ph.radMax : 0};
 struct P { dts: f32, dtStage: f32, dtBig: f32, pad: f32 };
 fn ix(i: u32, j: u32, k: u32) -> u32 { return k * PL + (j + HH) * SX + (i + HH); }
 fn f5(a0: f32, a1: f32, a2: f32, a3: f32, a4: f32, a5: f32, vel: f32) -> f32 {
@@ -201,14 +201,24 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     this.device.queue.writeBuffer(this.B, 0, bd);
   }
 
-  /** Copy the CPU model state to the GPU. */
-  uploadFrom(m: RegionalModel): void {
+  /** Copy the CPU model state to the GPU (optionally with surface precipitation accumulations, [j][i]). */
+  uploadFrom(m: RegionalModel, acc?: { rain: ArrayLike<number>; snow: ArrayLike<number> }): void {
     const size = m.size, d = new Float32Array(this.nf * size);
     const fields = [m.u, m.v, m.w, m.th, m.pp, ...m.scalars.slice(0, this.nq)];
     fields.forEach((a, f) => { if (a) d.set(Float32Array.from(a), f * size); });
     this.device.queue.writeBuffer(this.S, 0, d);
-    this.device.queue.writeBuffer(this.aux, 0, new Float32Array(4 * size));
+    const aux = new Float32Array(4 * size);
+    if (acc) for (let j = 0; j < m.c.ny; j++) for (let i = 0; i < m.c.nx; i++) {
+      const q = m.idx(i, j, 0), c = j * m.c.nx + i;
+      aux[2 * size + q] = acc.rain[c]!; aux[3 * size + q] = acc.snow[c]!;
+    }
+    this.device.queue.writeBuffer(this.aux, 0, aux);
     this.time = m.time; this.steps = m.steps;
+  }
+
+  /** Release GPU buffers. */
+  destroy(): void {
+    for (const b of [this.S, this.S0, this.F, this.aux, this.B, this.R, ...this.params]) b?.destroy();
   }
 
   step(n = 1): void {
@@ -578,23 +588,27 @@ const SURFACE_WGSL = /* wgsl */`
 @group(0) @binding(0) var<storage, read> S: array<f32>;
 @group(0) @binding(1) var<storage, read_write> F: array<f32>;
 @group(0) @binding(2) var<storage, read> SF: array<f32>;   // skin temperature, wetness (per column)
+fn cdrag(spd: f32) -> f32 {
+  if (Z0 > 0.0) { let l = 0.4 / log(0.5 * DZ / Z0); return l * l; }
+  return min(2.4e-3, 1.0e-3 * (1.0 + 0.07 * spd));
+}
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
   if (t >= NX * NY) { return; }
   let j = t / NX; let i = t % NX;
   let q = ix(i, j, 0u);
-  let ua = 0.5 * (S[q] + S[q + 1u]); let va = 0.5 * (S[SIZE + q] + S[SIZE + q + SX]);
+  let ua = 0.5 * (S[q] + S[q + 1u]) + FRU; let va = 0.5 * (S[SIZE + q] + S[SIZE + q + SX]) + FRV;
   let spd = max(sqrt(ua * ua + va * va), 1.0);
-  let cd = min(2.4e-3, 1.0e-3 * (1.0 + 0.07 * spd));
+  let cd = cdrag(spd);
   let taux = cd * spd * ua; let tauy = cd * spd * va;
   // each u/v face is shared by two columns: apply half of each column's stress to its two faces
   // (atomic-free: every thread only writes its own west/south face with its own and neighbour's share)
   let qw = ix((i + NX - 1u) % NX, j, 0u); let qs = ix(i, (j + NY - 1u) % NY, 0u);
-  let uw = 0.5 * (S[qw] + S[qw + 1u]); let vw = 0.5 * (S[SIZE + qw] + S[SIZE + qw + SX]);
-  let spw = max(sqrt(uw * uw + vw * vw), 1.0); let cdw = min(2.4e-3, 1.0e-3 * (1.0 + 0.07 * spw));
-  let us = 0.5 * (S[qs] + S[qs + 1u]); let vs = 0.5 * (S[SIZE + qs] + S[SIZE + qs + SX]);
-  let sps = max(sqrt(us * us + vs * vs), 1.0); let cds = min(2.4e-3, 1.0e-3 * (1.0 + 0.07 * sps));
+  let uw = 0.5 * (S[qw] + S[qw + 1u]) + FRU; let vw = 0.5 * (S[SIZE + qw] + S[SIZE + qw + SX]) + FRV;
+  let spw = max(sqrt(uw * uw + vw * vw), 1.0); let cdw = cdrag(spw);
+  let us = 0.5 * (S[qs] + S[qs + 1u]) + FRU; let vs = 0.5 * (S[SIZE + qs] + S[SIZE + qs + SX]) + FRV;
+  let sps = max(sqrt(us * us + vs * vs), 1.0); let cds = cdrag(sps);
   var shw = cdw * spw * uw; var shs = cds * sps * vs;
   if (OPEN && i == 0u) { shw = 0.0; }
   if (OPEN && j == 0u) { shs = 0.0; }

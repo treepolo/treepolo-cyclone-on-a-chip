@@ -59,7 +59,8 @@ for (let n = 0; n < nSnap; n++) {
     // mean-sea-level pressure: hydrostatic reduction with a 6.5 K/km lapse rate from the lowest level
     const Ts = Tb * Math.pow(1 / lev[K - 1]!, DRY_AIR.rd * 0.0065 / EARTH.gravity);
     const zs = phis[p]! / EARTH.gravity;
-    slp[p] = ps * Math.pow(1 + 0.0065 * zs / Ts, EARTH.gravity / (DRY_AIR.rd * 0.0065)) / 100;
+    // not meaningful over high terrain (standard practice: masked above 1500 m)
+    slp[p] = zs > 1500 ? NaN : ps * Math.pow(1 + 0.0065 * zs / Ts, EARTH.gravity / (DRY_AIR.rd * 0.0065)) / 100;
     pr[p] = (physics.f.precipConv[p]! + physics.f.precipLS[p]! - acc0[p]!) / 6 * 24;
     u250[p] = g.u[k250 * ng + p]!; v250[p] = g.v[k250 * ng + p]!; spd[p] = Math.hypot(u250[p]!, v250[p]!);
   }
@@ -69,7 +70,6 @@ for (let n = 0; n < nSnap; n++) {
   writeFileSync(`${outDir}/slp_t850_${tag}.svg`, mapSvg({ title: `sea-level pressure (contours, 4 hPa) over 850-hPa temperature, ${when}`, lat: latDeg, lon: lonDeg, values: t850, units: '°C', contourStep: 5, latRange: [-80, 80], outline: land, diverging: true, range: [-30, 30], overlay: { values: slp, step: 4 } }, 1000, 480));
   writeFileSync(`${outDir}/precip_${tag}.svg`, mapSvg({ title: `precipitation (6-h mean), ${when}`, lat: latDeg, lon: lonDeg, values: pr, units: 'mm/day', contourStep: 10, latRange: [-80, 80], outline: land, range: [0, 40] }, 1000, 480));
   writeFileSync(`${outDir}/jet250_${tag}.svg`, mapSvg({ title: `wind speed and vectors at sigma=${lev[k250]!.toFixed(2)}, ${when}`, lat: latDeg, lon: lonDeg, values: spd, units: 'm/s', contourStep: 20, latRange: [-80, 80], outline: land, range: [0, 80], vectors: { u: u250, v: v250, stride: nlon > 64 ? 3 : 2, scale: 0.5 } }, 1000, 480));
-  let slpMin = Infinity; for (const x of slp) slpMin = Math.min(slpMin, x);
-  console.log(`${when}: SLP min ${slpMin.toFixed(1)} hPa, T850 ${Math.min(...t850).toFixed(1)}..${Math.max(...t850).toFixed(1)} °C, max 250-hPa wind ${Math.max(...spd).toFixed(1)} m/s`);
+  let slpMin = Infinity, pMin = 0; for (let p = 0; p < ng; p++) if (slp[p]! < slpMin) { slpMin = slp[p]!; pMin = p; }
+  console.log(`${when}: SLP min ${slpMin.toFixed(1)} hPa at ${latDeg[Math.floor(pMin / nlon)]!.toFixed(0)}°, ${lonDeg[pMin % nlon]!.toFixed(0)}°E, T850 ${Math.min(...t850).toFixed(1)}..${Math.max(...t850).toFixed(1)} °C, max 250-hPa wind ${Math.max(...spd).toFixed(1)} m/s`);
 }
-void nlat;

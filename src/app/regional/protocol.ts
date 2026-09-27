@@ -1,6 +1,6 @@
 // Messages between the regional-model UI and its worker.
 
-export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest';
+export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest' | 'tornado';
 
 /** Global-model state handed to the regional page for one-way nesting. Grid arrays are [k][lat][lon]. */
 export interface NestPayload {
@@ -35,7 +35,7 @@ export interface RegionalFrame {
   ground: Float32Array;       // [j][i]
   groundField: GroundField;
   groundRange: [number, number];
-  stats: { wmax: number; wmin: number; qcmax: number; qrmax: number; rainmax: number; vmax: number; dp: number | null; rmw: number | null; eyewalls: { r: number; v: number }[] | null };
+  stats: { wmax: number; wmin: number; qcmax: number; qrmax: number; rainmax: number; vmax: number; dp: number | null; rmw: number | null; eyewalls: { r: number; v: number }[] | null; zetaMax: number; vGround: number };
   stepsPerSecond: number;
 }
 

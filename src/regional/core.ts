@@ -525,6 +525,34 @@ export class RegionalModel {
     this.steps++;
   }
 
+  /**
+   * Galilean change of frame for periodic domains: the frame speeds up by (du, dv), so all winds
+   * (and the base / sponge wind) decrease by the same amount. Surface drag must use the updated
+   * ground-relative frame velocity (RegionalPhysicsConfig.frameVel). Exact for the equations.
+   */
+  shiftFrame(du: number, dv: number): void {
+    if (this.c.lateral === 'open') throw new Error('shiftFrame needs periodic lateral boundaries');
+    for (let i = 0; i < this.size; i++) { this.u[i] = this.u[i]! - du; this.v[i] = this.v[i]! - dv; }
+    for (let k = 0; k < this.c.nz; k++) { this.ub[k] = this.ub[k]! - du; this.vb[k] = this.vb[k]! - dv; }
+  }
+
+  /** Translate all prognostic fields by (di, dj) whole cells (periodic roll), e.g. to re-centre a storm. */
+  roll(di: number, dj: number, extra2d: Float64Array[] = []): void {
+    const { nx, ny } = this.c, nk = this.c.nz + 1;
+    const tmp = new Float64Array(nx * ny);
+    const mod = (a: number, n: number): number => ((a % n) + n) % n;
+    for (const a of [this.u, this.v, this.w, this.th, this.pp, ...this.scalars]) {
+      for (let k = 0; k < nk; k++) {
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) tmp[mod(j + dj, ny) * nx + mod(i + di, nx)] = a[this.idx(i, j, k)]!;
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) a[this.idx(i, j, k)] = tmp[j * nx + i]!;
+      }
+    }
+    for (const a of extra2d) {
+      tmp.set(a.subarray(0, nx * ny));
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) a[mod(j + dj, ny) * nx + mod(i + di, nx)] = tmp[j * nx + i]!;
+    }
+  }
+
   /** Set a horizontally uniform wind profile (also the damping-layer target). */
   setBaseWind(prof: (z: number) => { u: number; v: number }): void {
     const { nx, ny, nz } = this.c;

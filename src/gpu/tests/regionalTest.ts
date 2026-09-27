@@ -99,7 +99,7 @@ export async function regionalNestTests(): Promise<void> {
   const n2 = m.c.nx * m.c.ny;
   const tsk = Float64Array.from({ length: n2 }, (_, c) => 290 + 8 * (c % m.c.nx) / m.c.nx);
   const wet = Float64Array.from({ length: n2 }, (_, c) => (Math.floor(c / m.c.nx) < m.c.ny / 2 ? 1 : 0.3));
-  const cfg = { lh: 4000, lv: 100, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface: { tsk, wet } };
+  const cfg = { lh: 4000, lv: 100, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface: { tsk, wet }, z0: 0.1, frameVel: { u: 3, v: -2 } };
   new RegionalPhysics(m, cfg);
   for (let s = 0; s < 20; s++) { m.step(); mp.apply(60); }
   const g = new GpuRegional(device, m, { moist: true, physics: cfg, boundary });

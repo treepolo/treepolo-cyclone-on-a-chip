@@ -195,5 +195,26 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
   check('eyewall diagnostic: concentric eyewalls at ~20 and ~70 km', dbl.concentric && Math.abs(dbl.peaks[0]!.r - 20000) < 4000 && Math.abs(dbl.peaks[1]!.r - 70000) < 4000, dbl.peaks.map((p) => (p.r / 1000).toFixed(0)).join(','));
 }
 
+// 8. Whole-cell roll commutes with a model step (periodic translation invariance, used by the storm tracker)
+{
+  const cfg: RegionalConfig = { ...base, nx: 16, ny: 12, nz: 10, dx: 1000, dy: 1000, dz: 500, dt: 4, nsound: 6 };
+  const mk = (): RegionalModel => {
+    const m = new RegionalModel(cfg, weismanKlemp, 3);
+    m.setBaseWind((z) => ({ u: 5 + z / 1000, v: -2 }));
+    for (let k = 0; k < 10; k++) for (let j = 0; j < 12; j++) for (let i = 0; i < 16; i++) {
+      const q = m.idx(i, j, k);
+      m.th[q] = m.th[q]! + Math.exp(-(((i - 5) / 2) ** 2) - (((j - 4) / 2) ** 2) - (((k - 2) / 1.5) ** 2));
+      m.scalars[QV]![q] = m.qv0[k]!;
+    }
+    return m;
+  };
+  const a = mk(), b = mk();
+  a.roll(3, -2); a.step(); a.step();
+  b.step(); b.step(); b.roll(3, -2);
+  let d = 0;
+  for (const [x, y] of [[a.u, b.u], [a.w, b.w], [a.th, b.th], [a.pp, b.pp]] as const) for (let k = 0; k < 10; k++) for (let j = 0; j < 12; j++) for (let i = 0; i < 16; i++) d = Math.max(d, Math.abs(x[a.idx(i, j, k)]! - y[a.idx(i, j, k)]!));
+  check('regional: periodic roll commutes with time stepping (exact)', d < 1e-12, d);
+}
+
 void DRY_AIR;
 summary('regional');

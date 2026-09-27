@@ -131,7 +131,7 @@ export function mapSvg(p: MapPlot, width = 900, height = 300): string {
     const top = j === 0 ? 90 : 0.5 * (p.lat[j - 1]! + p.lat[j]!), bot = j === nl - 1 ? -90 : 0.5 * (p.lat[j]! + p.lat[j + 1]!);
     for (let i = 0; i < nx; i++) {
       const v = p.values[j * nx + i]!;
-      const t = p.diverging ? v / (amax || 1) : (v - vmin) / ((vmax - vmin) || 1);
+      const t = Math.max(-1, Math.min(1, p.diverging ? v / (amax || 1) : (v - vmin) / ((vmax - vmin) || 1)));
       out.push(`<rect x="${xOf(p.lon[i]! - dx / 2).toFixed(1)}" y="${yOf(top).toFixed(1)}" width="${(W / nx + 0.5).toFixed(1)}" height="${(yOf(bot) - yOf(top) + 0.5).toFixed(1)}" fill="${color(t, !!p.diverging)}"/>`);
     }
   }
@@ -140,7 +140,7 @@ export function mapSvg(p: MapPlot, width = 900, height = 300): string {
   if (p.overlay) {
     const ov = p.overlay, oval = (r: number, c: number): number => ov.values[rows[r]! * nx + (c % nx)]!;
     let omin = Infinity, omax = -Infinity;
-    for (const j of rows) for (let i = 0; i < nx; i++) { const v = ov.values[j * nx + i]!; omin = Math.min(omin, v); omax = Math.max(omax, v); }
+    for (const j of rows) for (let i = 0; i < nx; i++) { const v = ov.values[j * nx + i]!; if (!Number.isFinite(v)) continue; omin = Math.min(omin, v); omax = Math.max(omax, v); }
     for (let i = Math.ceil(omin / ov.step); i <= Math.floor(omax / ov.step); i++) {
       const d = contours(xs, ys, oval, i * ov.step + 1e-9);
       if (d) out.push(`<path d="${d}" stroke="#000" stroke-width="0.8" fill="none"/>`);
