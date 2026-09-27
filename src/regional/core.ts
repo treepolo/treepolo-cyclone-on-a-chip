@@ -54,6 +54,8 @@ export class RegionalModel {
   private readonly flux: Float64Array;
   /** buoyancy / extra slow forcing hook for w and theta (moist physics adds here) */
   buoyancy: ((m: RegionalModel, out: Float64Array) => void) | null = null;
+  /** sub-grid / surface / radiation slow tendencies hook */
+  physicsTend: ((m: RegionalModel, t: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }) => void) | null = null;
 
   constructor(cfg: RegionalConfig, sounding: (z: number) => { theta: number; qv: number }, nScalars = 0) {
     this.c = cfg;
@@ -297,6 +299,7 @@ export class RegionalModel {
         this.fw[q] = this.fw[q]! - rw * this.w[q]!;
       }
     }
+    if (this.physicsTend) this.physicsTend(this, { fu: this.fu, fv: this.fv, fw: this.fw, fth: this.fth, fsc: this.fsc });
     // constant eddy diffusion (tests)
     if (this.c.kdiff2 > 0) {
       this.diffuse(this.u, this.fu, nz); this.diffuse(this.v, this.fv, nz); this.diffuse(this.th, this.fth, nz, this.th0);

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>區域非靜力模式 / Regional Non-hydrostatic Model</title>
+<style>
+:root{--bg:#05070a;--panel:#0a0e13;--line:#26303b;--fg:#dbe5ef;--muted:#8da0b3}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+body{display:grid;grid-template-columns:minmax(0,1fr) 380px}
+#view{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+.panel{padding:14px 16px;border-left:1px solid var(--line);overflow:auto;background:var(--panel);font-size:13px}
+h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:16px 0 6px;color:#b8c6d4}
+.muted{color:var(--muted);font-size:12px;line-height:1.5}
+.row{display:flex;justify-content:space-between;gap:10px;line-height:1.7}.row span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+button,select,input{font:inherit;background:#101821;color:var(--fg);border:1px solid #334354;padding:5px 8px;border-radius:4px}
+label{display:block;margin:6px 0 2px;color:#b8c6d4} select,input[type=range]{width:100%;box-sizing:border-box}
+.log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:var(--bg);padding:8px;border:1px solid #1d2833;max-height:120px;overflow:auto}
+a{color:#8fc1ff}
+@media(max-width:820px){body{grid-template-columns:1fr;grid-template-rows:60vh auto}.panel{border-left:0;border-top:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<section class="panel">
+<h1>區域非靜力模式 / Regional Non-hydrostatic Model</h1>
+<div class="muted">全可壓縮非靜力方程、笛卡兒 C 網格、RK3 + 聲波分裂步、Kessler 暖雨微物理。雲（白）與雨（藍）以體積光線追蹤繪製，垂直比例放大。 / Fully compressible non-hydrostatic equations, Cartesian C-grid, RK3 with split acoustic steps, Kessler warm rain. Cloud (white) and rain (blue) are volume ray-marched; vertical scale exaggerated.</div>
+<div class="muted"><a href="index.html">← 全球模式 / Global model</a></div>
+<h2>實驗 / Experiment</h2>
+<select id="exp">
+<option value="supercell">超大胞（Weisman–Klemp）/ Supercell (Weisman–Klemp)</option>
+<option value="tc">熱帶氣旋（f 平面，15 km）/ Tropical cyclone (f-plane, 15 km)</option>
+</select>
+<div id="desc" class="muted"></div>
+<p><button id="run">執行 / Run</button></p>
+<label for="speed">每輪步數 / Steps per tick</label><input id="speed" type="range" min="1" max="12" value="1" />
+<label for="ground">地面場 / Ground field</label>
+<select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="wind">地面風速 / Surface wind speed</option><option value="theta">地面位溫擾動（冷池）/ Surface θ′ (cold pool)</option></select>
+<div id="legend" class="muted"></div>
+<label for="cloudK">雲的不透明度 / Cloud opacity</label><input id="cloudK" type="range" min="2" max="80" value="35" />
+<h2>診斷 / Diagnostics</h2>
+<div class="row"><span>網格 / Grid</span><span id="grid">—</span></div>
+<div class="row"><span>模式時間 / Model time</span><span id="time">0</span></div>
+<div class="row"><span>速度 / Speed</span><span id="rate">—</span></div>
+<div class="row"><span>垂直速度 / Vertical velocity</span><span id="w">—</span></div>
+<div class="row"><span>最大雲水 / Max cloud water</span><span id="qc">—</span></div>
+<div class="row"><span>最大雨水 / Max rain water</span><span id="qr">—</span></div>
+<div class="row"><span>最大累積雨量 / Max accumulated rain</span><span id="rainmax">—</span></div>
+<div class="row"><span>最大地面風 / Max surface wind</span><span id="vmax">—</span></div>
+<div class="row"><span>中心氣壓降 / Central pressure deficit</span><span id="dp">—</span></div>
+<h2>紀錄 / Log</h2><div id="log" class="log"></div>
+</section>
+<script type="module" src="./dist/app/regional/main.js"></script>
+</body>
+</html>
