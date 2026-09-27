@@ -11,7 +11,7 @@ import { DAY, EARTH } from '../core/constants.js';
 import { EARTH_PRESETS, EarthData, createEarth } from '../model/presets.js';
 import type { Dycore } from '../model/dycore.js';
 import { nestFromGlobal, nestTargets, sampleSurface, GlobalSnapshot, NestSpec } from '../regional/nest.js';
-import { KesslerMicrophysics, QC, QR } from '../regional/kessler.js';
+import { IceMicrophysics, QC, QR, QI, QS, QG } from '../regional/ice.js';
 import { RegionalPhysics } from '../regional/physics.js';
 import type { BoundaryTargets } from '../regional/core.js';
 import { xySvg } from './plot.js';
@@ -80,9 +80,9 @@ if (latS === 'auto') {
 const fine = dxKm < 15;
 const spec: NestSpec = { lat0, lon0, L: 1200000, dx: dxKm * 1000, nz: fine ? 30 : 24, dz: fine ? 600 : 750, dt: fine ? 40 : 60, nsound: 6 };
 let snap = snapshot(gm);
-const nest = nestFromGlobal(snap, spec, 3);
+const nest = nestFromGlobal(snap, spec, 6);
 const m = nest.model, { nx, ny, nz } = m.c, n2 = nx * ny;
-const mp = new KesslerMicrophysics(m);
+const mp = new IceMicrophysics(m);
 const wet = Float64Array.from({ length: ng }, (_, p) => physics.surface.land[p] ? Math.min(1, physics.f.bucket[p]! / (0.75 * physics.cfg.bucketMax)) : 1);
 const tsk = sampleSurface(snap, spec, physics.f.sst), wetR = sampleSurface(snap, spec, wet);
 const land: number[] = Array.from(sampleSurface(snap, spec, physics.surface.land), (x) => (x > 0.5 ? 1 : 0));
@@ -135,12 +135,12 @@ function maps(tag: string): void {
     const q = m.idx(i, j, k1), c = j * nx + i;
     u[c] = 0.5 * (m.u[q]! + m.u[q + 1]!); v[c] = 0.5 * (m.v[q]! + m.v[q + m.sx]!); spd[c] = Math.hypot(u[c]!, v[c]!);
     let s = 0;
-    for (let k = 0; k < nz; k++) { const qq = m.idx(i, j, k); s += m.rho0[k]! * (m.scalars[QC]![qq]! + m.scalars[QR]![qq]!) * spec.dz; }
+    for (let k = 0; k < nz; k++) { const qq = m.idx(i, j, k); for (const sp of [QC, QR, QI, QS, QG]) s += m.rho0[k]! * m.scalars[sp]![qq]! * spec.dz; }
     cw[c] = s;
   }
   writeFileSync(`${outDir}/rain_${tag}.svg`, xySvg({ title: `accumulated rain, ${tag}`, nx, ny, dx: spec.dx, values: rain, units: 'mm', diverging: false, contourStep: 20, outline: land }));
   writeFileSync(`${outDir}/wind1km_${tag}.svg`, xySvg({ title: `wind at ${(m.zc[k1]! / 1000).toFixed(1)} km, ${tag}`, nx, ny, dx: spec.dx, values: spd, units: 'm/s', diverging: false, contourStep: 5, outline: land, vectors: { u, v, stride: 4, scale: 1.2 } }));
-  writeFileSync(`${outDir}/condensate_${tag}.svg`, xySvg({ title: `column cloud + rain water, ${tag}`, nx, ny, dx: spec.dx, values: cw, units: 'kg/m2', diverging: false, contourStep: 2, outline: land }));
+  writeFileSync(`${outDir}/condensate_${tag}.svg`, xySvg({ title: `column condensate (cloud, rain, ice, snow, graupel), ${tag}`, nx, ny, dx: spec.dx, values: cw, units: 'kg/m2', diverging: false, contourStep: 2, outline: land }));
 }
 
 for (let s = 1; s <= nSteps; s++) {

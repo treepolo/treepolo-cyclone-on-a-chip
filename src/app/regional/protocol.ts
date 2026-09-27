@@ -16,7 +16,7 @@ export interface NestPayload {
 /** 'meso': 1200 km at 12 km (fronts, cyclones, monsoon rain bands); 'storm': 480 km at 4 km (convection-permitting) */
 export type NestSize = 'meso' | 'storm';
 export const NEST_HALF_WIDTH_KM: Record<NestSize, number> = { meso: 600, storm: 240 };
-export type GroundField = 'rain' | 'wind' | 'theta';
+export type GroundField = 'rain' | 'wind' | 'theta' | 'snow';
 
 export type ToRegionalWorker =
   | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu' }

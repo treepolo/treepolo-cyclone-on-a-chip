@@ -6,6 +6,7 @@ import { tropicalSounding, insertVortex } from '../../regional/tropical.js';
 import { GpuRegional } from '../regionalGpu.js';
 import { gcheck, getDevice } from './harness.js';
 import { nestFromGlobal, GlobalSnapshot } from '../../regional/nest.js';
+import { IceMicrophysics, QI, QS, QG } from '../../regional/ice.js';
 
 function cmp(m: RegionalModel, g: Float32Array, f: number, a: Float64Array, nk: number): number {
   let e = 0, s = 0;
@@ -112,4 +113,52 @@ export async function regionalNestTests(): Promise<void> {
   gcheck('regional nest (open BC, land/sea surface), 10 steps: theta rel L2 < 1e-5', dth < 1e-5, dth);
   gcheck('regional nest (open BC, land/sea surface), 10 steps: pi\' rel L2 < 1e-3', dpp < 1e-3, dpp);
   gcheck('regional nest (open BC, land/sea surface), 10 steps: qv rel L2 < 1e-3', dq < 1e-3, dq);
+}
+
+/** Six-class ice microphysics: GPU vs CPU in a deep convective cloud (Weisman–Klemp sounding). */
+export async function regionalIceTests(): Promise<void> {
+  const device = await getDevice();
+  const nx = 20, nz = 30, dx = 3000, dz = 600;
+  const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: 6, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 5000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, 6);
+  const mp = new IceMicrophysics(m);
+  m.setBaseWind((z) => ({ u: 10 * Math.tanh(z / 3000) - 5, v: 2 }));
+  for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+  const c = nx * dx / 2;
+  for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+    const r = Math.sqrt((((i + 0.5) * dx - c) / 9000) ** 2 + (((j + 0.5) * dx - c) / 9000) ** 2 + ((m.zc[k]! - 1400) / 1400) ** 2);
+    if (r < 1) m.th[m.idx(i, j, k)] = m.th[m.idx(i, j, k)]! + 2 * Math.cos(0.5 * Math.PI * r) ** 2;
+  }
+  for (let s = 0; s < 200; s++) { m.step(); mp.apply(6); }     // 20 min: glaciating anvil
+  const g = new GpuRegional(device, m, { moist: true, physics: null, ice: true });
+  g.uploadFrom(m);
+  for (const n of [1, 10]) {
+    const todo = n === 1 ? 1 : 9;
+    for (let s = 0; s < todo; s++) { m.step(); mp.apply(6); }
+    g.step(todo);
+    const st = await g.readState();
+    const du = cmp(m, st, 0, m.u, nz), dth = cmp(m, st, 3, m.th, nz);
+    const d = [QV, QC, QR, QI, QS, QG].map((sp) => cmp(m, st, 5 + sp, m.scalars[sp]!, nz));
+    const tol = n === 1 ? 1e-4 : 2e-3;
+    gcheck(`regional ice, ${n} steps: u rel L2 < ${tol}`, du < tol, du);
+    gcheck(`regional ice, ${n} steps: theta rel L2 < ${tol / 10}`, dth < tol / 10, dth);
+    gcheck(`regional ice, ${n} steps: qv qc qr qi qs qg rel L2 < ${tol * 20}`, d.every((x) => x < tol * 20), d.map((x) => x.toExponential(1)).join(' '));
+  }
+  let qi = 0, qs = 0, qg = 0;
+  for (let q = 0; q < m.size; q++) { qi = Math.max(qi, m.scalars[QI]![q]!); qs = Math.max(qs, m.scalars[QS]![q]!); qg = Math.max(qg, m.scalars[QG]![q]!); }
+  gcheck('regional ice test case exercises the ice paths (qi, qg > 0.05 g/kg; snow present)', qi > 5e-5 && qs > 1e-8 && qg > 5e-5, `qi ${(qi * 1e3).toFixed(2)} qs ${(qs * 1e3).toFixed(4)} qg ${(qg * 1e3).toFixed(2)} g/kg`);
+}
+
+/** Timing of one GPU step for the app's supercell configuration (Kessler vs ice). */
+export async function regionalPerf(): Promise<void> {
+  const device = await getDevice();
+  for (const ice of [false, true]) {
+    const nx = 60, nz = 40, dx = 2000;
+    const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz: 500, dt: 6, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, ice ? 6 : 3);
+    const g = new GpuRegional(device, m, { moist: true, physics: null, ice });
+    g.uploadFrom(m);
+    g.step(1); await device.queue.onSubmittedWorkDone();
+    const t0 = performance.now();
+    g.step(3); await device.queue.onSubmittedWorkDone();
+    gcheck(`perf supercell 60x60x40 ice=${ice}: ms per step`, true, ((performance.now() - t0) / 3).toFixed(0));
+  }
 }

@@ -7,6 +7,7 @@
 
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { RegionalPhysicsConfig, surfaceState } from '../regional/physics.js';
+import { ICE, LF, gammaFn } from '../regional/ice.js';
 
 const WG = 64;
 
@@ -44,7 +45,7 @@ export class GpuRegional {
   readonly device: GPUDevice;
   readonly cpu: RegionalModel;
   readonly S: GPUBuffer; readonly S0: GPUBuffer; readonly F: GPUBuffer;
-  readonly aux: GPUBuffer;       // [0] ppOld, [1] eddy-viscosity deformation, [2] rain accumulation (2-D, level 0)
+  readonly aux: GPUBuffer;       // [0] ppOld, [1] eddy-viscosity deformation, [2] precipitation and [3] frozen precipitation accumulation (2-D, level 0)
   B: GPUBuffer | null = null;
   R: GPUBuffer | null = null;    // positive-definite limiter ratios (moisture species)    // open-boundary relaxation targets: u, v, theta, qv, pi'
   /** number of prognostic fields (5 + moisture species) */
@@ -66,7 +67,7 @@ export class GpuRegional {
     this.nf = NF;
     const buf = (bytes: number): GPUBuffer => device.createBuffer({ size: Math.max(16, bytes), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.S = buf(NF * size * 4); this.S0 = buf(NF * size * 4); this.F = buf(NF * size * 4);
-    this.aux = buf(3 * size * 4);
+    this.aux = buf(4 * size * 4);
     // base-state table: per level (nz+1 entries each)
     const L = nz + 1, cp = 1004.5, rd = 287.05, cv = cp - rd;
     const base = new Float32Array(14 * L);
@@ -161,7 +162,8 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     const haloR = this.R ? disp(pHalo, bg(pHalo, [this.R, haloParams(0, this.nq, nz)]), haloN(this.nq, nz)) : null;
     const nInt = nx * ny * nz, nInt1 = nx * ny * (nz + 1), nCol = nx * ny;
     const save = disp(pSave, bg(pSave, [this.S, this.S0]), NF * size);
-    const kes = disp(pKes, bg(pKes, [this.S, baseBuf, this.aux, this.params[2]!]), nCol);
+    const pIce = this.nq === 6 ? pipe(iceWgsl()) : null;
+    const kes = pIce ? disp(pIce, bg(pIce, [this.S, baseBuf, this.aux, this.params[2]!]), nCol) : disp(pKes, bg(pKes, [this.S, baseBuf, this.aux, this.params[2]!]), nCol);
     this.passes = [];
     const seq: ((p: GPUComputePassEncoder) => void)[] = [save];
     stages.forEach(([, ns], s) => {
@@ -205,7 +207,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     const fields = [m.u, m.v, m.w, m.th, m.pp, ...m.scalars.slice(0, this.nq)];
     fields.forEach((a, f) => { if (a) d.set(Float32Array.from(a), f * size); });
     this.device.queue.writeBuffer(this.S, 0, d);
-    this.device.queue.writeBuffer(this.aux, 0, new Float32Array(3 * size));
+    this.device.queue.writeBuffer(this.aux, 0, new Float32Array(4 * size));
     this.time = m.time; this.steps = m.steps;
   }
 
@@ -252,6 +254,9 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     pass.end();
     this.device.queue.submit([enc.finish()]);
   }
+
+  /** Accumulated frozen precipitation (snow + graupel + ice) at level 0, same layout as readRain. */
+  async readSnow(): Promise<Float32Array> { const b = this.cpu.size * 4; const all = await this.readBuffer(this.aux, 4 * b); return all.slice(3 * this.cpu.size, 4 * this.cpu.size); }
 
   async readRain(): Promise<Float32Array> {
     const size = this.cpu.size, bytes = size * 4;
@@ -792,3 +797,186 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 }
 `;
+
+// Six-class ice microphysics per column: WGSL port of src/regional/ice.ts (see there for references).
+const iceWgsl = (): string => {
+  const c = (x: number): string => (Number.isInteger(x) ? `${x}.0` : `${x}`);
+  const G3R = gammaFn(3 + ICE.BR), G3S = gammaFn(3 + ICE.BS), G3G = gammaFn(3 + ICE.BG), G4S = gammaFn(4 + ICE.BS), G4G = gammaFn(4 + ICE.BG);
+  const G5S = gammaFn((ICE.BS + 5) / 2), G5G = gammaFn((ICE.BG + 5) / 2);
+  return /* wgsl */`
+@group(0) @binding(0) var<storage, read_write> S: array<f32>;
+@group(0) @binding(1) var<storage, read> base: array<f32>;
+${BASE_FNS}
+@group(0) @binding(2) var<storage, read_write> A: array<f32>;
+@group(0) @binding(3) var<uniform> p: P;
+const T0: f32 = ${c(ICE.T0)}; const LVI: f32 = ${c(ICE.LV)}; const LSI: f32 = ${c(ICE.LS)}; const LFI: f32 = ${c(LF)}; const RV: f32 = ${c(ICE.RV)};
+const RHOW: f32 = 1000.0; const N0R: f32 = ${c(ICE.N0R)}; const AR: f32 = ${c(ICE.AR)}; const BR: f32 = ${c(ICE.BR)};
+const RHOS: f32 = ${c(ICE.RHOS)}; const AS: f32 = ${c(ICE.AS)}; const BS: f32 = ${c(ICE.BS)};
+const N0G: f32 = ${c(ICE.N0G)}; const RHOG: f32 = ${c(ICE.RHOG)}; const AG: f32 = ${c(ICE.AG)}; const BG: f32 = ${c(ICE.BG)};
+const KAIR: f32 = ${c(ICE.KA)}; const MUA: f32 = ${c(ICE.MU)}; const MI0: f32 = ${c(ICE.MI0)}; const QI0: f32 = ${c(ICE.QI0)}; const QS0: f32 = ${c(ICE.QS0)};
+const BIGGB: f32 = ${c(ICE.BIGG_B)}; const BIGGA: f32 = ${c(ICE.BIGG_A)};
+const G3R: f32 = ${G3R}; const G3S: f32 = ${G3S}; const G3G: f32 = ${G3G}; const G4S: f32 = ${G4S}; const G4G: f32 = ${G4G}; const G5S: f32 = ${G5S}; const G5G: f32 = ${G5G};
+const PI_: f32 = 3.14159265;
+fn lam(rhox: f32, n0: f32, rq: f32) -> f32 { return pow(PI_ * rhox * n0 / max(rq, 1e-15), 0.25); }
+fn n0snow(T: f32) -> f32 { return min(2e8, 2e6 * exp(0.12 * max(0.0, T0 - T))); }
+fn inum(rqi: f32) -> f32 { return min(1e6, max(1e3, 5.38e7 * pow(max(rqi, 1e-20), 0.75))); }
+fn qvsw(T: f32, pr: f32) -> f32 { return 380.0 / pr * exp(17.27 * (T - 273.15) / (T - 35.86)); }
+fn qvsi(T: f32, pr: f32) -> f32 { return 380.0 / pr * exp(21.875 * (T - 273.15) / (T - 7.66)); }
+fn vfall(sp: u32, q: f32, rho: f32, rhoS: f32, T: f32) -> f32 {
+  if (q <= 1e-12) { return 0.0; }
+  let rq = rho * q; let dens = sqrt(rhoS / rho);
+  if (sp == 7u) { return 36.34 * pow(0.001 * rq, 0.1364) * dens; }
+  if (sp == 9u) { let l = lam(RHOS, n0snow(T), rq); return AS * G4S / (6.0 * pow(l, BS)) * dens; }
+  if (sp == 10u) { let l = lam(RHOG, N0G, rq); return AG * G4G / (6.0 * pow(l, BG)) * dens; }
+  let ni = inum(rq); let di = 11.9 * sqrt(rq / ni);
+  return min(1.49e4 * pow(di, 1.31), 3.0);
+}
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= NX * NY) { return; }
+  let j = t / NX; let i = t % NX;
+  let dt = p.dtBig;
+  let rhoS = brho0(0u);
+  let rq0 = ix(i, j, 0u);
+  var col: array<f32, NZ>; var vt: array<f32, NZ>; var fl: array<f32, NZ + 1u>;
+  for (var k = 0u; k < NZ; k++) {
+    let q = ix(i, j, k);
+    for (var f = 5u; f < 11u; f++) { S[f * SIZE + q] = max(S[f * SIZE + q], 0.0); }
+  }
+  // ---- sedimentation: rain, snow, graupel, cloud ice
+  for (var n = 0u; n < 4u; n++) {
+    let sp = select(select(select(8u, 10u, n == 2u), 9u, n == 1u), 7u, n == 0u);
+    var vmax = 0.0;
+    for (var k = 0u; k < NZ; k++) {
+      let q = ix(i, j, k);
+      col[k] = S[sp * SIZE + q];
+      vt[k] = vfall(sp, col[k], brho0(k), rhoS, S[3u * SIZE + q] * (bpi0(k) + S[4u * SIZE + q]));
+      vmax = max(vmax, vt[k]);
+    }
+    if (vmax == 0.0) { continue; }
+    let nsub = max(1u, u32(ceil(vmax * dt / (0.8 * DZ))));
+    let dts = dt / f32(nsub);
+    for (var s = 0u; s < nsub; s++) {
+      for (var k = 0u; k < NZ; k++) { fl[k] = brho0(k) * vt[k] * col[k]; }
+      fl[NZ] = 0.0;
+      A[2u * SIZE + rq0] += fl[0] * dts;
+      if (sp != 7u) { A[3u * SIZE + rq0] += fl[0] * dts; }
+      for (var k = 0u; k < NZ; k++) { col[k] += dts * (fl[k + 1u] - fl[k]) / (brho0(k) * DZ); }
+    }
+    for (var k = 0u; k < NZ; k++) { S[sp * SIZE + ix(i, j, k)] = max(0.0, col[k]); }
+  }
+  // ---- local processes
+  for (var k = 0u; k < NZ; k++) {
+    let q = ix(i, j, k);
+    let rho = brho0(k);
+    let pi = bpi0(k) + S[4u * SIZE + q];
+    let pr = 1.0e5 * pow(pi, CP / RD);
+    let hv = LVI / (CP * pi); let hs = LSI / (CP * pi); let hf = LFI / (CP * pi);
+    var th = S[3u * SIZE + q];
+    var qv = S[5u * SIZE + q]; var qc = S[6u * SIZE + q]; var qr = S[7u * SIZE + q];
+    var qi = S[8u * SIZE + q]; var qs = S[9u * SIZE + q]; var qg = S[10u * SIZE + q];
+    var T = th * pi;
+    if (T > T0 && qi > 0.0) { qc += qi; th -= hf * qi; qi = 0.0; T = th * pi; }
+    if (T < T0 - 40.0) {
+      if (qc > 0.0) { qi += qc; th += hf * qc; qc = 0.0; }
+      if (qr > 0.0) { qg += qr; th += hf * qr; qr = 0.0; }
+      T = th * pi;
+    }
+    let dens = sqrt(rhoS / rho); let dens4 = sqrt(dens);
+    let psi = 2.26e-5 * pow(T / T0, 1.81) * (1e5 / pr);
+    let nu = MUA / rho; let sc3 = pow(nu / psi, 1.0 / 3.0);
+    let qsi = qvsi(T, pr); let si = qv / qsi - 1.0;
+    let Ai = (LSI / (RV * T) - 1.0) * LSI / (KAIR * T); let Bi = 1.0 / (psi * rho * qsi);
+    let n0s = n0snow(T);
+    var lS = 0.0; var lG = 0.0; var lR = 0.0;
+    if (qs > 1e-12) { lS = lam(RHOS, n0s, rho * qs); }
+    if (qg > 1e-12) { lG = lam(RHOG, N0G, rho * qg); }
+    if (qr > 1e-12) { lR = lam(RHOW, N0R, rho * qr); }
+    var kS = 0.0; var kG = 0.0; var kR = 0.0; var vS = 0.0; var vG = 0.0;
+    if (lS > 0.0) { kS = PI_ / 4.0 * n0s * AS * G3S / pow(lS, 3.0 + BS) * dens; vS = 0.78 / (lS * lS) + 0.31 * sc3 * sqrt(AS / nu) * G5S * dens4 / pow(lS, (BS + 5.0) / 2.0); }
+    if (lG > 0.0) { kG = PI_ / 4.0 * N0G * AG * G3G / pow(lG, 3.0 + BG) * dens; vG = 0.78 / (lG * lG) + 0.31 * sc3 * sqrt(AG / nu) * G5G * dens4 / pow(lG, (BG + 5.0) / 2.0); }
+    if (lR > 0.0) { kR = PI_ / 4.0 * N0R * AR * G3R / pow(lR, 3.0 + BR) * dens; }
+    var pidep = 0.0; var pigen = 0.0; var psdep = 0.0; var pgdep = 0.0; var psaut = 0.0; var pgaut = 0.0;
+    var psaci = 0.0; var pgaci = 0.0; var praci = 0.0; var psacw = 0.0; var pgacw = 0.0; var pgfrz = 0.0; var psmlt = 0.0; var pgmlt = 0.0;
+    let cold = T < T0;
+    if (cold) {
+      let eci = exp(0.05 * (T - T0));
+      if (si > 0.0) {
+        let nNuc = min(1e6, 1e3 * exp(0.1 * (T0 - T)));
+        pigen = max(0.0, min(MI0 * nNuc / rho - qi, (qv - qsi) / (1.0 + LSI * LSI * qsi / (CP * RV * T * T)))) / dt;
+      }
+      if (qi > 1e-12) {
+        let rqi = rho * qi; let ni = inum(rqi); let di = 11.9 * sqrt(rqi / ni);
+        pidep = 4.0 * di * ni * si / (rho * (Ai + Bi));
+        psaut = max(0.0, 1e-3 * exp(0.025 * (T - T0)) * (qi - QI0));
+        psaci = kS * eci * qi; pgaci = kG * eci * qi; praci = kR * qi;
+      }
+      if (lS > 0.0) { psdep = 4.0 * n0s * si * vS / (rho * (Ai + Bi)); }
+      if (lG > 0.0) { pgdep = 2.0 * PI_ * N0G * si * vG / (rho * (Ai + Bi)); }
+      if (qs > QS0) { pgaut = 1e-3 * exp(0.09 * (T - T0)) * (qs - QS0); }
+      psacw = kS * qc; pgacw = kG * qc;
+      if (lR > 0.0) { pgfrz = 20.0 * PI_ * PI_ * BIGGB * N0R * (RHOW / rho) * (exp(BIGGA * (T0 - T)) - 1.0) / pow(lR, 7.0); }
+    } else {
+      if (lS > 0.0) { psmlt = 2.0 * PI_ * n0s * KAIR * (T - T0) * vS / (rho * LFI); }
+      if (lG > 0.0) { pgmlt = 2.0 * PI_ * N0G * KAIR * (T - T0) * vG / (rho * LFI); }
+      psacw = kS * qc; pgacw = kG * qc;
+    }
+    let vSink = max(pidep, 0.0) + pigen + max(psdep, 0.0) + max(pgdep, 0.0);
+    let fv = select(1.0, qv / (vSink * dt), vSink * dt > qv);
+    let iSink = max(-pidep, 0.0) + psaut + psaci + pgaci + praci;
+    let fi = select(1.0, qi / (iSink * dt), iSink * dt > qi);
+    let sSink = max(-psdep, 0.0) + pgaut + psmlt;
+    let fs = select(1.0, qs / (sSink * dt), sSink * dt > qs);
+    let gSink = max(-pgdep, 0.0) + pgmlt;
+    let fg = select(1.0, qg / (gSink * dt), gSink * dt > qg);
+    let cSink = psacw + pgacw;
+    let fc = select(1.0, qc / (cSink * dt), cSink * dt > qc);
+    let fr = select(1.0, qr / (pgfrz * dt), pgfrz * dt > qr);
+    let t_vi = (max(pidep, 0.0) + pigen) * fv * dt; let t_iv = max(-pidep, 0.0) * fi * dt;
+    let t_vs = max(psdep, 0.0) * fv * dt; let t_sv = max(-psdep, 0.0) * fs * dt;
+    let t_vg = max(pgdep, 0.0) * fv * dt; let t_gv = max(-pgdep, 0.0) * fg * dt;
+    let t_is = (psaut + psaci) * fi * dt; let t_ig = (pgaci + praci) * fi * dt;
+    let t_sg = pgaut * fs * dt; let t_sr = psmlt * fs * dt; let t_gr = pgmlt * fg * dt;
+    let t_cs = psacw * fc * dt; let t_cg = pgacw * fc * dt; let t_rg = pgfrz * fr * dt;
+    let cf = select(0.0, 1.0, cold);
+    qv += -t_vi + t_iv - t_vs + t_sv - t_vg + t_gv;
+    qi += t_vi - t_iv - t_is - t_ig;
+    qs += t_vs - t_sv + t_is - t_sg - t_sr + cf * t_cs;
+    qg += t_vg - t_gv + t_ig + t_sg - t_gr + cf * t_cg + t_rg;
+    qc -= t_cs + t_cg;
+    qr += t_sr + t_gr - t_rg + (1.0 - cf) * (t_cs + t_cg);
+    th += hs * (t_vi - t_iv + t_vs - t_sv + t_vg - t_gv) + hf * (cf * (t_cs + t_cg) + t_rg - t_sr - t_gr);
+    qv = max(qv, 0.0); qi = max(qi, 0.0); qs = max(qs, 0.0); qg = max(qg, 0.0); qc = max(qc, 0.0); qr = max(qr, 0.0);
+    // warm rain + saturation adjustment (Kessler)
+    T = th * pi;
+    var factorn = 1.0;
+    if (qr > 0.0) { factorn = 1.0 / (1.0 + 2.2 * dt * pow(qr, 0.875)); }
+    let qrprod = qc - (qc - dt * max(0.001 * (qc - 0.001), 0.0)) * factorn;
+    qc = max(qc - qrprod, 0.0);
+    qr += qrprod;
+    let qvs = qvsw(T, pr);
+    let f5c = 237.3 * 17.27 * LVI / CP;
+    var prod = (qv - qvs) / (1.0 + qvs * f5c / ((T - 35.86) * (T - 35.86)));
+    if (T < T0 - 40.0) { prod = min(prod, 0.0); }
+    let rqq = max(rho * qr, 0.0);
+    var ern = 0.0;
+    if (rqq > 0.0) {
+      ern = min(min(dt * (((1.6 + 124.9 * pow(rqq, 0.2046)) * pow(rqq, 0.525)) / (2.55e8 / (pr * qvs) + 5.4e5)) * (max(qvs - qv, 0.0) / (rho * qvs)), max(-prod - qc, 0.0)), qr);
+    }
+    let product = max(prod, -qc);
+    th += hv * (product - ern);
+    qv = max(qv - product + ern, 0.0);
+    qc = qc + product;
+    qr = max(qr - ern, 0.0);
+    if (T < T0 - 40.0) {
+      let Tn = th * pi; let qsi2 = qvsi(Tn, pr);
+      if (qv > qsi2) { let d = (qv - qsi2) / (1.0 + LSI * LSI * qsi2 / (CP * RV * Tn * Tn)); qv -= d; qi += d; th += hs * d; }
+    }
+    S[3u * SIZE + q] = th;
+    S[5u * SIZE + q] = qv; S[6u * SIZE + q] = qc; S[7u * SIZE + q] = qr;
+    S[8u * SIZE + q] = qi; S[9u * SIZE + q] = qs; S[10u * SIZE + q] = qg;
+  }
+}
+`;
+};

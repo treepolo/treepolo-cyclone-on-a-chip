@@ -31,7 +31,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       const v = m.ground[i]!;
       let c: [number, number, number];
       if (m.groundField === 'theta') c = diverging(v / hi);
-      else if (m.groundField === 'rain') { const t = Math.sqrt(Math.max(0, v) / hi); c = t < 0.02 ? (land && !land[i] ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]) : sequential(0.15 + 0.85 * t); }
+      else if (m.groundField === 'rain' || m.groundField === 'snow') { const t = Math.sqrt(Math.max(0, v) / hi); c = t < 0.02 ? (land && !land[i] ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]) : sequential(0.15 + 0.85 * t); }
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
@@ -45,7 +45,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('rainmax').textContent = `${s.rainmax.toFixed(1)} mm`;
     $('vmax').textContent = `${s.vmax.toFixed(1)} m/s`;
     $('dp').textContent = s.dp === null ? '—' : `${s.dp.toFixed(1)} hPa${s.rmw ? ` · RMW ${(s.rmw / 1000).toFixed(0)} km` : ''}`;
-    $('legend').textContent = `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
+    $('legend').textContent = `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); }
 };
 function sync(): void { $('run').textContent = running ? '暫停 / Pause' : '執行 / Run'; send({ type: 'run', running }); }
