@@ -4,7 +4,7 @@ import { Globe } from './globe.js';
 import { diverging, sequential } from './colormap.js';
 import { drawSection } from './section.js';
 import type { FieldId, FrameMessage, FromWorker, ToWorker, ZonalMessage } from './protocol.js';
-import { NEST_HALF_WIDTH_KM, type NestSize } from './regional/protocol.js';
+import { NEST_HALF_WIDTH_KM, type NestSize, type NestPayload, type FromRegionalWorker, type ToRegionalWorker } from './regional/protocol.js';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('globe');
@@ -179,6 +179,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
   } else if (m.type === 'frame') {
     frame = m;
     colourise(m);
+    if (embed) { embed.globalDay = m.day; pace(); }
     globe.setClouds(m.cloud3d, m.nlon, m.nlat, m.cloudNz, m.cloudTop);
     $('day').textContent = m.day.toFixed(2);
     $('rate').textContent = `${m.stepsPerSecond.toFixed(1)} 步/s steps/s · ${(m.stepsPerSecond * Number($('dt').dataset.dt ?? 0) / 86400 * 60).toFixed(1)} 日/分 days/min`;
@@ -187,8 +188,10 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
     $('season').textContent = m.declinationDeg === null ? '—' : `${dateFromEquinox(m.day)} · 太陽赤緯 / declination ${m.declinationDeg.toFixed(1)}°`;
     $('levelLabel').textContent = `σ = ${m.sigma[m.level]!.toFixed(3)} (≈ ${(m.sigma[m.level]! * 1000).toFixed(0)} hPa)`;
   } else if (m.type === 'snapshot') {
-    pendingNest = m.payload;
-    deliverNest();
+    const purpose = snapQueue.shift() ?? 'window';
+    if (purpose === 'window') { pendingNest = m.payload; deliverNest(); }
+    else if (purpose === 'embed-init' && embed) startEmbed(m.payload);
+    else if (purpose === 'embed-bc' && embed?.reg) embed.reg.postMessage({ type: 'boundary', payload: m.payload } satisfies ToRegionalWorker);
   } else if (m.type === 'zonal') {
     zonal = m;
     drawZonal();
@@ -213,7 +216,60 @@ function pushView(): void {
 }
 function syncRun(): void {
   $('run').textContent = running ? '暫停 / Pause' : '執行 / Run';
-  send({ type: 'run', running });
+  send({ type: 'run', running: running && !embed?.held });
+  embed?.reg?.postMessage({ type: 'run', running: running && embed.ready } satisfies ToRegionalWorker);
+}
+
+// ---------------- regional nest embedded in the globe (true scale and position)
+// The regional model runs in a second worker. One-way coupling: new lateral-boundary targets from the
+// global state every model hour; the global model waits whenever it is more than an hour ahead.
+type SnapPurpose = 'window' | 'embed-init' | 'embed-bc';
+const snapQueue: SnapPurpose[] = [];
+const requestSnapshot = (p: SnapPurpose): void => { snapQueue.push(p); send({ type: 'snapshot' }); };
+let embed: { reg: Worker | null; lat0: number; lon0: number; day0: number; globalDay: number; tNest: number; lastBc: number; held: boolean; ready: boolean } | null = null;
+
+function startEmbed(payload: NestPayload): void {
+  if (!embed) return;
+  const e = embed;
+  e.day0 = payload.day; e.globalDay = payload.day; e.tNest = 0; e.lastBc = 0;
+  const reg = new Worker(new URL('./regional/worker.js', import.meta.url), { type: 'module' });
+  e.reg = reg;
+  reg.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
+    const r = ev.data;
+    if (embed !== e) return;
+    if (r.type === 'ready') {
+      e.ready = true;
+      globe.setNest({ lat0: e.lat0, lon0: e.lon0, L: r.nx * r.dx, top: r.nz * r.dz });
+      log(`嵌入區域模式就緒 / Embedded nest ready: ${r.nx}×${r.ny}×${r.nz}, Δx ${r.dx / 1000} km, ${r.backend === 'gpu' ? 'WebGPU' : 'CPU'}${r.note ? ' · ' + r.note : ''}`);
+      reg.postMessage({ type: 'speed', stepsPerTick: 6 } satisfies ToRegionalWorker);
+      syncRun();
+    } else if (r.type === 'frame') {
+      globe.setNestData(r.cloud, r.rain, r.nx, r.ny, r.nz);
+      e.tNest = r.time;
+      $('nestStatus').textContent = `${(r.time / 3600).toFixed(2)} h · ${r.stepsPerSecond.toFixed(1)} 步/s steps/s · w ${r.stats.wmax.toFixed(1)} m/s · ${e.held ? '全球模式等待中 / global waiting' : '同步中 / in step'}`;
+      pace();
+    } else if (r.type === 'error') log(`嵌入區域模式錯誤 / Embedded nest error: ${r.message}`);
+  };
+  reg.postMessage({ type: 'initNest', payload, lat0: e.lat0, lon0: e.lon0, size: nestSize(), backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' } satisfies ToRegionalWorker);
+}
+
+/** Keep the global model at most an hour ahead of the nest and refresh the nest boundaries hourly. */
+function pace(): void {
+  if (!embed?.ready) return;
+  const tg = (embed.globalDay - embed.day0) * 86400;
+  const held = tg > embed.tNest + 3600 ? true : tg < embed.tNest + 1800 ? false : embed.held;
+  if (held !== embed.held) { embed.held = held; send({ type: 'run', running: running && !held }); }
+  if (tg >= embed.lastBc + 3600) { embed.lastBc = Math.floor(tg / 3600) * 3600; requestSnapshot('embed-bc'); }
+}
+
+function stopEmbed(): void {
+  if (!embed) return;
+  embed.reg?.terminate();
+  embed = null;
+  globe.setNest(null);
+  $('nestStatus').textContent = '—';
+  $<HTMLButtonElement>('unembed').disabled = true;
+  syncRun();
 }
 $('run').onclick = (): void => { running = !running; syncRun(); };
 $('field').onchange = pushView;
@@ -225,6 +281,7 @@ globe.onPick = (lat, lon): void => {
   const lonD = lon * 180 / Math.PI;
   $('pick').textContent = `${Math.abs(lat * 180 / Math.PI).toFixed(1)}°${lat >= 0 ? 'N' : 'S'}, ${(lonD > 180 ? 360 - lonD : lonD).toFixed(1)}°${lonD > 180 ? 'W' : 'E'}`;
   $<HTMLButtonElement>('zoom').disabled = false;
+  $<HTMLButtonElement>('embed').disabled = false;
 };
 $('zoom').onclick = (): void => {
   if (!pick) return;
@@ -236,9 +293,20 @@ $('zoom').onclick = (): void => {
   frame.src = `regional.html#nest-${Date.now()}`;
   $('nestOverlay').hidden = false;
   nestWin = frame.contentWindow;
-  send({ type: 'snapshot' });
+  requestSnapshot('window');
   log('擷取全球模式狀態中 / Capturing the global model state…');
 };
+$('embed').onclick = (): void => {
+  if (!pick) return;
+  if (Math.abs(pick.lat) > 80 * Math.PI / 180) { log('極區附近無法巢狀（切平面近似）/ Nesting is not available within 10° of the poles (tangent-plane approximation)'); return; }
+  stopEmbed();
+  embed = { reg: null, lat0: pick.lat, lon0: pick.lon, day0: 0, globalDay: 0, tNest: 0, lastBc: 0, held: false, ready: false };
+  $<HTMLButtonElement>('unembed').disabled = false;
+  globe.setMarker(null);
+  requestSnapshot('embed-init');
+  log('建立嵌入的區域模式中（以目前全球場為初始與邊界）/ Building the embedded nest from the current global state…');
+};
+$('unembed').onclick = stopEmbed;
 $('nestClose').onclick = (): void => {
   $('nestOverlay').hidden = true;
   $<HTMLIFrameElement>('nestFrame').src = 'about:blank';
@@ -249,9 +317,10 @@ $('resetAvg').onclick = (): void => { send({ type: 'resetAverage' }); log('重�
 $('preset').onchange = (): void => init();
 $('backendSel').onchange = (): void => init();
 function init(): void {
+  stopEmbed();
   running = false; syncRun();
   const preset = $<HTMLSelectElement>('preset').value, p = preset.replace(/_Q$/, '');
-  $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : p === 'EARTH_T21' ? '1200' : p === 'EARTH_T42' ? '720' : p.endsWith('T85') ? '600' : '900';
+  $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : p === 'EARTH_T21' ? '1200' : p === 'EARTH_T42' ? '720' : p.endsWith('T85') ? '600' : p.endsWith('T170') ? '300' : '900';
   if (p.startsWith('EARTH')) {
     $<HTMLSelectElement>('field').value = 'precip';
     log('地球：真實海陸與地形、季節日照；模式從 3 月 20 日（春分）開始 / Earth: real land, orography and seasons; the model starts on 20 March (equinox)');

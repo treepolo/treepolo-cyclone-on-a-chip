@@ -96,7 +96,15 @@ ${PI_GLSL}
 in vec2 vQ;
 uniform vec3 uEye, uF, uS, uU; uniform float uTan, uAspect, uH, uCloudOn;
 uniform sampler3D uCloud; uniform float uNx, uNy; uniform vec3 uLight; uniform float uSteps, uD0;
+// embedded regional nest: tangent-plane box (nest.ts geometry) of side uNestL (radians), top uNestTop (m)
+uniform sampler3D uNest; uniform float uNestOn, uNestLat0, uNestLon0, uNestL, uNestTop, uCloudTopM; uniform vec2 uNestK;
+const int NEST_SUB = 8;
 ${BSPLINE_GLSL}
+bool nestUV(float lat, float lon, float w, out vec3 q) {
+  float dl = lon - uNestLon0; dl -= 2.0 * PI * floor((dl + PI) / (2.0 * PI));
+  q = vec3(dl * cos(uNestLat0) / uNestL + 0.5, (lat - uNestLat0) / uNestL + 0.5, w * uCloudTopM / uNestTop);
+  return uNestOn > 0.5 && q.x >= 0.0 && q.x <= 1.0 && q.y >= 0.0 && q.y <= 1.0;
+}
 out vec4 o;
 vec2 sph(vec3 ro, vec3 rd, float r){ float b = dot(ro, rd), c = dot(ro, ro) - r * r, d = b * b - c; if (d < 0.0) return vec2(1e9, -1e9); d = sqrt(d); return vec2(-b - d, -b + d); }
 void main(){
@@ -113,29 +121,52 @@ void main(){
   vec3 glow = vec3(0.30, 0.55, 1.0) * (1.0 - exp(-len / uH * 0.10)) * day;
   vec3 acc = vec3(0.0); float T = 1.0;
   if (uCloudOn > 0.5) {
-    // steps: enough to resolve the layer depth along the ray (grazing rays cross many columns)
+    // steps: enough to resolve the layer depth along the ray (grazing rays cross many columns);
+    // segments inside an embedded regional nest are subdivided to its finer grid
     int N = int(clamp(uSteps * sqrt(len / uH), 24.0, 160.0));
     float dt = len / float(N);
     for (int i = 0; i < 160; i++) {
-      if (i >= N) break;
-      vec3 p = uEye + rd * (t0 + (float(i) + 0.5) * dt);
-      float r = length(p);
-      float w = (r - 1.0) / uH;
-      if (w < 0.0 || w > 1.0) continue;
-      vec3 n = p / r;
-      float lon = atan(-n.z, n.x); if (lon < 0.0) lon += 2.0 * PI;
-      float lat = asin(clamp(n.y, -1.0, 1.0));
-      vec2 cp = bspline3(uCloud, vec3(lon / (2.0 * PI) + 0.5 / uNx, 0.5 - lat / PI, w), vec2(uNx, uNy)).rg;
-      if (cp.r + cp.g < 0.01) continue;
-      // grid-box cloud fraction f: a layer of depth D0 (2 km) hides a fraction f of what lies behind it,
-      // i.e. extinction -ln(1 - f) / D0; precipitation shafts (blue) hide up to half over 6 km
-      float kc = -log(1.0 - 0.98 * cp.r) * dt / (uD0 * uH), kp = -log(1.0 - 0.5 * cp.g) * dt / (3.0 * uD0 * uH);
-      float a = 1.0 - exp(-(kc + kp));
-      float lit = 0.25 + 0.85 * clamp(dot(n, uLight) * 1.3 + 0.15, 0.0, 1.0);
-      vec3 col = (kc * vec3(1.0) + kp * vec3(0.35, 0.55, 1.0)) / max(kc + kp, 1e-6);
-      acc += T * a * col * lit;
-      T *= 1.0 - a;
-      if (T < 0.02) break;
+      if (i >= N || T < 0.02) break;
+      vec3 q, pm = uEye + rd * (t0 + (float(i) + 0.5) * dt);
+      vec3 nm = normalize(pm);
+      float lonm = atan(-nm.z, nm.x); if (lonm < 0.0) lonm += 2.0 * PI;
+      int sub = nestUV(asin(clamp(nm.y, -1.0, 1.0)), lonm, 0.0, q) ? NEST_SUB : 1;
+      float ds = dt / float(sub);
+      for (int s = 0; s < NEST_SUB; s++) {
+        if (s >= sub) break;
+        vec3 p = uEye + rd * (t0 + float(i) * dt + (float(s) + 0.5) * ds);
+        float r = length(p);
+        float w = (r - 1.0) / uH;
+        if (w < 0.0 || w > 1.0) continue;
+        vec3 n = p / r;
+        float lon = atan(-n.z, n.x); if (lon < 0.0) lon += 2.0 * PI;
+        float lat = asin(clamp(n.y, -1.0, 1.0));
+        float kc, kp, shade = 1.0;
+        if (nestUV(lat, lon, w, q)) {
+          // regional nest: bytes are sqrt(mixing ratio / scale); extinction per unit radius
+          vec2 d = q.z <= 1.0 ? texture(uNest, q).rg : vec2(0.0);
+          kc = d.r * d.r * uNestK.x * ds; kp = d.g * d.g * uNestK.y * ds;
+          if (kc > 1e-3) {
+            // self-shadowing: short march toward the sun through the nest (1.5 km steps)
+            vec3 E = vec3(-sin(lon), 0.0, -cos(lon)), Nn = vec3(-sin(lat) * cos(lon), cos(lat), sin(lat) * sin(lon));
+            vec3 dq = vec3(dot(uLight, E) / (uNestL * 6.371e6), dot(uLight, Nn) / (uNestL * 6.371e6), dot(uLight, n) / uNestTop) * 1500.0;
+            float od = 0.0;
+            for (int l = 1; l <= 5; l++) { vec3 ql = q + dq * float(l); if (ql.z > 1.0) break; od += texture(uNest, ql).r * texture(uNest, ql).r; }
+            shade = 0.45 + 0.55 * exp(-od * uNestK.x / 6.371e6 * 1500.0);
+          }
+        } else {
+          vec2 cp = bspline3(uCloud, vec3(lon / (2.0 * PI) + 0.5 / uNx, 0.5 - lat / PI, w), vec2(uNx, uNy)).rg;
+          // grid-box cloud fraction f: a layer of depth D0 (2 km) hides a fraction f of what lies behind it,
+          // i.e. extinction -ln(1 - f) / D0; precipitation shafts (blue) hide up to half over 6 km
+          kc = -log(1.0 - 0.98 * cp.r) * ds / (uD0 * uH); kp = -log(1.0 - 0.5 * cp.g) * ds / (3.0 * uD0 * uH);
+        }
+        if (kc + kp < 1e-4) continue;
+        float a = 1.0 - exp(-(kc + kp));
+        float lit = (0.25 + 0.85 * clamp(dot(n, uLight) * 1.3 + 0.15, 0.0, 1.0)) * shade;
+        vec3 col = (kc * vec3(1.0) + kp * vec3(0.35, 0.55, 1.0)) / (kc + kp);
+        acc += T * a * col * lit;
+        T *= 1.0 - a;
+      }
     }
   }
   o = vec4(acc + T * glow, 1.0 - T + T * length(glow) * 0.6);
@@ -169,7 +200,10 @@ export class Globe {
   /** the cloud ray march is cached in vol.tex and redone only when clouds, camera or settings change */
   private cloudDirty = true;
   private lastDraw = 0;
-  private readonly mapTex: WebGLTexture; private readonly fieldTex: WebGLTexture; private readonly cloudTex: WebGLTexture;
+  private readonly mapTex: WebGLTexture; private readonly fieldTex: WebGLTexture; private readonly cloudTex: WebGLTexture; private readonly nestTex: WebGLTexture;
+  /** embedded regional nest: centre (radians), side (m) and model top (m); null when none */
+  private nest: { lat0: number; lon0: number; L: number; top: number } | null = null;
+  private nestBuf: Uint8Array | null = null;
   private fieldSize: [number, number] = [1, 1];
   private cloudNx = 1; private cloudNy = 1; private hasCloud = false; private landOn = 0;
   private readonly grat: { vao: WebGLVertexArrayObject; count: number };
@@ -235,6 +269,10 @@ export class Globe {
     // textures: map (R elevation / 6 km, G land fraction), field colours, 3-D cloud
     const tex2 = (): WebGLTexture => { const t = gl.createTexture()!; gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); return t; };
     this.mapTex = tex2(); this.fieldTex = tex2();
+    this.nestTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_3D, this.nestTex);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_3D, k, v);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, 1, 1, 1, 0, gl.RG, gl.UNSIGNED_BYTE, new Uint8Array(2));
     this.cloudTex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_3D, this.cloudTex);
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.REPEAT], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_3D, k, v);
@@ -262,7 +300,7 @@ export class Globe {
   private attachControls(): void {
     attachOrbit(this.canvas, {
       rotate: (dx, dy) => { const k = 0.006 * Math.min(1, 0.4 + (this.dist - 1)); this.yaw -= dx * k; this.pitch = Math.max(-1.5, Math.min(1.5, this.pitch + dy * k)); },
-      zoom: (f) => { this.dist = 1 + Math.max(0.003, Math.min(7, (this.dist - 1) * f)); },
+      zoom: (f) => { this.dist = 1 + Math.max(3e-4, Math.min(7, (this.dist - 1) * f)); },
       tap: (x, y) => { if (this.onPick) { const p = this.pick(x, y); if (p) this.onPick(p.lat, p.lon); } },
     });
   }
@@ -361,6 +399,25 @@ export class Globe {
     this.dirty = true; this.cloudDirty = true;
   }
 
+  /** Place (or remove, with null) an embedded regional nest: tangent-plane box of side L (m) centred at
+   *  (lat0, lon0) with model top `top` (m), as in regional/nest.ts. */
+  setNest(g: { lat0: number; lon0: number; L: number; top: number } | null): void {
+    this.nest = g; this.dirty = true; this.cloudDirty = true;
+  }
+
+  /** Nest cloud and precipitation bytes [k][j][i] (j northward), as sent by the regional worker. */
+  setNestData(cloud: Uint8Array, rain: Uint8Array, nx: number, ny: number, nz: number): void {
+    const n = nx * ny * nz;
+    if (!this.nestBuf || this.nestBuf.length !== 2 * n) this.nestBuf = new Uint8Array(2 * n);
+    const b = this.nestBuf;
+    for (let i = 0; i < n; i++) { b[2 * i] = cloud[i]!; b[2 * i + 1] = rain[i]!; }
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_3D, this.nestTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, nx, ny, nz, 0, gl.RG, gl.UNSIGNED_BYTE, b);
+    this.dirty = true; this.cloudDirty = true;
+  }
+
   /** Tracer streaks: pairs of unit vectors (head, tail) with colours. */
   setTracers(pos: Float32Array, col: Float32Array, count: number): void {
     if (count === 0 && this.trcCount === 0) return;
@@ -394,7 +451,7 @@ export class Globe {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
     const mvp = this.matrix(w / h), cam = this.camera(), eye = cam.e;
-    const ln = Math.hypot(eye[0] + 0.6, eye[1] + 0.8, eye[2]), L: V3 = [(eye[0] + 0.6) / ln, (eye[1] + 0.8) / ln, eye[2] / ln];
+    const ln = Math.hypot(eye[0] + 0.6, eye[1] + 0.8, eye[2]), L: V3 = [(eye[0] + 0.6) / ln, (eye[1] + 0.8) / ln, eye[2] / ln]; // display light: from above-left of the camera
     const H = this.exaggeration * this.cloudTop / 6.371e6, relief = this.exaggeration * 6000 / 6.371e6;
     // planet
     const P = this.planet.prog;
@@ -471,6 +528,18 @@ export class Globe {
     gl.uniform1f(gl.getUniformLocation(V, 'uCloudOn'), this.cloudsOn && this.hasCloud ? 1 : 0);
     gl.uniform1f(gl.getUniformLocation(V, 'uNx'), this.cloudNx);
     gl.uniform1f(gl.getUniformLocation(V, 'uNy'), this.cloudNy);
+    // nest extinction per unit Earth radius for byte value 1: cloud 3 g/kg x 0.04 m^-1 per g/kg
+    // (softened from the ~0.15 m^-1 of real cloud so the 3 km grid does not render as solid blocks),
+    // precipitation 8 g/kg x 1.5e-3 m^-1 per g/kg
+    const ne = this.nest;
+    gl.uniform1f(gl.getUniformLocation(V, 'uNestOn'), ne ? 1 : 0);
+    gl.uniform1f(gl.getUniformLocation(V, 'uNestLat0'), ne?.lat0 ?? 0);
+    gl.uniform1f(gl.getUniformLocation(V, 'uNestLon0'), ne?.lon0 ?? 0);
+    gl.uniform1f(gl.getUniformLocation(V, 'uNestL'), (ne?.L ?? 1) / 6.371e6);
+    gl.uniform1f(gl.getUniformLocation(V, 'uNestTop'), ne?.top ?? 1);
+    gl.uniform1f(gl.getUniformLocation(V, 'uCloudTopM'), this.cloudTop);
+    gl.uniform2f(gl.getUniformLocation(V, 'uNestK'), 0.12 * 6.371e6, 0.012 * 6.371e6);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_3D, this.nestTex); gl.uniform1i(gl.getUniformLocation(V, 'uNest'), 3);
     gl.uniform1f(gl.getUniformLocation(V, 'uSteps'), 20);
     gl.uniform1f(gl.getUniformLocation(V, 'uD0'), 2000 / this.cloudTop);
     gl.uniform3f(gl.getUniformLocation(V, 'uLight'), L[0], L[1], L[2]);
@@ -482,13 +551,13 @@ export class Globe {
 
 
   /** Eye position and view basis. Far out the camera looks at the centre; below ~0.8 Earth radii of
-   *  altitude it tilts from straight down toward the horizon (up to ~70 deg near 20 km). */
+   *  altitude it tilts from straight down toward the horizon (to ~83 deg at the 2 km floor). */
   camera(): { e: V3; f: V3; s: V3; u: V3; h: number } {
     const p = this.pitch, y = this.yaw, h = this.dist - 1;
     const n: V3 = [Math.cos(p) * Math.sin(y), Math.sin(p), Math.cos(p) * Math.cos(y)];
     const t: V3 = [-Math.sin(p) * Math.sin(y), Math.cos(p), -Math.sin(p) * Math.cos(y)];
-    const x = Math.max(0, Math.min(1, 1 - Math.log(h / 0.003) / Math.log(0.8 / 0.003)));
-    const tau = 1.22 * x * x * (3 - 2 * x);
+    const x = Math.max(0, Math.min(1, 1 - Math.log(h / 3e-4) / Math.log(0.8 / 3e-4)));
+    const tau = 1.45 * x * x * (3 - 2 * x);
     const e: V3 = [n[0] * this.dist, n[1] * this.dist, n[2] * this.dist];
     const f = norm([-n[0] * Math.cos(tau) + t[0] * Math.sin(tau), -n[1] * Math.cos(tau) + t[1] * Math.sin(tau), -n[2] * Math.cos(tau) + t[2] * Math.sin(tau)]);
     const up: V3 = [n[0] * Math.sin(tau) + t[0] * Math.cos(tau), n[1] * Math.sin(tau) + t[1] * Math.cos(tau), n[2] * Math.sin(tau) + t[2] * Math.cos(tau)];

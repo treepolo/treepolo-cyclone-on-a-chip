@@ -74,7 +74,7 @@ export const AQUA_PRESETS: Record<string, AquaplanetConfig> = {
 export function createAquaplanet(cfg: AquaplanetConfig): { model: Dycore; physics: GrayAquaplanet } {
   const model = new Dycore({
     trunc: cfg.trunc, sigmaHalf: FRIERSON_SIGMA_HALF, dt: cfg.dt, planet: EARTH, air: DRY_AIR,
-    tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : 0.1 * DAY, robert: 0.03, moist: true, massFixer: true,
+    tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : cfg.trunc >= 170 ? 0.05 * DAY : 0.1 * DAY, robert: 0.03, moist: true, massFixer: true,
   });
   const tr = model.tr, ng = tr.gridSize, K = model.K;
   const physics = new GrayAquaplanet(EARTH, DRY_AIR, tr.nlat, tr.nlon, K, tr.lat);
@@ -112,6 +112,7 @@ export const EARTH_PRESETS: Record<string, EarthConfig> = {
   EARTH_T21: { trunc: 21, dt: 1200, seed: 3 },
   EARTH_T42: { trunc: 42, dt: 720, seed: 3 },
   EARTH_T85: { trunc: 85, dt: 600, seed: 3 },
+  EARTH_T170: { trunc: 170, dt: 300, seed: 3 },
 };
 /** Preset names with this suffix use the observation-derived ocean heat transport (data/qflux_gray_t21.json). */
 export const OBSERVED_QFLUX_SUFFIX = '_Q';
@@ -182,7 +183,7 @@ export function createEarth(cfg: EarthConfig, data: EarthData, physicsOverrides:
   climate: { sst?: MonthlyLatLon; qflux?: MonthlyLatLon } = {}): { model: Dycore; physics: GrayPhysics } {
   const model = new Dycore({
     trunc: cfg.trunc, sigmaHalf: FRIERSON_SIGMA_HALF, dt: cfg.dt, planet: EARTH, air: DRY_AIR,
-    tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : 0.1 * DAY, robert: 0.03, moist: true, massFixer: true,
+    tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : cfg.trunc >= 170 ? 0.05 * DAY : 0.1 * DAY, robert: 0.03, moist: true, massFixer: true,
   });
   const tr = model.tr, ng = tr.gridSize, K = model.K, nlon = tr.nlon;
   const land = new Uint8Array(ng), zs = new Float64Array(ng), phis = new Float64Array(ng);

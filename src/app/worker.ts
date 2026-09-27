@@ -95,7 +95,7 @@ class GpuBackend implements Backend {
 let backend: Backend | null = null;
 let currentPreset = '';
 let physics: GrayPhysics | null = null;
-let earthData: EarthData | null = null;
+const earthData: Record<string, EarthData> = {};
 let qfluxData: MonthlyLatLon | null = null;
 let gpuDevice: GPUDevice | null = null;
 let acc: ZonalMeanAccumulator | null = null;
@@ -141,14 +141,16 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
       physics = null;
       const earthName = m.preset.endsWith(OBSERVED_QFLUX_SUFFIX) ? m.preset.slice(0, -OBSERVED_QFLUX_SUFFIX.length) : m.preset;
       if (EARTH_PRESETS[earthName]) {
-        if (!earthData) earthData = await (await fetch(new URL('../../data/earth_t42.json', import.meta.url))).json() as EarthData;
         cfg = EARTH_PRESETS[earthName]!;
+        // T85 and finer: 512x256 orography (0.7 deg); coarser: the 128x64 set of the documented runs
+        const file = cfg.trunc >= 85 ? 'earth_512.json' : 'earth_t42.json';
+        if (!earthData[file]) earthData[file] = await (await fetch(new URL(`../../data/${file}`, import.meta.url))).json() as EarthData;
         let climate: { qflux?: MonthlyLatLon } = {};
         if (earthName !== m.preset) {
           if (!qfluxData) qfluxData = await (await fetch(new URL('../../data/qflux_gray_t21.json', import.meta.url))).json() as MonthlyLatLon;
           climate = { qflux: qfluxData };
         }
-        const built = createEarth(EARTH_PRESETS[earthName]!, earthData, climate.qflux ? { qflux: false } : {}, climate);
+        const built = createEarth(EARTH_PRESETS[earthName]!, earthData[cfg.trunc >= 85 ? 'earth_512.json' : 'earth_t42.json']!, climate.qflux ? { qflux: false } : {}, climate);
         model = built.model; physics = built.physics;
       } else if (AQUA_PRESETS[m.preset]) {
         cfg = AQUA_PRESETS[m.preset]!;

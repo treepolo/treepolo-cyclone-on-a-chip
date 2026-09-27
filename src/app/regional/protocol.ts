@@ -13,9 +13,10 @@ export interface NestPayload {
   wet: Float32Array | null;      // surface wetness: 1 over sea, bucket fraction over land
   land: Uint8Array | null;
 }
-/** 'meso': 1200 km at 12 km (fronts, cyclones, monsoon rain bands); 'storm': 480 km at 4 km (convection-permitting) */
-export type NestSize = 'meso' | 'storm';
-export const NEST_HALF_WIDTH_KM: Record<NestSize, number> = { meso: 600, storm: 240 };
+/** 'meso': 1200 km at 12 km (fronts, cyclones, monsoon rain bands); 'storm': 480 km at 4 km and
+ *  'cp3': 960 km at 3 km (convection-permitting, GPU) */
+export type NestSize = 'meso' | 'storm' | 'cp3';
+export const NEST_HALF_WIDTH_KM: Record<NestSize, number> = { meso: 600, storm: 240, cp3: 480 };
 export type GroundField = 'rain' | 'wind' | 'theta' | 'snow';
 
 export type ToRegionalWorker =
@@ -23,7 +24,9 @@ export type ToRegionalWorker =
   | { type: 'initNest'; payload: NestPayload; lat0: number; lon0: number; size: NestSize; backend: 'auto' | 'cpu' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
-  | { type: 'ground'; field: GroundField };
+  | { type: 'ground'; field: GroundField }
+  /** newer global state: refresh the lateral-boundary relaxation targets of the running nest */
+  | { type: 'boundary'; payload: NestPayload };
 
 export interface RegionalFrame {
   type: 'frame';

@@ -48,7 +48,9 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <option value="EARTH_T42">T42 L25（較慢 / slower）</option>
 <option value="EARTH_T21_Q">T21 + 觀測推導的海洋熱傳輸（東亞季風較真實）/ + observation-derived ocean heat transport (more realistic East Asian monsoon)</option>
 <option value="EARTH_T42_Q">T42 + 觀測推導的海洋熱傳輸 / + observation-derived ocean heat transport</option>
-<option value="EARTH_T85">T85 L25（需 GPU / GPU recommended）</option>
+<option value="EARTH_T85">T85 L25，約 150 km（需 GPU / GPU recommended）</option>
+<option value="EARTH_T85_Q">T85 + 觀測推導的海洋熱傳輸 / + observation-derived ocean heat transport</option>
+<option value="EARTH_T170_Q">T170 L25，約 80 km + 海洋熱傳輸（需獨立顯卡 / discrete GPU）</option>
 </optgroup>
 <optgroup label="濕大氣水球（灰體輻射）/ Moist aquaplanet (gray radiation)">
 <option value="AQUA_T21">T21 L25：降水、ITCZ、風暴路徑 / rain, ITCZ, storm tracks</option>
@@ -68,9 +70,11 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <h2>放大區域 / Zoom into a region</h2>
 <div class="muted">在地球上點一下選擇地點（黃框為區域範圍），再開啟區域非靜力模式：以目前的全球場為初始與側邊界條件（單向巢狀），解析對流、颮線與氣旋內部結構。 / Click the globe to choose a point (yellow box: the domain), then open the regional non-hydrostatic model there, initialised and driven at its boundaries by the current global fields (one-way nesting), to resolve convection, squall lines and storm structure.</div>
 <label for="nestSize">區域大小 / Domain</label>
-<select id="nestSize"><option value="meso">1200 km，Δx 12 km：鋒面、氣旋、季風雨帶 / fronts, cyclones, monsoon rain bands</option><option value="storm">480 km，Δx 4 km：可解析對流（需 GPU）/ convection-permitting (GPU)</option></select>
+<select id="nestSize"><option value="meso">1200 km，Δx 12 km：鋒面、氣旋、季風雨帶 / fronts, cyclones, monsoon rain bands</option><option value="storm">480 km，Δx 4 km：可解析對流（需 GPU）/ convection-permitting (GPU)</option><option value="cp3">960 km，Δx 3 km：可解析對流、大範圍（需獨立顯卡）/ convection-permitting, large (discrete GPU)</option></select>
 <div class="row"><span>所選地點 / Selected point</span><span id="pick">—</span></div>
-<div class="controls"><button id="zoom" disabled>放大此區域 / Zoom in here</button></div>
+<div class="controls"><button id="embed" disabled>嵌入地球（真實比例）/ Embed on the globe</button><button id="unembed" disabled>移除嵌入 / Remove</button><button id="zoom" disabled>另開視窗 / Open in a window</button></div>
+<div class="muted">嵌入：區域模式直接在地球上、照真實位置與比例跑，放大飛低即可看見雲塔；全球模式每小時提供新的邊界，並在領先超過 1 小時時等待。/ Embed: the regional model runs in place on the globe at true scale; zoom in and fly low to see the cloud towers. The global model refreshes its boundaries hourly and waits when more than an hour ahead.</div>
+<div class="row"><span>嵌入區域 / Embedded nest</span><span id="nestStatus">—</span></div>
 
 <h2>顯示 / Display</h2>
 <label for="field">場 / Field</label>
@@ -94,7 +98,7 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <input id="level" type="range" min="0" max="19" value="19" />
 <label for="exag">垂直放大（1 = 真實比例）/ Vertical exaggeration (1 = true scale) <span id="exagLabel"></span></label>
 <input id="exag" type="range" min="1" max="60" value="1" />
-<p class="muted">滾輪或雙指放大可一路降到約 20 km 高的低空，視角會自動轉向地平線，從側面看雲塔與雨柱（白：雲，藍：降水）/ Zoom (wheel or pinch) down to ~20 km altitude: the view tilts toward the horizon to show cloud towers and rain shafts from the side (white: cloud, blue: precipitation)</p>
+<p class="muted">滾輪或雙指放大可一路降到約 2 km 高的低空，視角會自動轉向地平線，從側面看雲塔與雨柱（白：雲，藍：降水）/ Zoom (wheel or pinch) down to ~2 km altitude: the view tilts toward the horizon to show cloud towers and rain shafts from the side (white: cloud, blue: precipitation)</p>
 <label for="fieldAlpha">資料疊加透明度 / Field overlay opacity</label>
 <input id="fieldAlpha" type="range" min="0" max="100" value="75" />
 <label><input id="clouds3d" type="checkbox" checked /> 立體雲（診斷）/ 3-D clouds (diagnosed)</label>

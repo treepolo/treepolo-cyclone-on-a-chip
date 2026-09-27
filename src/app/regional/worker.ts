@@ -7,7 +7,7 @@ import { RegionalPhysics } from '../../regional/physics.js';
 import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
-import { nestFromGlobal, sampleSurface, NestSpec } from '../../regional/nest.js';
+import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { tornadoExperiment, StormTracker } from '../../regional/supercell.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
@@ -25,6 +25,7 @@ const DEBUG = false;
 let physCfg: RegionalPhysicsConfig | null = null;
 let frameVel = { u: 0, v: 0 };
 let tracker: StormTracker | null = null, lastTrack = 0;
+let nestSpec: NestSpec | null = null;
 
 async function getGpu(): Promise<GPUDevice | null> {
   if (gpuDevice) return gpuDevice;
@@ -104,10 +105,13 @@ function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; descripti
  *  global snapshot, surface skin temperature and wetness from the global surface model. */
 function buildNest(g: NestPayload, lat0: number, lon0: number, size: NestSize, gpuOk: boolean): { dt: number; description: string; land: Uint8Array | null } {
   experiment = 'nest';
-  const spec: NestSpec = size === 'storm'
+  const spec: NestSpec = size === 'cp3'
+    ? (gpuOk ? { lat0, lon0, L: 960000, dx: 3000, nz: 40, dz: 450, dt: 15, nsound: 6 } : { lat0, lon0, L: 960000, dx: 12000, nz: 30, dz: 600, dt: 60, nsound: 6 })
+    : size === 'storm'
     ? (gpuOk ? { lat0, lon0, L: 480000, dx: 4000, nz: 40, dz: 450, dt: 20, nsound: 6 } : { lat0, lon0, L: 480000, dx: 8000, nz: 30, dz: 600, dt: 40, nsound: 6 })
     : (gpuOk ? { lat0, lon0, L: 1200000, dx: 12000, nz: 30, dz: 600, dt: 60, nsound: 6 } : { lat0, lon0, L: 1200000, dx: 20000, nz: 24, dz: 750, dt: 60, nsound: 6 });
   const nest = nestFromGlobal(g, spec, 6);
+  nestSpec = spec;
   m = nest.model;
   mp = new IceMicrophysics(m);
   const surface = g.ts && g.wet ? { tsk: sampleSurface(g, spec, g.ts), wet: sampleSurface(g, spec, g.wet) } : null;
@@ -161,6 +165,11 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'run') running = msg.running;
     else if (msg.type === 'speed') stepsPerTick = Math.max(1, msg.stepsPerTick | 0);
     else if (msg.type === 'ground') { ground = msg.field; sendFrame(); }
+    else if (msg.type === 'boundary' && m && nestSpec && experiment === 'nest') {
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      m.boundary = nestTargets(msg.payload, nestSpec, m);
+      gpu?.setBoundary(m.boundary);
+    }
   } catch (e) { post({ type: 'error', message: String(e) }); }
 };
 
