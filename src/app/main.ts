@@ -19,6 +19,23 @@ let frame: FrameMessage | null = null;
 let zonal: ZonalMessage | null = null;
 let running = false;
 
+// ---------------- nesting: click the globe to choose a region, then open the regional model there
+let pick: { lat: number; lon: number } | null = null;
+let nestWin: Window | null = null, nestReady = false;
+let pendingNest: import('./regional/protocol.js').NestPayload | null = null;
+const NEST_HALF = 600e3 / 6.371e6;       // half-width of the 1200 km nest (radians of arc)
+function deliverNest(): void {
+  if (!nestWin || !nestReady || !pendingNest || !pick) return;
+  nestWin.postMessage({ type: 'nest', payload: pendingNest, lat0: pick.lat, lon0: pick.lon }, location.origin);
+  pendingNest = null;
+  log('已傳送全球模式狀態到區域模式 / Global state sent to the regional model');
+}
+window.addEventListener('message', (ev: MessageEvent) => {
+  if (ev.origin !== location.origin || ev.source !== nestWin || !ev.data || ev.data.type !== 'nest-ready') return;
+  nestReady = true;
+  deliverNest();
+});
+
 // ---------------- field colouring
 const FIELD_STYLE: Record<FieldId, { div: boolean; range?: [number, number]; sym?: number; unit: string }> = {
   T: { div: false, unit: 'K' },
@@ -149,6 +166,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
     $('psdrift').textContent = m.psDrift.toExponential(2);
     $('season').textContent = m.declinationDeg === null ? '—' : `${dateFromEquinox(m.day)} · 太陽赤緯 / declination ${m.declinationDeg.toFixed(1)}°`;
     $('levelLabel').textContent = `σ = ${m.sigma[m.level]!.toFixed(3)} (≈ ${(m.sigma[m.level]! * 1000).toFixed(0)} hPa)`;
+  } else if (m.type === 'snapshot') {
+    pendingNest = m.payload;
+    deliverNest();
   } else if (m.type === 'zonal') {
     zonal = m;
     drawZonal();
@@ -179,6 +199,22 @@ $('run').onclick = (): void => { running = !running; syncRun(); };
 $('field').onchange = pushView;
 $('level').oninput = pushView;
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
+globe.onPick = (lat, lon): void => {
+  pick = { lat, lon };
+  globe.setMarker(lat, lon, NEST_HALF);
+  const lonD = lon * 180 / Math.PI;
+  $('pick').textContent = `${Math.abs(lat * 180 / Math.PI).toFixed(1)}°${lat >= 0 ? 'N' : 'S'}, ${(lonD > 180 ? 360 - lonD : lonD).toFixed(1)}°${lonD > 180 ? 'W' : 'E'}`;
+  $<HTMLButtonElement>('zoom').disabled = false;
+};
+$('zoom').onclick = (): void => {
+  if (!pick) return;
+  if (Math.abs(pick.lat) > 80 * Math.PI / 180) { log('極區附近無法巢狀（切平面近似）/ Nesting is not available within 10° of the poles (tangent-plane approximation)'); return; }
+  nestReady = false;
+  nestWin = window.open('regional.html?nest=1', '_blank');
+  if (!nestWin) { log('瀏覽器阻擋了新視窗 / The browser blocked the new window'); return; }
+  send({ type: 'snapshot' });
+  log('擷取全球模式狀態中 / Capturing the global model state…');
+};
 $('resetAvg').onclick = (): void => { send({ type: 'resetAverage' }); log('重設緯向平均 / Zonal average reset'); };
 $('preset').onchange = (): void => init();
 $('backendSel').onchange = (): void => init();

@@ -10,11 +10,13 @@ import { createJablonowski } from '../model/jablonowski.js';
 import { GpuDycore } from '../gpu/dycoreGpu.js';
 import { GpuMoist, SFC } from '../gpu/moistGpu.js';
 import type { FieldId, FromWorker, ToWorker } from './protocol.js';
+import type { NestPayload } from './regional/protocol.js';
 
 /** Everything the UI needs from one model state. Arrays are [k][lat][lon] or [lat][lon]. */
 interface Snapshot {
   u: Float32Array; v: Float32Array; T: Float32Array; vor: Float32Array; div: Float32Array; ps: Float32Array;
   q: Float32Array | null; ts: Float32Array | null; olr: Float32Array | null; precipAcc: Float32Array | null; snowAcc: Float32Array | null;
+  wet: Float32Array | null;   // surface evaporation efficiency (1 sea, bucket fraction on land)
 }
 
 interface Backend {
@@ -46,13 +48,14 @@ class CpuBackend implements Backend {
       u: Float32Array.from(g.u), v: Float32Array.from(g.v), T: Float32Array.from(g.T), vor, div, ps: Float32Array.from(g.ps),
       q: m.moist ? Float32Array.from(m.q) : null, ts: ph ? Float32Array.from(ph.f.sst) : null,
       olr: ph ? Float32Array.from(ph.f.olrNow) : null, precipAcc, snowAcc,
+      wet: ph ? Float32Array.from({ length: ng }, (_, p) => ph.surface.land[p] ? Math.min(1, ph.f.bucket[p]! / (0.75 * ph.cfg.bucketMax)) : 1) : null,
     };
   }
 }
 
 class GpuBackend implements Backend {
   readonly kind = 'gpu' as const;
-  constructor(readonly model: Dycore, private readonly device: GPUDevice, private readonly gd: GpuDycore, private readonly gm: GpuMoist | null) {}
+  constructor(readonly model: Dycore, private readonly device: GPUDevice, private readonly gd: GpuDycore, private readonly gm: GpuMoist | null, private readonly physics: GrayPhysics | null) {}
   time(): number { return this.gd.time; }
   steps(): number { return this.gd.steps; }
   async advance(n: number): Promise<void> {
@@ -69,7 +72,7 @@ class GpuBackend implements Backend {
     }
     const ps = new Float32Array(ng);
     for (let p = 0; p < ng; p++) ps[p] = Math.exp(G[5 * K * ng + p]!);
-    let q: Float32Array | null = null, ts: Float32Array | null = null, olr: Float32Array | null = null, precipAcc: Float32Array | null = null, snowAcc: Float32Array | null = null;
+    let q: Float32Array | null = null, ts: Float32Array | null = null, olr: Float32Array | null = null, precipAcc: Float32Array | null = null, snowAcc: Float32Array | null = null, wet: Float32Array | null = null;
     if (this.gm) {
       q = await this.gm.readQ();
       const s = await this.gm.readSurface();
@@ -78,12 +81,15 @@ class GpuBackend implements Backend {
       precipAcc = new Float32Array(ng);
       for (let p = 0; p < ng; p++) precipAcc[p] = s[SFC.precipConv * ng + p]! + s[SFC.precipLS * ng + p]!;
       snowAcc = s.slice(SFC.snowAcc * ng, (SFC.snowAcc + 1) * ng);
+      const ph = this.physics;
+      if (ph) wet = Float32Array.from({ length: ng }, (_, p) => ph.surface.land[p] ? Math.min(1, s[SFC.bucket * ng + p]! / (0.75 * ph.cfg.bucketMax)) : 1);
     }
-    return { u, v, T: G.slice(4 * K * ng, 5 * K * ng), vor: G.slice(2 * K * ng, 3 * K * ng), div: G.slice(3 * K * ng, 4 * K * ng), ps, q, ts, olr, precipAcc, snowAcc };
+    return { u, v, T: G.slice(4 * K * ng, 5 * K * ng), vor: G.slice(2 * K * ng, 3 * K * ng), div: G.slice(3 * K * ng, 4 * K * ng), ps, q, ts, olr, precipAcc, snowAcc, wet };
   }
 }
 
 let backend: Backend | null = null;
+let currentPreset = '';
 let physics: GrayPhysics | null = null;
 let earthData: EarthData | null = null;
 let gpuDevice: GPUDevice | null = null;
@@ -124,6 +130,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
     if (m.type === 'init') {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
+      currentPreset = m.preset;
       let cfg: { trunc: number; dt: number };
       let model: Dycore;
       physics = null;
@@ -152,7 +159,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
         const gm = physics ? new GpuMoist(device, gd, model, physics) : null;
         gd.uploadFrom(model);
         gm?.uploadFrom(model);
-        backend = new GpuBackend(model, device, gd, gm);
+        backend = new GpuBackend(model, device, gd, gm, physics);
       } else {
         backend = new CpuBackend(model, physics);
         if (m.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
@@ -174,6 +181,18 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
       field = m.field;
       level = m.level;
       if (!busy) await sendFrame();
+    } else if (m.type === 'snapshot') {
+      if (!backend) return;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      const b = backend, md = b.model, s = await b.snapshot(), phisG = new Float64Array(md.ng);
+      md.surfaceGeopotentialGrid(phisG);
+      const payload: NestPayload = {
+        preset: currentPreset, day: b.time() / DAY, nlat: md.tr.nlat, nlon: md.tr.nlon, K: md.K,
+        lat: Float64Array.from(md.tr.lat), lon: Float64Array.from(md.tr.lon), sigma: Float64Array.from(md.lev.sigma), sigmaHalf: Float64Array.from(md.lev.sigmaHalf),
+        u: s.u, v: s.v, T: s.T, ps: s.ps, q: s.q, phis: Float32Array.from(phisG), ts: s.ts, wet: s.wet,
+        land: physics ? Uint8Array.from(physics.surface.land) : null,
+      };
+      post({ type: 'snapshot', payload });
     } else if (m.type === 'resetAverage') {
       acc?.reset();
       accFrom = backend ? backend.time() / DAY : 0;

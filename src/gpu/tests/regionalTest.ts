@@ -5,6 +5,7 @@ import { RegionalPhysics } from '../../regional/physics.js';
 import { tropicalSounding, insertVortex } from '../../regional/tropical.js';
 import { GpuRegional } from '../regionalGpu.js';
 import { gcheck, getDevice } from './harness.js';
+import { nestFromGlobal, GlobalSnapshot } from '../../regional/nest.js';
 
 function cmp(m: RegionalModel, g: Float32Array, f: number, a: Float64Array, nk: number): number {
   let e = 0, s = 0;
@@ -65,4 +66,50 @@ export async function regionalTests(): Promise<void> {
     gcheck('regional TC physics, 5 steps: theta rel L2 < 1e-5', dth < 1e-5, dth);
     gcheck('regional TC physics, 5 steps: qv rel L2 < 1e-3', dq < 1e-3, dq);
   }
+}
+
+/** Analytic global state for nesting tests: midlatitude jet with a wave, moist lower troposphere. */
+function syntheticSnapshot(): GlobalSnapshot {
+  const nlat = 48, nlon = 96, K = 20;
+  const lat = Float64Array.from({ length: nlat }, (_, j) => (90 - (j + 0.5) * 180 / nlat) * Math.PI / 180);
+  const lon = Float64Array.from({ length: nlon }, (_, i) => i * 2 * Math.PI / nlon);
+  const sigmaHalf = Float64Array.from({ length: K + 1 }, (_, k) => k / K);
+  const sigma = Float64Array.from({ length: K }, (_, k) => (k + 0.5) / K);
+  const ng = nlat * nlon, u = new Float64Array(K * ng), v = new Float64Array(K * ng), T = new Float64Array(K * ng), q = new Float64Array(K * ng), ps = new Float64Array(ng);
+  for (let j = 0; j < nlat; j++) for (let i = 0; i < nlon; i++) {
+    const p = j * nlon + i, la = lat[j]!, lo = lon[i]!;
+    ps[p] = 1e5 + 800 * Math.sin(la * 2) * Math.cos(5 * lo);
+    for (let k = 0; k < K; k++) {
+      const s = sigma[k]!, o = k * ng + p;
+      u[o] = 25 * Math.sin(Math.PI * s) * Math.exp(-((((la * 180 / Math.PI) - 40) / 15) ** 2)) + 3 * Math.sin(5 * lo);
+      v[o] = 4 * Math.cos(5 * lo) * Math.cos(la);
+      T[o] = Math.max(210, (300 - 30 * Math.sin(la) ** 2) * Math.pow(s, 0.19));
+      q[o] = 0.012 * Math.cos(la) ** 2 * s ** 3;
+    }
+  }
+  return { nlat, nlon, K, lat, lon, sigma, sigmaHalf, u, v, T, ps, q };
+}
+
+export async function regionalNestTests(): Promise<void> {
+  const device = await getDevice();
+  const g0 = syntheticSnapshot();
+  const { model: m, boundary } = nestFromGlobal(g0, { lat0: 35 * Math.PI / 180, lon0: 1.0, L: 400000, dx: 20000, nz: 16, dz: 1000, dt: 60, nsound: 6 }, 3);
+  const mp = new KesslerMicrophysics(m);
+  const n2 = m.c.nx * m.c.ny;
+  const tsk = Float64Array.from({ length: n2 }, (_, c) => 290 + 8 * (c % m.c.nx) / m.c.nx);
+  const wet = Float64Array.from({ length: n2 }, (_, c) => (Math.floor(c / m.c.nx) < m.c.ny / 2 ? 1 : 0.3));
+  const cfg = { lh: 4000, lv: 100, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface: { tsk, wet } };
+  new RegionalPhysics(m, cfg);
+  for (let s = 0; s < 20; s++) { m.step(); mp.apply(60); }
+  const g = new GpuRegional(device, m, { moist: true, physics: cfg, boundary });
+  g.uploadFrom(m);
+  for (let s = 0; s < 10; s++) { m.step(); mp.apply(60); }
+  g.step(10);
+  const st = await g.readState(), nz = m.c.nz;
+  const du = cmp(m, st, 0, m.u, nz), dv = cmp(m, st, 1, m.v, nz), dw = cmp(m, st, 2, m.w, nz + 1), dth = cmp(m, st, 3, m.th, nz), dpp = cmp(m, st, 4, m.pp, nz), dq = cmp(m, st, 5, m.scalars[QV]!, nz);
+  gcheck('regional nest (open BC, land/sea surface), 10 steps: u, v rel L2 < 1e-3', du < 1e-3 && dv < 1e-3, `${du.toExponential(2)} ${dv.toExponential(2)}`);
+  gcheck('regional nest (open BC, land/sea surface), 10 steps: w rel L2 < 1e-2', dw < 1e-2, dw);
+  gcheck('regional nest (open BC, land/sea surface), 10 steps: theta rel L2 < 1e-5', dth < 1e-5, dth);
+  gcheck('regional nest (open BC, land/sea surface), 10 steps: pi\' rel L2 < 1e-3', dpp < 1e-3, dpp);
+  gcheck('regional nest (open BC, land/sea surface), 10 steps: qv rel L2 < 1e-3', dq < 1e-3, dq);
 }

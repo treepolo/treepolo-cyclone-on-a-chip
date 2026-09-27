@@ -70,6 +70,24 @@ function interp(c: Column, f: Float64Array, z: number, extrapLnp = false): numbe
   return f[k]! + w * (f[k - 1]! - f[k]!);
 }
 
+/** Bilinear sample of a 2-D global field [lat][lon] at the regional cell centres (row-major j*nx+i). */
+export function sampleSurface(g: GlobalSnapshot, spec: NestSpec, f: ArrayLike<number>): Float64Array {
+  const a = EARTH.radius, nx = Math.round(spec.L / spec.dx), out = new Float64Array(nx * nx);
+  const { nlat, nlon } = g;
+  for (let jj = 0; jj < nx; jj++) for (let ii = 0; ii < nx; ii++) {
+    const lat = spec.lat0 + ((jj + 0.5) * spec.dx - spec.L / 2) / a;
+    const lon = spec.lon0 + ((ii + 0.5) * spec.dx - spec.L / 2) / (a * Math.cos(spec.lat0));
+    let j = 0;
+    while (j < nlat - 2 && g.lat[j + 1]! > lat) j++;
+    const wy = Math.max(0, Math.min(1, (g.lat[j]! - lat) / (g.lat[j]! - g.lat[j + 1]!)));
+    let x = lon / (2 * Math.PI) * nlon;
+    x -= Math.floor(x / nlon) * nlon;
+    const i0 = Math.floor(x) % nlon, i1 = (i0 + 1) % nlon, wx = x - Math.floor(x);
+    out[jj * nx + ii] = (1 - wy) * ((1 - wx) * f[j * nlon + i0]! + wx * f[j * nlon + i1]!) + wy * ((1 - wx) * f[(j + 1) * nlon + i0]! + wx * f[(j + 1) * nlon + i1]!);
+  }
+  return out;
+}
+
 export interface NestedRegional { model: RegionalModel; boundary: BoundaryTargets; f: number; description: string }
 
 /** Build a regional model (open boundaries) initialised from a global snapshot. nScalars = 3 for Kessler moisture. */

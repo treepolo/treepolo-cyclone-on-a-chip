@@ -30,6 +30,9 @@ export class Globe {
   private readonly trc: { vao: WebGLVertexArrayObject; pos: WebGLBuffer; col: WebGLBuffer };
   private trcCount = 0;
   private coast: { vao: WebGLVertexArrayObject; count: number } | null = null;
+  private marker: { vao: WebGLVertexArrayObject; count: number } | null = null;
+  /** called on a click (not a drag) on the sphere with (lat, lon) in radians, lon in [0, 2 pi) */
+  onPick: ((lat: number, lon: number) => void) | null = null;
   yaw = -0.4;
   pitch = 0.35;
   dist = 3.2;
@@ -60,17 +63,61 @@ export class Globe {
   }
 
   private attachControls(): void {
-    let drag = false, lx = 0, ly = 0;
+    let drag = false, lx = 0, ly = 0, moved = 0;
     const c = this.canvas;
-    c.addEventListener('pointerdown', (e) => { drag = true; lx = e.clientX; ly = e.clientY; c.setPointerCapture(e.pointerId); });
-    c.addEventListener('pointerup', () => { drag = false; });
+    c.addEventListener('pointerdown', (e) => { drag = true; moved = 0; lx = e.clientX; ly = e.clientY; c.setPointerCapture(e.pointerId); });
+    c.addEventListener('pointerup', (e) => {
+      drag = false;
+      if (moved < 5 && this.onPick) { const p = this.pick(e.clientX, e.clientY); if (p) this.onPick(p.lat, p.lon); }
+    });
     c.addEventListener('pointermove', (e) => {
       if (!drag) return;
+      moved += Math.abs(e.clientX - lx) + Math.abs(e.clientY - ly);
       this.yaw -= (e.clientX - lx) * 0.006;
       this.pitch = Math.max(-1.5, Math.min(1.5, this.pitch + (e.clientY - ly) * 0.006));
       lx = e.clientX; ly = e.clientY;
     });
     c.addEventListener('wheel', (e) => { e.preventDefault(); this.dist = Math.max(1.4, Math.min(8, this.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+  }
+
+  /** Screen point -> (lat, lon) on the unit sphere, or null when the ray misses it. */
+  pick(clientX: number, clientY: number): { lat: number; lon: number } | null {
+    const r = this.canvas.getBoundingClientRect();
+    const x = (clientX - r.left) / r.width * 2 - 1, y = 1 - (clientY - r.top) / r.height * 2;
+    const e = this.eye(), f = norm([-e[0], -e[1], -e[2]]), s = norm(cross(f, [0, 1, 0])), u = cross(s, f);
+    const t = Math.tan(0.4), a = r.width / r.height;
+    const d = norm([f[0] + (s[0] * x * a + u[0] * y) * t, f[1] + (s[1] * x * a + u[1] * y) * t, f[2] + (s[2] * x * a + u[2] * y) * t]);
+    const b = dot(e, d), c = dot(e, e) - 1, disc = b * b - c;
+    if (disc < 0) return null;
+    const l = -b - Math.sqrt(disc);
+    const p: V3 = [e[0] + l * d[0], e[1] + l * d[1], e[2] + l * d[2]];
+    let lon = Math.atan2(-p[2], p[0]);
+    if (lon < 0) lon += 2 * Math.PI;
+    return { lat: Math.asin(Math.max(-1, Math.min(1, p[1]))), lon };
+  }
+
+  /** Outline a square region of half-width `half` (radians of arc) centred at (lat, lon); null clears it. */
+  setMarker(lat: number | null, lon = 0, half = 0.1): void {
+    const gl = this.gl;
+    if (lat === null) { this.marker = null; return; }
+    const v: number[] = [], c: number[] = [];
+    const pt = (x: number, y: number): void => {
+      const la = lat + y, lo = lon + x / Math.max(0.05, Math.cos(lat));
+      v.push(Math.cos(la) * Math.cos(lo), Math.sin(la), -Math.cos(la) * Math.sin(lo)); c.push(1, 0.85, 0.2);
+    };
+    const n = 24;
+    const edge = (x0: number, y0: number, x1: number, y1: number): void => {
+      for (let i = 0; i < n; i++) { pt(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n); pt(x0 + (x1 - x0) * (i + 1) / n, y0 + (y1 - y0) * (i + 1) / n); }
+    };
+    edge(-half, -half, half, -half); edge(half, -half, half, half); edge(half, half, -half, half); edge(-half, half, -half, -half);
+    const vao = gl.createVertexArray()!;
+    gl.bindVertexArray(vao);
+    const pb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, pb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(this.loc.pos); gl.vertexAttribPointer(this.loc.pos, 3, gl.FLOAT, false, 0, 0);
+    const cb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, cb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(c), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(this.loc.col); gl.vertexAttribPointer(this.loc.col, 3, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    this.marker = { vao, count: v.length / 3 };
   }
 
   private buildGraticule(): { vao: WebGLVertexArrayObject; count: number } {
@@ -208,6 +255,11 @@ export class Globe {
       gl.uniform1f(this.loc.scale, 1.003); gl.uniform1f(this.loc.alpha, 0.9);
       gl.bindVertexArray(this.coast.vao);
       gl.drawArrays(gl.LINES, 0, this.coast.count);
+    }
+    if (this.marker) {
+      gl.uniform1f(this.loc.scale, 1.005); gl.uniform1f(this.loc.alpha, 1);
+      gl.bindVertexArray(this.marker.vao);
+      gl.drawArrays(gl.LINES, 0, this.marker.count);
     }
     if (this.trcCount > 0) {
       gl.uniform1f(this.loc.scale, 1.004); gl.uniform1f(this.loc.alpha, 0.85);

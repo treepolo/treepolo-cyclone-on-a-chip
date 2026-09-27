@@ -138,6 +138,7 @@ function writeOutputs(): void {
   lines.push('Annual-mean overturning cells:', ...s.cells.map((x) => `  ${x.fromLat.toFixed(1)}° .. ${x.toLat.toFixed(1)}°  peak ${(x.peak / 1e9).toFixed(1)}e9 kg/s`));
   writeFileSync(`${outDir}/u.svg`, sectionSvg({ title: `annual-mean [u], ${presetName}`, lat: c.lat, sigma: c.sigma, values: c.u, units: 'm/s', diverging: true, contourStep: 5 }));
   writeFileSync(`${outDir}/psi.svg`, sectionSvg({ title: `annual-mean ψ, ${presetName}`, lat: c.lat, sigma: c.sigmaHalf.slice(1, K), values: c.psi.slice(nlat, K * nlat).map((x) => x / 1e9), units: '1e9 kg/s', diverging: true, contourStep: 20 }));
+  writeFileSync(`${outDir}/climate.json`, JSON.stringify({ lat: latDeg, lon: lonDeg, land, P: { JJA: Array.from(P.JJA!), DJF: Array.from(P.DJF!) }, Ts: { JJA: Array.from(Ts.JJA!), DJF: Array.from(Ts.DJF!) } }));
   writeFileSync(`${outDir}/summary.txt`, lines.join('\n') + '\n\nRun log:\n' + log.join('\n') + '\n');
   console.log(lines.join('\n'));
 }

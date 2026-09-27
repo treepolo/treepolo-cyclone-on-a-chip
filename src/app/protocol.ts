@@ -1,4 +1,5 @@
 // Messages between the UI thread and the simulation worker.
+import type { NestPayload } from './regional/protocol.js';
 
 export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip' | 'snow' | 'sst' | 'q' | 'olr';
 
@@ -7,7 +8,8 @@ export type ToWorker =
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
   | { type: 'view'; field: FieldId; level: number }
-  | { type: 'resetAverage' };
+  | { type: 'resetAverage' }
+  | { type: 'snapshot' };
 
 export interface FrameMessage {
   type: 'frame';
@@ -45,5 +47,6 @@ export interface ZonalMessage {
 export type FromWorker =
   | FrameMessage
   | ZonalMessage
+  | { type: 'snapshot'; payload: NestPayload }
   | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number; moist: boolean; lat: Float64Array; land: Uint8Array | null; backend: 'cpu' | 'gpu'; note: string }
   | { type: 'error'; message: string };

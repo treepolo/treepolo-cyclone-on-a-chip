@@ -19,6 +19,22 @@ export interface RegionalPhysicsConfig {
   ck: number;              // enthalpy exchange coefficient
   radTau: number;          // s (0 = no radiation)
   radMax: number;          // max cooling K/s
+  /** per-column surface (nx*ny, row-major j*nx+i): skin temperature (K) and moisture availability
+   *  (1 = sea, bucket fraction over land). Overrides the uniform sst (nested runs). */
+  surface?: { tsk: ArrayLike<number>; wet: ArrayLike<number> } | null;
+}
+
+/** Surface state used by the bulk fluxes: per-column skin temperature and wetness, surface Exner
+ *  function and pressure. A uniform SST uses pi_s = 1, p_s = 1000 hPa (the idealised TC set-up);
+ *  a per-column surface extrapolates the base state hydrostatically to z = 0. */
+export function surfaceState(m: RegionalModel, c: RegionalPhysicsConfig): { tsk: Float64Array; wet: Float64Array; pis: number; psfc: number } | null {
+  const n = m.c.nx * m.c.ny;
+  if (c.surface) {
+    const pis = m.pi0[0]! + 9.80665 * 0.5 * m.c.dz / (DRY_AIR.cp * m.th0[0]! * (1 + 0.61 * m.qv0[0]!));
+    return { tsk: Float64Array.from(c.surface.tsk), wet: Float64Array.from(c.surface.wet), pis, psfc: DRY_AIR.pRef * Math.pow(pis, DRY_AIR.cp / DRY_AIR.rd) };
+  }
+  if (c.sst > 0) return { tsk: new Float64Array(n).fill(c.sst), wet: new Float64Array(n).fill(1), pis: 1, psfc: DRY_AIR.pRef };
+  return null;
 }
 
 export class RegionalPhysics {
@@ -26,7 +42,10 @@ export class RegionalPhysics {
   /** surface enthalpy flux diagnostics (W m^-2), last call */
   readonly shf: Float64Array; readonly lhf: Float64Array;
 
+  private readonly sfc: ReturnType<typeof surfaceState>;
+
   constructor(private readonly m: RegionalModel, readonly cfg: RegionalPhysicsConfig) {
+    this.sfc = surfaceState(m, cfg);
     this.Km = new Float64Array(m.size);
     this.shf = new Float64Array(m.c.nx * m.c.ny);
     this.lhf = new Float64Array(m.c.nx * m.c.ny);
@@ -83,18 +102,17 @@ export class RegionalPhysics {
     }
 
     // ---- surface fluxes (lowest model level)
-    if (c.sst > 0) {
-      const cp = DRY_AIR.cp, rd = DRY_AIR.rd;
+    const sf = this.sfc;
+    if (sf) {
+      const cp = DRY_AIR.cp;
       const qv = m.scalars[QV];
-      const pis = Math.pow(1e5 * 0 + 1, 1);      // surface Exner ~ 1 at 1000 hPa
-      void pis;
       const pi1 = m.pi0[0]!, rho1 = m.rho0[0]!;
-      const psfc = DRY_AIR.pRef;                // base-state surface pressure
-      const esS = 611.2 * Math.exp(17.67 * (c.sst - 273.15) / (c.sst - 29.65));
-      const qsS = 0.622 * esS / (psfc - 0.378 * esS);
-      const thS = c.sst;                         // pi_surface = 1
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-        const q = m.idx(i, j, 0);
+        const q = m.idx(i, j, 0), c2 = j * nx + i;
+        const tsk = sf.tsk[c2]!;
+        const esS = 611.2 * Math.exp(17.67 * (tsk - 273.15) / (tsk - 29.65));
+        const qsS = 0.622 * esS / (sf.psfc - 0.378 * esS);
+        const thS = tsk / sf.pis;
         const ua = 0.5 * (u[q]! + u[q + 1]!), va = 0.5 * (v[q]! + v[q + sx]!);
         const spd = Math.max(Math.hypot(ua, va), 1);
         // drag coefficient: 1e-3 (1 + 0.07 U) capped at 2.4e-3 (Donelan-type saturation)
@@ -104,14 +122,14 @@ export class RegionalPhysics {
         t.fv[q] = t.fv[q]! - 0.5 * tauy / dz; t.fv[q + sx] = t.fv[q + sx]! - 0.5 * tauy / dz;
         const fth = c.ck * spd * (thS - th[q]!);             // K m/s
         t.fth[q] = t.fth[q]! + fth / dz;
-        this.shf[j * nx + i] = rho1 * cp * pi1 * fth;
+        this.shf[c2] = rho1 * cp * pi1 * fth;
         if (qv) {
-          const fq = c.ck * spd * (qsS - qv[q]!);
+          let fq = c.ck * spd * (qsS - qv[q]!);
+          if (fq > 0) fq *= sf.wet[c2]!;                     // evaporation limited by surface wetness
           t.fsc[QV]![q] = t.fsc[QV]![q]! + fq / dz;
-          this.lhf[j * nx + i] = rho1 * 2.5e6 * fq;
+          this.lhf[c2] = rho1 * 2.5e6 * fq;
         }
       }
-      void rd;
     }
 
     // ---- Newtonian radiative relaxation, capped cooling

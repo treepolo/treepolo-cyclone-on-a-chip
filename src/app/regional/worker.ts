@@ -6,7 +6,8 @@ import { RegionalPhysics } from '../../regional/physics.js';
 import { tropicalSounding, insertVortex, tcMetrics } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
-import type { FromRegionalWorker, GroundField, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import { nestFromGlobal, sampleSurface, NestSpec } from '../../regional/nest.js';
+import type { FromRegionalWorker, GroundField, NestPayload, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 let m: RegionalModel | null = null;
 let mp: KesslerMicrophysics | null = null;
@@ -60,6 +61,28 @@ function build(exp: RegionalExperiment): { dt: number; description: string } {
   }
 }
 
+/** One-way nest inside the global model at (lat0, lon0): initial and lateral-boundary fields from the
+ *  global snapshot, surface skin temperature and wetness from the global surface model. */
+function buildNest(g: NestPayload, lat0: number, lon0: number, fine: boolean): { dt: number; description: string; land: Uint8Array | null } {
+  experiment = 'nest';
+  const spec: NestSpec = fine ? { lat0, lon0, L: 1200000, dx: 12000, nz: 30, dz: 600, dt: 60, nsound: 6 } : { lat0, lon0, L: 1200000, dx: 20000, nz: 24, dz: 750, dt: 60, nsound: 6 };
+  const nest = nestFromGlobal(g, spec, 3);
+  m = nest.model;
+  mp = new KesslerMicrophysics(m);
+  const surface = g.ts && g.wet ? { tsk: sampleSurface(g, spec, g.ts), wet: sampleSurface(g, spec, g.wet) } : null;
+  physCfg = { lh: 0.2 * spec.dx, lv: 100, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface };
+  new RegionalPhysics(m, physCfg);
+  let land: Uint8Array | null = null;
+  if (g.land) { const lf = sampleSurface(g, spec, g.land); land = Uint8Array.from(lf, (x) => (x > 0.5 ? 1 : 0)); }
+  const d = (x: number): string => (x * 180 / Math.PI).toFixed(1);
+  const lonE = lon0 * 180 / Math.PI;
+  return {
+    dt: spec.dt, land,
+    description: `全球模式巢狀區域 / Nest in the global model (${g.preset}, day ${g.day.toFixed(1)})：${d(lat0)}°${lat0 >= 0 ? 'N' : 'S'}, ${(lonE > 180 ? 360 - lonE : lonE).toFixed(1)}°${lonE > 180 ? 'W' : 'E'}，${spec.L / 1000} km 見方，Δx ${spec.dx / 1000} km；` +
+      `側邊界向全球場鬆弛（單向巢狀）${surface ? '，地表溫度與土壤濕度取自全球模式' : '，無地表通量（全球實驗無地表模式）'} / lateral boundaries relax to the global fields (one-way)${surface ? ', surface temperature and wetness from the global model' : ', no surface fluxes (no surface model in this global experiment)'}`,
+  };
+}
+
 self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
   const msg = ev.data;
   try {
@@ -74,7 +97,20 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
       const c = m!.c;
-      post({ type: 'ready', experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note });
+      post({ type: 'ready', land: null, experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note });
+      await sendFrame();
+    }
+    else if (msg.type === 'initNest') {
+      running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      const device = msg.backend === 'cpu' ? null : await getGpu();
+      const info = buildNest(msg.payload, msg.lat0, msg.lon0, !!device);
+      gpu = null;
+      let note = '';
+      if (device) { gpu = new GpuRegional(device, m!, { moist: true, physics: physCfg }); gpu.uploadFrom(m!); }
+      else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的 20 km 網格 / the CPU uses a coarser 20 km grid';
+      const c = m!.c;
+      post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land });
       await sendFrame();
     }
     else if (msg.type === 'run') running = msg.running;

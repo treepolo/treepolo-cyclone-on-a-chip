@@ -1,10 +1,23 @@
 // Messages between the regional-model UI and its worker.
 
-export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr';
+export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest';
+
+/** Global-model state handed to the regional page for one-way nesting. Grid arrays are [k][lat][lon]. */
+export interface NestPayload {
+  preset: string; day: number;
+  nlat: number; nlon: number; K: number;
+  lat: Float64Array; lon: Float64Array; sigma: Float64Array; sigmaHalf: Float64Array;
+  u: Float32Array; v: Float32Array; T: Float32Array; ps: Float32Array; q: Float32Array | null;
+  phis: Float32Array;
+  ts: Float32Array | null;       // surface (skin) temperature, K
+  wet: Float32Array | null;      // surface wetness: 1 over sea, bucket fraction over land
+  land: Uint8Array | null;
+}
 export type GroundField = 'rain' | 'wind' | 'theta';
 
 export type ToRegionalWorker =
   | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu' }
+  | { type: 'initNest'; payload: NestPayload; lat0: number; lon0: number; backend: 'auto' | 'cpu' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
   | { type: 'ground'; field: GroundField };
@@ -25,5 +38,5 @@ export interface RegionalFrame {
 
 export type FromRegionalWorker =
   | RegionalFrame
-  | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string }
+  | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null }
   | { type: 'error'; message: string };
