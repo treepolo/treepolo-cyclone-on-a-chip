@@ -234,7 +234,7 @@ $('preset').onchange = (): void => init();
 $('backendSel').onchange = (): void => init();
 function init(): void {
   running = false; syncRun();
-  const p = $<HTMLSelectElement>('preset').value;
+  const preset = $<HTMLSelectElement>('preset').value, p = preset.replace(/_Q$/, '');
   $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : p === 'EARTH_T21' ? '1200' : p === 'EARTH_T42' ? '720' : p.endsWith('T85') ? '600' : '900';
   if (p.startsWith('EARTH')) {
     $<HTMLSelectElement>('field').value = 'precip';
@@ -248,8 +248,8 @@ function init(): void {
     $<HTMLSelectElement>('field').value = 'ps';
     log('斜壓波：第 6–10 日可見氣旋加深與鋒面 / Baroclinic wave: cyclones deepen and fronts form around days 6–10');
   }
-  log(`建立模式中 / Building model: ${p}`);
-  send({ type: 'init', preset: p, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' });
+  log(`建立模式中 / Building model: ${preset}`);
+  send({ type: 'init', preset, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' });
   send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 }
 init();

@@ -113,12 +113,16 @@ export const EARTH_PRESETS: Record<string, EarthConfig> = {
   EARTH_T42: { trunc: 42, dt: 720, seed: 3 },
   EARTH_T85: { trunc: 85, dt: 600, seed: 3 },
 };
+/** Preset names with this suffix use the observation-derived ocean heat transport (data/qflux_gray_t21.json). */
+export const OBSERVED_QFLUX_SUFFIX = '_Q';
 
 export const EARTH_PHYSICS: Partial<GrayPhysicsConfig> = {
   radiation: 'byrne', seasonal: true, obliquityDeg: 23.44, yearLength: 365.25 * DAY,
   // Isca's seasonal Byrne–O'Gorman grey configuration uses a surface albedo of 0.38 (standing in for clouds);
-  // land: heat capacity 0.1 x the 20 m mixed layer and a brighter albedo (Isca bucket_model test case)
-  albedo: 0.38, albedoLand: 0.42, albedoIce: 0.6, seaIce: true,
+  // land: heat capacity 0.1 x the 20 m mixed layer. Land albedo 0.34 (less cloud over land): with 0.42
+  // deep-tropical land is colder than the ocean and the Asian monsoon reverses; 0.30 fixes all monsoon
+  // signs but runs too warm (docs/RESULTS_R2_R5.md, section 2.4)
+  albedo: 0.38, albedoLand: 0.34, albedoIce: 0.6, seaIce: true,
   mixedLayerDepth: 20, landHeatCapacity: 0.1 * 1000 * 4186 * 20, roughness: 3.21e-5, roughnessLand: 0.05, bucketMax: 0.15,
   qflux: true, qfluxAmp: 30, qfluxWidthDeg: 16,
 };

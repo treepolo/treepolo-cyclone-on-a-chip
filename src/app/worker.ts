@@ -3,7 +3,7 @@
 
 import { DAY, EARTH } from '../core/constants.js';
 import { Dycore, GridState } from '../model/dycore.js';
-import { HS_PRESETS, AQUA_PRESETS, EARTH_PRESETS, createHeldSuarez, createAquaplanet, createEarth, EarthData } from '../model/presets.js';
+import { HS_PRESETS, AQUA_PRESETS, EARTH_PRESETS, OBSERVED_QFLUX_SUFFIX, createHeldSuarez, createAquaplanet, createEarth, EarthData, MonthlyLatLon } from '../model/presets.js';
 import type { GrayPhysics } from '../model/moist/aquaplanet.js';
 import { ZonalMeanAccumulator } from '../model/diagnostics.js';
 import { createJablonowski } from '../model/jablonowski.js';
@@ -95,6 +95,7 @@ let backend: Backend | null = null;
 let currentPreset = '';
 let physics: GrayPhysics | null = null;
 let earthData: EarthData | null = null;
+let qfluxData: MonthlyLatLon | null = null;
 let gpuDevice: GPUDevice | null = null;
 let acc: ZonalMeanAccumulator | null = null;
 let accFrom = 0;
@@ -137,10 +138,16 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
       let cfg: { trunc: number; dt: number };
       let model: Dycore;
       physics = null;
-      if (EARTH_PRESETS[m.preset]) {
+      const earthName = m.preset.endsWith(OBSERVED_QFLUX_SUFFIX) ? m.preset.slice(0, -OBSERVED_QFLUX_SUFFIX.length) : m.preset;
+      if (EARTH_PRESETS[earthName]) {
         if (!earthData) earthData = await (await fetch(new URL('../../data/earth_t42.json', import.meta.url))).json() as EarthData;
-        cfg = EARTH_PRESETS[m.preset]!;
-        const built = createEarth(EARTH_PRESETS[m.preset]!, earthData);
+        cfg = EARTH_PRESETS[earthName]!;
+        let climate: { qflux?: MonthlyLatLon } = {};
+        if (earthName !== m.preset) {
+          if (!qfluxData) qfluxData = await (await fetch(new URL('../../data/qflux_gray_t21.json', import.meta.url))).json() as MonthlyLatLon;
+          climate = { qflux: qfluxData };
+        }
+        const built = createEarth(EARTH_PRESETS[earthName]!, earthData, climate.qflux ? { qflux: false } : {}, climate);
         model = built.model; physics = built.physics;
       } else if (AQUA_PRESETS[m.preset]) {
         cfg = AQUA_PRESETS[m.preset]!;
