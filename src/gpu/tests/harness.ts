@@ -13,5 +13,7 @@ export async function getDevice(): Promise<GPUDevice> {
   if (!navigator.gpu) throw new Error('WebGPU unavailable');
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('no WebGPU adapter');
-  return adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: Math.min(16, adapter.limits.maxStorageBuffersPerShaderStage), maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } });
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: Math.min(16, adapter.limits.maxStorageBuffersPerShaderStage), maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } });
+  device.addEventListener('uncapturederror', (e) => { console.log(`GPUTEST FAIL gpu-error ${(e as GPUUncapturedErrorEvent).error.message.slice(0, 600)}`); });
+  return device;
 }
