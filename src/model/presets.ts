@@ -68,6 +68,7 @@ export interface AquaplanetConfig { trunc: number; dt: number; seed: number }
 export const AQUA_PRESETS: Record<string, AquaplanetConfig> = {
   AQUA_T21: { trunc: 21, dt: 1200, seed: 2 },
   AQUA_T42: { trunc: 42, dt: 720, seed: 2 },
+  AQUA_T85: { trunc: 85, dt: 600, seed: 2 },
 };
 
 export function createAquaplanet(cfg: AquaplanetConfig): { model: Dycore; physics: GrayAquaplanet } {
@@ -110,6 +111,7 @@ export interface EarthConfig { trunc: number; dt: number; seed: number }
 export const EARTH_PRESETS: Record<string, EarthConfig> = {
   EARTH_T21: { trunc: 21, dt: 1200, seed: 3 },
   EARTH_T42: { trunc: 42, dt: 720, seed: 3 },
+  EARTH_T85: { trunc: 85, dt: 600, seed: 3 },
 };
 
 export const EARTH_PHYSICS: Partial<GrayPhysicsConfig> = {

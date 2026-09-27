@@ -3,7 +3,7 @@
 export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip' | 'sst' | 'q' | 'olr';
 
 export type ToWorker =
-  | { type: 'init'; preset: string }
+  | { type: 'init'; preset: string; backend: 'auto' | 'cpu' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
   | { type: 'view'; field: FieldId; level: number }
@@ -45,5 +45,5 @@ export interface ZonalMessage {
 export type FromWorker =
   | FrameMessage
   | ZonalMessage
-  | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number; moist: boolean; lat: Float64Array; land: Uint8Array | null }
+  | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number; moist: boolean; lat: Float64Array; land: Uint8Array | null; backend: 'cpu' | 'gpu'; note: string }
   | { type: 'error'; message: string };

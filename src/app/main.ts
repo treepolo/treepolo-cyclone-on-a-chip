@@ -128,7 +128,9 @@ function updateTracers(dtWall: number): void {
 worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
   const m = ev.data;
   if (m.type === 'ready') {
-    log(`模式就緒 / Model ready: T${m.trunc} ${m.nlon}×${m.nlat} L${m.K}, Δt = ${m.dt} s`);
+    log(`模式就緒 / Model ready: T${m.trunc} ${m.nlon}×${m.nlat} L${m.K}, Δt = ${m.dt} s, ${m.backend === 'gpu' ? 'WebGPU f32' : 'CPU Float64'}`);
+    if (m.note) log(m.note);
+    $('backend').textContent = m.backend === 'gpu' ? 'WebGPU（f32）' : 'CPU（Float64）';
     $('grid').textContent = `T${m.trunc} · ${m.nlon}×${m.nlat} · L${m.K}`;
     globe.setOutline(m.lat, m.nlon, m.land);
     const lev = $<HTMLInputElement>('level');
@@ -176,10 +178,11 @@ $('level').oninput = pushView;
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 $('resetAvg').onclick = (): void => { send({ type: 'resetAverage' }); log('重設緯向平均 / Zonal average reset'); };
 $('preset').onchange = (): void => init();
+$('backendSel').onchange = (): void => init();
 function init(): void {
   running = false; syncRun();
   const p = $<HTMLSelectElement>('preset').value;
-  $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : p === 'EARTH_T21' ? '1200' : p === 'EARTH_T42' ? '720' : '900';
+  $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : p === 'EARTH_T21' ? '1200' : p === 'EARTH_T42' ? '720' : p.endsWith('T85') ? '600' : '900';
   if (p.startsWith('EARTH')) {
     $<HTMLSelectElement>('field').value = 'precip';
     log('地球：真實海陸與地形、季節日照；模式從 3 月 20 日（春分）開始 / Earth: real land, orography and seasons; the model starts on 20 March (equinox)');
@@ -193,7 +196,7 @@ function init(): void {
     log('斜壓波：第 6–10 日可見氣旋加深與鋒面 / Baroclinic wave: cyclones deepen and fronts form around days 6–10');
   }
   log(`建立模式中 / Building model: ${p}`);
-  send({ type: 'init', preset: p });
+  send({ type: 'init', preset: p, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' });
   send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 }
 init();
