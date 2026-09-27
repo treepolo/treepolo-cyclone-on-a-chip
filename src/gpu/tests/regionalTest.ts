@@ -211,3 +211,28 @@ export async function regionalAdaptiveTest(): Promise<void> {
   gcheck('adaptive dt: domain rain within 30 %', Math.abs(b.rain - a.rain) < 0.3 * Math.max(a.rain, 1e-9), `${b.rain.toFixed(1)} vs ${a.rain.toFixed(1)}`);
   gcheck('adaptive dt: fewer steps', b.steps < a.steps, `${b.steps} vs ${a.steps} steps, final dt ${b.dtEnd.toFixed(1)} s`);
 }
+
+/** Debug: fraction of columns flagged as containing condensate, and the condensate magnitudes. */
+export async function regionalFlagDebug(): Promise<void> {
+  const device = await getDevice();
+  const nx = 60, nz = 40, dx = 2000;
+  const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz: 500, dt: 6, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, 6);
+  m.setBaseWind((z) => ({ u: 30 * Math.tanh(z / 3000) - 15, v: 0 }));
+  for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+  const g = new GpuRegional(device, m, { moist: true, physics: null, ice: true });
+  g.uploadFrom(m);
+  for (const n of [1, 5, 20]) {
+    g.step(n); await device.queue.onSubmittedWorkDone();
+    const st = await g.readState();
+    const hist = new Map<number, number>();
+    let raw = 0;
+    for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+      let mx = 0;
+      for (let k = 0; k < nz; k++) for (let f = 6; f < g.nf; f++) mx = Math.max(mx, Math.abs(st[f * m.size + m.idx(i, j, k)]!));
+      if (mx > 0) raw++;
+      const b = mx === 0 ? -99 : Math.floor(Math.log10(mx));
+      hist.set(b, (hist.get(b) ?? 0) + 1);
+    }
+    gcheck(`flag debug after ${g.steps} steps: columns with any condensate`, true, `${raw}/${nx * nx}; log10 max histogram ${[...hist].sort((a, b) => a[0] - b[0]).map(([b, c]) => `${b}:${c}`).join(' ')}`);
+  }
+}

@@ -62,10 +62,26 @@ export class RegionalPhysics {
     this.Km = new Float64Array(m.size);
     this.shf = new Float64Array(m.c.nx * m.c.ny);
     this.lhf = new Float64Array(m.c.nx * m.c.ny);
-    m.physicsTend = (mm, t): void => this.tendencies(mm, t);
+    this.cache = { fu: new Float64Array(m.size), fv: new Float64Array(m.size), fw: new Float64Array(m.size), fth: new Float64Array(m.size), fsc: m.scalars.map(() => new Float64Array(m.size)) };
+    m.physicsTend = (mm, t, stage): void => this.tendencies(mm, t, stage);
   }
 
-  private tendencies(m: RegionalModel, t: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }): void {
+  /** sub-grid turbulence + surface-flux tendencies of the first RK stage, reused in stages 2 and 3 (as in WRF) */
+  private readonly cache: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] };
+
+  private tendencies(m: RegionalModel, out: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }, stage: number): void {
+    const t = this.cache;
+    if (stage === 0) {
+      for (const a of [t.fu, t.fv, t.fw, t.fth, ...t.fsc]) a.fill(0);
+      this.turbulenceAndSurface(m, t);
+    }
+    const add = (o: Float64Array, a: Float64Array): void => { for (let i = 0; i < o.length; i++) o[i] = o[i]! + a[i]!; };
+    add(out.fu, t.fu); add(out.fv, t.fv); add(out.fw, t.fw); add(out.fth, t.fth);
+    for (let s = 0; s < out.fsc.length; s++) add(out.fsc[s]!, t.fsc[s]!);
+    this.radiation(m, out);
+  }
+
+  private turbulenceAndSurface(m: RegionalModel, t: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }): void {
     const { nx, ny, nz, dx, dy, dz } = m.c, sx = m.sx, pl = m.plane, c = this.cfg;
     const u = m.u, v = m.v, w = m.w, th = m.th;
     const g = 9.80665;
@@ -146,7 +162,11 @@ export class RegionalPhysics {
       }
     }
 
-    // ---- Newtonian radiative relaxation, capped cooling
+  }
+
+  /** Newtonian radiative relaxation, capped cooling (every stage) */
+  private radiation(m: RegionalModel, t: { fth: Float64Array }): void {
+    const { nx, ny, nz } = m.c, c = this.cfg, th = m.th;
     if (c.radTau > 0) {
       for (let k = 0; k < nz; k++) {
         const pi = m.pi0[k]!;

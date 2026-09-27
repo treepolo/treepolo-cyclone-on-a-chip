@@ -69,7 +69,8 @@ export class RegionalModel {
   /** relaxation targets for open lateral boundaries (set by a nesting driver) */
   boundary: BoundaryTargets | null = null;
   /** sub-grid / surface / radiation slow tendencies hook */
-  physicsTend: ((m: RegionalModel, t: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }) => void) | null = null;
+  /** stage: RK3 stage 0, 1, 2 (sub-grid turbulence and surface fluxes are computed in stage 0 only) */
+  physicsTend: ((m: RegionalModel, t: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }, stage: number) => void) | null = null;
 
   constructor(cfg: RegionalConfig, sounding: (z: number) => { theta: number; qv: number }, nScalars = 0) {
     this.c = cfg;
@@ -322,7 +323,7 @@ export class RegionalModel {
   // ----------------------------------------------------------------------------------------
   // Slow tendencies (advection, Coriolis, buoyancy, damping, diffusion) from the current state
 
-  private slowTendencies(pdDt = 0): void {
+  private slowTendencies(pdDt = 0, stage = 0): void {
     const { nx, ny, nz, f, dz } = this.c, sx = this.sx, pl = this.plane, g = EARTH.gravity;
     for (const a of [this.fu, this.fv, this.fw, this.fth, this.fpp, ...this.fsc]) a.fill(0);
     for (const a of [this.u, this.v, this.w, this.th, this.pp, ...this.scalars]) this.fillHalo(a, nz + 1);
@@ -372,7 +373,7 @@ export class RegionalModel {
         this.fw[q] = this.fw[q]! - rw * this.w[q]!;
       }
     }
-    if (this.physicsTend) this.physicsTend(this, { fu: this.fu, fv: this.fv, fw: this.fw, fth: this.fth, fsc: this.fsc });
+    if (this.physicsTend) this.physicsTend(this, { fu: this.fu, fv: this.fv, fw: this.fw, fth: this.fth, fsc: this.fsc }, stage);
     if (this.c.lateral === 'open' && this.boundary) this.relaxBoundaries();
     // constant eddy diffusion (tests)
     if (this.c.kdiff2 > 0) {
@@ -510,8 +511,9 @@ export class RegionalModel {
     this.u0.set(this.u); this.v0.set(this.v); this.w0.set(this.w); this.th0s.set(this.th); this.pp0.set(this.pp);
     for (let s = 0; s < this.scalars.length; s++) this.sc0[s]!.set(this.scalars[s]!);
     const stages: [number, number][] = [[dt / 3, Math.max(1, Math.round(nsound / 3))], [dt / 2, Math.max(1, Math.round(nsound / 2))], [dt, nsound]];
-    for (const [dts, ns] of stages) {
-      this.slowTendencies(dts === dt ? dt : 0);
+    for (let st = 0; st < 3; st++) {
+      const [dts, ns] = stages[st]!;
+      this.slowTendencies(dts === dt ? dt : 0, st);
       // theta and scalars: slow only (from time n)
       for (let i = 0; i < this.size; i++) this.th[i] = this.th0s[i]! + dts * this.fth[i]!;
       for (let s = 0; s < this.scalars.length; s++) {
