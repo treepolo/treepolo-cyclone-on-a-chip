@@ -27,7 +27,7 @@ Trades, midlatitude westerlies, subtropical dry zones (E > P), storm tracks (P >
 
 ## 2. R3 地球：海陸、地形、季節 / Earth: land, orography, seasons (T21)
 
-`node dist/tools/runEarth.js EARTH_T21 3 1`（Byrne & O'Gorman 灰體輻射、季節日照、bucket 陸面、q-flux 海洋、熱力學海冰）
+`node dist/tools/runEarth.js EARTH_T21 3 1`（Byrne & O'Gorman 灰體輻射、季節日照、bucket 陸面、q-flux 海洋、熱力學海冰）。2.1–2.2 是舊預設（陸地反照率 0.42）的結果；新預設見 2.4。 / Sections 2.1–2.2 use the old default land albedo 0.42; see 2.4 for the new default.
 
 ### 2.1 季節氣候 / Seasonal climate（3 年 spin-up 後平均 1 年 / 1-year mean after 3 years）
 
@@ -68,22 +68,33 @@ With either sea-ice treatment the global mean surface temperature drifts down by
 
 ### 2.4 陸地反照率敏感度：季風的開關 / Land-albedo sensitivity: the monsoon switch
 
-陸地反照率由 0.42 降為 0.30（海洋維持 0.38，同樣是 3 年積分、平均第 3 年），**五個季風區的季節性全部轉為正確**：
+陸地反照率由 0.42 降為 0.30（海洋維持 0.38，同樣是 3 年積分、平均第 3 年），**五個季風區的季節性全部轉為正確**（表中為 JJA / DJF，mm/day）：
 With land albedo lowered from 0.42 to 0.30 (ocean kept at 0.38; 3-year run, third year averaged) **all five monsoon regions get the correct seasonality**:
 
-| 區域 / Region | 0.42：JJA / DJF (mm/day) | 0.30：JJA / DJF (mm/day) |
-|---|---|---|
-| 南亞 / South Asia | 2.9 / 3.1 | **4.1 / 2.5** |
-| 西非 / West Africa | 0.7 / 0.1 | **5.0 / 1.3** |
-| 東亞 / East Asia | 4.3 / 9.0 | **7.1 / 6.0** |
-| 澳洲北部 / N Australia | 3.7 / 2.9 | **2.7 / 5.0** |
-| 南美 / South America | 1.6 / 6.3 | **1.1 / 7.4** |
+| 區域 / Region | 0.42 | 0.30 | 0.34 | 0.34 + 觀測 q-flux / observed q-flux |
+|---|---|---|---|---|
+| 南亞 / South Asia | 2.9 / 3.1 | **4.1 / 2.5** | 3.9 / 2.1 | 5.4 / 6.2 |
+| 西非 / West Africa | 0.7 / 0.1 | **5.0 / 1.3** | 3.0 / 0.5 | 7.1 / 3.2 |
+| 東亞 / East Asia | 4.3 / 9.0 | **7.1 / 6.0** | 7.2 / 6.4 | **8.6 / 2.3** |
+| 澳洲北部 / N Australia | 3.7 / 2.9 | **2.7 / 5.0** | 4.6 / 1.0 | 5.6 / 4.4 |
+| 南美 / South America | 1.6 / 6.3 | **1.1 / 7.4** | 1.9 / 7.9 | 5.3 / 7.3 |
 
 另一個實驗把海洋改成觀測的 AMIP 月平均海溫（陸地反照率維持 0.42，`SST=data/sst_amip_2deg.json`）：東亞（JJA 6.5 / DJF 2.0）與西非（4.6 / 2.2）轉為正確，但南亞仍反向（3.4 / 5.5），南半球季風也偏弱。可見兩個因素都有影響：過熱的 slab 印度洋與西太平洋（海洋熱傳輸不足）影響東亞，陸地反照率影響南亞。由這個實驗推導出的海洋熱傳輸（q-flux，Russell et al. 1985 方法；赤道東太平洋湧升 −80 W/m²、赤道印度洋 −61 W/m²、黑潮 +18 W/m²）存成 `data/qflux_gray_t21.json`；「q-flux + 陸地反照率 0.34」的組合積分進行中。
 A second experiment prescribes the observed AMIP monthly SST (land albedo kept at 0.42; `SST=data/sst_amip_2deg.json`). East Asia (JJA 6.5 / DJF 2.0) and West Africa (4.6 / 2.2) become correct, but South Asia stays reversed (3.4 / 5.5) and the Southern Hemisphere monsoons are weak. So both factors matter: the overheated slab Indian Ocean and western Pacific (missing ocean heat transport) affect East Asia, and the land albedo affects South Asia. The implied ocean heat transport from this run (q-flux, Russell et al. 1985 method: −80 W/m² in the eastern equatorial Pacific upwelling, −61 W/m² in the equatorial Indian Ocean, +18 W/m² along the Kuroshio) is saved as `data/qflux_gray_t21.json`; a combined run with this q-flux and land albedo 0.34 is in progress.
 
-這證實了 2.2 的診斷：季風由海陸熱力對比驅動，而在灰體模式中這個對比完全取決於代表「雲＋地表」的反照率。代價是氣候偏暖（全球平均 ~295 K、撒哈拉夏季 325 K、可降水量 ~33 kg/m²），因為灰體水汽回饋很強。折衷值 0.34 的積分進行中；真正的解法仍是 R7（有雲的非灰體輻射，讓陸地與海洋的反照率各自來自雲量與地表）。
-This confirms the diagnosis in 2.2: the monsoon is driven by the land–sea thermal contrast, and in a gray model that contrast is set entirely by the albedo that stands in for clouds plus surface. The price is a warm climate (global mean about 295 K, Sahara summer 325 K, precipitable water about 33 kg/m²) because the gray water-vapour feedback is strong. A compromise run at 0.34 is in progress; the real fix is still R7 (non-gray radiation with clouds, so land and ocean albedo come from cloud cover and surface separately).
+這證實了 2.2 的診斷：季風由海陸熱力對比驅動，而在灰體模式中這個對比取決於代表「雲＋地表」的反照率。代價是 0.30 時氣候偏暖（全球 ~295 K、撒哈拉夏季 325 K）。
+
+- **0.34**：南亞、西非、東亞（冬夏差偏小）、南美正確，澳洲反向；撒哈拉夏季 317 K。**現在是地球設定的預設值。**
+- **0.34 + 觀測推導的海洋熱傳輸**（網頁「T21 + 觀測推導的海洋熱傳輸」選項，`QFLUX=data/qflux_gray_t21.json`）：東亞季風最真實（JJA 8.6 / DJF 2.3），西非、南美正確；南亞接近持平但略反向，澳洲仍反向；赤道太平洋海溫 304 K，比 slab 預設的 306 K 更接近觀測。
+
+兩者各有長短，所以網頁同時提供；五個區域全部正確又不偏暖，仍需要 R7（有雲的非灰體輻射）。
+
+This confirms the diagnosis in 2.2: the monsoon is driven by the land–sea thermal contrast, which in a gray model is set by the albedo standing in for clouds plus surface. At 0.30 the climate runs warm (global mean about 295 K, Sahara summer 325 K).
+
+- **0.34**: South Asia, West Africa, East Asia (winter–summer contrast too small) and South America correct, Australia reversed; Sahara summer 317 K. **This is now the Earth default.**
+- **0.34 plus the observation-derived ocean heat transport** (the "T21 + observation-derived ocean heat transport" option in the app, `QFLUX=data/qflux_gray_t21.json`): the most realistic East Asian monsoon (JJA 8.6 / DJF 2.3), West Africa and South America correct; South Asia nearly flat but slightly reversed, Australia still reversed; equatorial Pacific SST 304 K, closer to observations than the 306 K of the default slab.
+
+Each has strengths, so the app offers both; getting all five regions right without a warm bias still needs R7 (non-gray radiation with clouds).
 
 ### 2.5 綜觀天氣 / Synoptic weather
 
@@ -145,19 +156,22 @@ The bubble becomes deep convection within 15 minutes, reaches the tropopause (ab
 ![ice section](results/supercell_ice_xz_ice_60.svg)
 ![precipitation](results/supercell_ice_rain_120.svg)
 
-### 4.3 熱帶氣旋（f 平面，Δx 15 km，Kessler）/ Tropical cyclone (f-plane, 15 km, Kessler)
-`node dist/tools/runTropicalCyclone.js 8 15000`
+### 4.3 熱帶氣旋（f 平面，Δx 15 km）/ Tropical cyclone (f-plane, 15 km)
+`node dist/tools/runTropicalCyclone.js 8 15000 1200000 results/tc15_ice ice`
 
 | 時間 / Time | 24 h | 48 h | 72 h | 96 h | 120 h | 144 h | 168 h | 192 h |
 |---|---|---|---|---|---|---|---|---|
-| 最大地面風 / Vmax (m/s) | 14.8 | 15.2 | 19.6 | 32.3 | 38.8 | 38.3 | 40.6 | 42.0 |
-| 最大風半徑 / RMW (km) | 98 | 83 | 53 | 23 | 38 | 23 | 23 | 23 |
+| 最大地面風，冰相 / Vmax, ice (m/s) | 14.9 | 15.3 | 17.8 | 28.4 | 46.0 | 44.8 | 43.0 | 39.5 |
+| 最低層最低氣壓 / pmin, lowest level (hPa) | 941.1 | 939.8 | 938.7 | 928.5 | 916.1 | 913.3 | 917.8 | 918.1 |
+| 最大風半徑 / RMW (km) | 113 | 143 | 98 | 38 | 23 | 23 | 23 | 23 |
+| 最大地面風，Kessler / Vmax, Kessler (m/s) | 14.8 | 15.2 | 19.6 | 32.3 | 38.8 | 38.3 | 40.6 | 42.0 |
 
-28 °C 海面上 15 m/s 的弱渦旋在 2–3 天的醞釀後，於 72–108 h 快速增強（24 h 內增加約 20 m/s），最大風半徑由 98 km 收縮到 23 km，之後在 ~40 m/s 準穩定：15 km 格距無法解析眼牆，強度受解析度限制（此海溫的理論潛在強度約 70 m/s）。眼牆、多眼牆與眼牆置換需要 2–3 km 格距（GPU，R6）。
-A 15 m/s vortex over a 28 °C sea gestates for 2–3 days, intensifies rapidly between 72 and 108 h (about 20 m/s in 24 h) while the radius of maximum wind contracts from 98 to 23 km, then levels off near 40 m/s: at 15 km the eyewall is unresolved and intensity is resolution-limited (the potential intensity for this SST is about 70 m/s). Eyewalls, concentric eyewalls and replacement cycles need 2–3 km grids (GPU, R6).
+28 °C 海面上 15 m/s 的弱渦旋醞釀約 3 天後，在 72–120 h 快速增強（冰相版 48 h 內增加 28 m/s），最大風半徑由 100 km 以上收縮到 23 km，之後在 40–46 m/s 準穩定。第 6 天的方位角平均剖面：眼牆上升氣流是一個位於半徑 20–45 km、從地面伸到 14 km 並隨高度向外傾斜的環，半徑 15 km 以內的眼幾乎沒有上升運動；切向風極大約 38 m/s，位在低層 30–40 km，高層外圍轉為反氣旋外流。眼牆診斷在 96 h 以後一直是單一眼牆（~38 km）。15 km 格距下強度受解析度限制（此海溫的理論潛在強度約 70 m/s）；雙眼牆與眼牆置換需要 2–3 km（GPU，R6）。
+A 15 m/s vortex over a 28 °C sea gestates for about 3 days, then intensifies rapidly between 72 and 120 h (28 m/s in 48 h with ice microphysics) while the radius of maximum wind contracts from over 100 km to 23 km, then levels off at 40–46 m/s. Azimuthal means on day 6: the eyewall updraft is a ring at 20–45 km radius, rising from the surface to 14 km and sloping outward with height, around a nearly motionless eye inside 15 km; the tangential wind peaks near 38 m/s at 30–40 km in the lower troposphere and turns anticyclonic in the upper-level outflow. The eyewall diagnostic shows a single eyewall (about 38 km) from 96 h on. At 15 km intensity is resolution-limited (the potential intensity for this SST is about 70 m/s); concentric eyewalls and replacement cycles need 2–3 km (GPU, R6).
 
-![vt](results/tc15_vt_rz_d6.svg)
-![wind](results/tc15_wind_sfc_d6.svg)
+![vt](results/tc15_ice_vt_rz_d6.svg)
+![w](results/tc15_ice_w_rz_d6.svg)
+![wind](results/tc15_ice_wind_sfc_d6.svg)
 
 ### 4.4 單向巢狀：全球模式中的區域預報 / One-way nest inside the Earth model
 `node dist/tools/runNest.js results/EARTH_T21 auto 30 24 20`
@@ -176,6 +190,12 @@ A 15 m/s vortex over a 28 °C sea gestates for 2–3 days, intensifies rapidly b
 ![rain](results/nest_rain_24h.svg)
 ![wind](results/nest_wind1km_24h.svg)
 ![condensate](results/nest_condensate_24h.svg)
+
+### 4.5 龍捲尺度超大胞環境：CPU 粗網格預覽 / Tornado-scale supercell set-up: coarse CPU preview
+`node dist/tools/runTornado.js 120`（Δx 500 m、40 km、開放側邊界、區域隨風暴移動）
+
+WK82 探空、四分之一圓風徑圖、地面對數律摩擦。第一版用週期性 30 km 區域：風暴吞回自己的冷外流，約一小時後衰亡，追蹤器也曾誤鎖到遠處的上升氣流。改成向環境鬆弛的開放邊界、追蹤器只在風暴附近搜尋並以伽利略座標平移跟隨後，風暴持續兩小時並停在區域中央：上升氣流 45–55 m/s、雲頂 15 km、3 km 渦度 0.05 s⁻¹（中尺度氣旋）、近地面渦度增加到 0.02 s⁻¹、對地風 16 m/s。500 m 解析不了龍捲；網頁的 250 m GPU 版本才是觀察龍捲是否自然生成的設定（R6）。
+WK82 sounding, quarter-circle hodograph, log-law surface drag. The first version used a periodic 30 km domain: the storm ingested its own cold outflow and died after about an hour, and the tracker once locked onto a distant updraft. With open boundaries relaxing to the environment, and a tracker that searches only near the storm and follows it by a Galilean frame shift, the storm lasts two hours and stays centred: updrafts 45–55 m/s, cloud top 15 km, 3-km vorticity 0.05 s⁻¹ (a mesocyclone), near-surface vorticity growing to 0.02 s⁻¹, ground-relative wind 16 m/s. 500 m cannot resolve a tornado; the app's 250 m GPU version is the set-up for seeing whether one forms (R6).
 
 ## 5. 尚未達成 / Not yet achieved
 

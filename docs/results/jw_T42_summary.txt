@@ -1,0 +1,29 @@
+Jablonowski–Williamson T42L26 dt=900s
+
+Steady state (no perturbation):
+day 1: min ps 999.98 hPa at 87.9N 0.0E, max ps 1000.02 hPa, rms zonal ps deviation 0.000 hPa
+day 2: min ps 999.97 hPa at 87.9N 0.0E, max ps 1000.01 hPa, rms zonal ps deviation 0.000 hPa
+day 3: min ps 999.97 hPa at 87.9N 0.0E, max ps 1000.03 hPa, rms zonal ps deviation 0.000 hPa
+day 4: min ps 999.97 hPa at 87.9N 0.0E, max ps 1000.00 hPa, rms zonal ps deviation 0.000 hPa
+day 5: min ps 999.95 hPa at 87.9N 0.0E, max ps 1000.02 hPa, rms zonal ps deviation 0.000 hPa
+day 6: min ps 999.96 hPa at 87.9N 0.0E, max ps 1000.01 hPa, rms zonal ps deviation 0.000 hPa
+day 7: min ps 999.97 hPa at 87.9N 0.0E, max ps 1000.03 hPa, rms zonal ps deviation 0.000 hPa
+day 8: min ps 999.96 hPa at 87.9N 0.0E, max ps 1000.01 hPa, rms zonal ps deviation 0.000 hPa
+day 9: min ps 999.95 hPa at 87.9N 0.0E, max ps 1000.01 hPa, rms zonal ps deviation 0.000 hPa
+day 10: min ps 999.96 hPa at 87.9N 0.0E, max ps 1000.01 hPa, rms zonal ps deviation 0.000 hPa
+day 11: min ps 999.96 hPa at 87.9N 0.0E, max ps 1000.03 hPa, rms zonal ps deviation 0.000 hPa
+day 12: min ps 999.94 hPa at 87.9N 0.0E, max ps 1000.01 hPa, rms zonal ps deviation 0.000 hPa
+
+Baroclinic wave (1 m/s perturbation):
+day 1: min ps 999.63 hPa at 46.0N 45.0E, max ps 1000.33 hPa, rms zonal ps deviation 0.051 hPa
+day 2: min ps 999.55 hPa at 48.8N 67.5E, max ps 1000.40 hPa, rms zonal ps deviation 0.058 hPa
+day 3: min ps 999.16 hPa at 46.0N 87.2E, max ps 1000.49 hPa, rms zonal ps deviation 0.069 hPa
+day 4: min ps 998.34 hPa at 48.8N 106.9E, max ps 1001.06 hPa, rms zonal ps deviation 0.114 hPa
+day 5: min ps 996.70 hPa at 48.8N 126.6E, max ps 1002.44 hPa, rms zonal ps deviation 0.227 hPa
+day 6: min ps 993.50 hPa at 48.8N 146.3E, max ps 1004.88 hPa, rms zonal ps deviation 0.454 hPa
+day 7: min ps 986.48 hPa at 51.6N 168.7E, max ps 1008.99 hPa, rms zonal ps deviation 0.907 hPa
+day 8: min ps 972.08 hPa at 57.2N 191.3E, max ps 1014.41 hPa, rms zonal ps deviation 1.774 hPa
+day 9: min ps 949.04 hPa at 60.0N 213.7E, max ps 1019.56 hPa, rms zonal ps deviation 3.087 hPa
+day 10: min ps 927.54 hPa at 65.6N 233.4E, max ps 1025.10 hPa, rms zonal ps deviation 4.529 hPa
+day 11: min ps 925.53 hPa at 68.4N 253.1E, max ps 1029.77 hPa, rms zonal ps deviation 5.619 hPa
+day 12: min ps 922.05 hPa at 68.4N 270.0E, max ps 1033.05 hPa, rms zonal ps deviation 6.745 hPa
