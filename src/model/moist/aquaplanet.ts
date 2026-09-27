@@ -91,6 +91,27 @@ export interface AquaplanetFields {
   blDepth: Float64Array;      // m
 }
 
+/** Monthly climatology on the model grid: 12 fields at month-centre days of a `yearDays`-day year
+ *  whose day 0 is 1 January. */
+export interface MonthlyField { days: number[]; yearDays: number; fields: Float64Array[] }
+
+/** Day of the (climatological) year at model time t; model time 0 is the March equinox, ~20 March. */
+export function climDay(t: number, yearLength: number, yearDays: number): number {
+  const d = 79 / 360 * yearDays + t / yearLength * yearDays;
+  return ((d % yearDays) + yearDays) % yearDays;
+}
+
+/** Linear interpolation weights between the two climatological months bracketing day d. */
+export function monthWeights(mf: MonthlyField, d: number): [number, number, number] {
+  const n = mf.days.length, Y = mf.yearDays;
+  for (let m = 0; m < n; m++) {
+    const a = mf.days[m]!, b = m + 1 < n ? mf.days[m + 1]! : mf.days[0]! + Y;
+    const dd = d < mf.days[0]! ? d + Y : d;
+    if (dd >= a && dd < b) return [m, (m + 1) % n, (dd - a) / (b - a)];
+  }
+  return [n - 1, 0, 0];
+}
+
 export class GrayPhysics implements ColumnPhysics {
   readonly f: AquaplanetFields;
   readonly cfg: GrayPhysicsConfig;
@@ -104,6 +125,14 @@ export class GrayPhysics implements ColumnPhysics {
   negativeWater = 0;
   /** current solar declination (rad) */
   declination = 0;
+  /** prescribed sea-surface temperature climatology (fixed-SST / AMIP-type runs); open ocean only */
+  sstClim: MonthlyField | null = null;
+  /** loaded ocean heat-flux convergence climatology (W m^-2), replacing the analytic q-flux */
+  qfluxField: MonthlyField | null = null;
+  /** fixed-SST runs: monthly accumulations of the net surface energy flux into the ocean (J m^-2)
+   *  and of the weights (s), for deriving the implied q-flux */
+  readonly netAcc: Float64Array[];
+  readonly netW: Float64Array;
 
   constructor(private readonly planet: Planet, private readonly air: DryAir, nlat: number, nlon: number, K: number,
               readonly lat: Float64Array, cfg: Partial<GrayPhysicsConfig> = {}, surface?: SurfaceMap) {
@@ -121,6 +150,8 @@ export class GrayPhysics implements ColumnPhysics {
       cc: c(K), dd: c(K), kk: c(K + 1), sw: c(K + 1),
     };
     this.work = sbmWork(K);
+    this.netAcc = Array.from({ length: 12 }, () => new Float64Array(ng));
+    this.netW = new Float64Array(12);
     this.qfluxLat = new Float64Array(nlat);
     const w = this.cfg.qfluxWidthDeg * Math.PI / 180;
     for (let j = 0; j < nlat; j++) {
@@ -150,6 +181,40 @@ export class GrayPhysics implements ColumnPhysics {
     this.f.accTime = 0;
   }
 
+  /**
+   * Implied ocean heat-flux convergence from a fixed-SST run (Russell et al. 1985): for each month
+   * Q = C dT/dt - F_net with T the prescribed climatology and F_net the accumulated net surface flux;
+   * the annual ocean-area mean is removed so that the ocean heat transport integrates to zero.
+   * Points that were never open water (sea ice, land) get 0.
+   */
+  impliedQflux(): MonthlyField {
+    const sc = this.sstClim;
+    if (!sc) throw new Error('impliedQflux needs a fixed-SST run');
+    const ng = this.f.sst.length, C = MOIST.rhoWater * MOIST.cpWater * this.cfg.mixedLayerDepth, dtm = this.cfg.yearLength / 12;
+    const fields = Array.from({ length: 12 }, (_, m) => {
+      const out = new Float64Array(ng), prev = sc.fields[(m + 11) % 12]!, next = sc.fields[(m + 1) % 12]!, w = this.netW[m]!;
+      for (let p = 0; p < ng; p++) {
+        if (this.surface.land[p] || w === 0) continue;
+        const acc = this.netAcc[m]![p]!;
+        if (acc === 0) continue;
+        out[p] = C * (next[p]! - prev[p]!) / (2 * dtm) - acc / w;
+      }
+      return out;
+    });
+    // remove the annual, ocean-area-weighted mean over the points that carry a q-flux
+    let s = 0, a = 0;
+    const nlon = this.nlon;
+    for (let p = 0; p < ng; p++) {
+      const c = Math.cos(this.lat[Math.floor(p / nlon)]!);
+      let anyv = false, sum = 0;
+      for (let m = 0; m < 12; m++) { if (fields[m]![p]! !== 0) anyv = true; sum += fields[m]![p]!; }
+      if (anyv) { s += c * sum / 12; a += c; }
+    }
+    const mean = a > 0 ? s / a : 0;
+    for (const f of fields) for (let p = 0; p < ng; p++) if (f[p]! !== 0) f[p] = f[p]! - mean;
+    return { days: sc.days, yearDays: sc.yearDays, fields };
+  }
+
   /** Daily-mean top-of-atmosphere insolation (W m^-2) at latitude lat for the current declination. */
   insolation(lat: number): number {
     const c = this.cfg;
@@ -173,10 +238,17 @@ export class GrayPhysics implements ColumnPhysics {
     const { nlat, nlon, K } = st, ng = nlat * nlon;
     const C = this.col;
     this.setTime(time);
+    const sc = this.sstClim, qc = this.qfluxField;
+    const ws = sc ? monthWeights(sc, climDay(time, this.cfg.yearLength, sc.yearDays)) : null;
+    const wq = qc ? monthWeights(qc, climDay(time, this.cfg.yearLength, qc.yearDays)) : null;
+    if (ws) { this.netW[ws[0]] = this.netW[ws[0]]! + (1 - ws[2]) * dt; this.netW[ws[1]] = this.netW[ws[1]]! + ws[2] * dt; }
+    this.fixedW = ws;
     for (let j = 0; j < nlat; j++) {
-      const la = this.lat[j]!, sl = Math.sin(la), insol = this.insolation(la), qf = this.qfluxLat[j]!;
+      const la = this.lat[j]!, sl = Math.sin(la), insol = this.insolation(la);
       for (let i = 0; i < nlon; i++) {
         const p = j * nlon + i;
+        const qf = wq ? qc!.fields[wq[0]]![p]! * (1 - wq[2]) + qc!.fields[wq[1]]![p]! * wq[2] : this.qfluxLat[j]!;
+        this.sstNow = ws ? sc!.fields[ws[0]]![p]! * (1 - ws[2]) + sc!.fields[ws[1]]![p]! * ws[2] : NaN;
         for (let k = 0; k < K; k++) {
           const q = k * ng + p;
           C.T![k] = st.T[q]!; C.q![k] = st.q[q]!; C.u![k] = st.u[q]!; C.v![k] = st.v[q]!;
@@ -190,6 +262,9 @@ export class GrayPhysics implements ColumnPhysics {
     }
     this.f.accTime += dt;
   }
+
+  private sstNow = NaN;
+  private fixedW: [number, number, number] | null = null;
 
   private column(p: number, sinLat: number, insol: number, qflux: number, ps: number,
                  sigma: Float64Array, sigmaHalf: Float64Array, dt: number): void {
@@ -307,7 +382,14 @@ export class GrayPhysics implements ColumnPhysics {
     // surface energy budget
     const heatCap = isLand ? cfg.landHeatCapacity : MOIST.rhoWater * MOIST.cpWater * cfg.mixedLayerDepth;
     const net = swSfc * (1 - albedo) + lwd[K]! - MOIST.stefan * ts ** 4 - fluxS - lh + (isLand ? 0 : qflux);
-    if (!isLand && cfg.seaIce) seaIceStep(f, p, ts, net, qflux, heatCap, dt);
+    const sstC = this.sstNow;
+    if (!isLand && Number.isFinite(sstC) && sstC > SEA_ICE.TF + 0.2) {
+      // fixed SST over open water: record the surface energy flux (without q-flux) for the implied q-flux
+      const w = this.fixedW!, e = (net - qflux) * dt;
+      this.netAcc[w[0]]![p] = this.netAcc[w[0]]![p]! + (1 - w[2]) * e;
+      this.netAcc[w[1]]![p] = this.netAcc[w[1]]![p]! + w[2] * e;
+      f.sst[p] = sstC; f.ice[p] = 0;
+    } else if (!isLand && cfg.seaIce) seaIceStep(f, p, ts, net, qflux, heatCap, dt);
     else f.sst[p] = ts + dt * net / heatCap;
 
     // ---------------- 4. sponge above 50 hPa (kinetic energy lost is returned as heat)

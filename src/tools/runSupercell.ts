@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { RegionalModel } from '../regional/core.js';
 import { KesslerMicrophysics, weismanKlemp, QV, QC, QR } from '../regional/kessler.js';
 import { IceMicrophysics, QI, QS, QG } from '../regional/ice.js';
-import { xySvg, sectionSvg } from './plot.js';
+import { xySvg, xzSvg } from './plot.js';
 
 const minutes = Number(process.argv[2] ?? 120), dx = Number(process.argv[3] ?? 2000);
 const outDir = process.argv[4] ?? 'results/supercell';
@@ -47,15 +47,15 @@ const snap = (tag: string): void => {
     // west-east section through the column of maximum 4-km updraft: liquid (qc + qr) and ice (qi + qs + qg)
     let jm = 0, wm = -1;
     for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) { const w = m.w[m.idx(i, j, k4)]!; if (w > wm) { wm = w; jm = j; } }
-    const xs = Array.from({ length: nx }, (_, i) => (i + 0.5) * dx / 1000), lev = Array.from({ length: nz }, (_, k) => 1 - (k + 0.5) / nz);
+    const xs = Array.from({ length: nx }, (_, i) => (i + 0.5) * dx / 1000), zk = Array.from({ length: nz }, (_, k) => m.zc[k]! / 1000);
     const liq: number[] = [], icev: number[] = [];
-    for (let k = nz - 1; k >= 0; k--) for (let i = 0; i < nx; i++) {
+    for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) {
       const q = m.idx(i, jm, k);
       liq.push((m.scalars[QC]![q]! + m.scalars[QR]![q]!) * 1e3);
       icev.push((m.scalars[QI]![q]! + m.scalars[QS]![q]! + m.scalars[QG]![q]!) * 1e3);
     }
-    writeFileSync(`${outDir}/xz_liquid_${tag}.svg`, sectionSvg({ title: `cloud + rain water, x-z through the updraft (y=${((jm + 0.5) * dx / 1000).toFixed(0)} km; x 0-${L / 1000} km, z 0-${nz * dz / 1000} km), t=${tag} min`, lat: xs, sigma: lev, values: liq, units: 'g/kg', diverging: false, contourStep: 1 }));
-    writeFileSync(`${outDir}/xz_ice_${tag}.svg`, sectionSvg({ title: `cloud ice + snow + graupel, same section, t=${tag} min`, lat: xs, sigma: lev, values: icev, units: 'g/kg', diverging: false, contourStep: 1 }));
+    writeFileSync(`${outDir}/xz_liquid_${tag}.svg`, xzSvg({ title: `cloud + rain water, x-z through the updraft (y = ${((jm + 0.5) * dx / 1000).toFixed(0)} km), t=${tag} min`, x: xs, z: zk, values: liq, units: 'g/kg', diverging: false, contourStep: 2 }));
+    writeFileSync(`${outDir}/xz_ice_${tag}.svg`, xzSvg({ title: `cloud ice + snow + graupel, same section, t=${tag} min`, x: xs, z: zk, values: icev, units: 'g/kg', diverging: false, contourStep: 2 }));
   }
   writeFileSync(`${outDir}/qr_sfc_${tag}.svg`, xySvg({ title: `rain water near the surface (reflectivity proxy), t=${tag} min`, nx, ny: nx, dx, values: qr1, units: 'g/kg', diverging: false, contourStep: 1 }));
 };

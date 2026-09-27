@@ -281,3 +281,52 @@ export function xySvg(p: XYPlot, size = 420): string {
   out.push(`<text x="${ml + W}" y="${mt + H + 28}" text-anchor="end" fill="#555">km; range ${vmin.toPrecision(3)} … ${vmax.toPrecision(3)}</text></svg>`);
   return out.join('\n');
 }
+
+export interface XZPlot {
+  title: string;
+  x: number[];            // horizontal coordinate of the columns (km)
+  z: number[];            // height of the rows (km), bottom -> top
+  values: number[];       // [row][col], rows bottom -> top
+  units: string; diverging: boolean; contourStep: number;
+  xLabel?: string;        // default 'x (km)'
+  range?: [number, number];
+}
+
+/** Vertical (x-z or r-z) section with physical axes in km. */
+export function xzSvg(p: XZPlot, width = 560, height = 320): string {
+  const ml = 48, mr = 16, mt = 28, mb = 40;
+  const W = width - ml - mr, H = height - mt - mb;
+  const nc = p.x.length, nr = p.z.length;
+  const x0 = p.x[0]! - 0.5 * (p.x[1]! - p.x[0]!), x1 = p.x[nc - 1]! + 0.5 * (p.x[nc - 1]! - p.x[nc - 2]!);
+  const z0 = 0, z1 = p.z[nr - 1]! + 0.5 * (p.z[nr - 1]! - p.z[nr - 2]!);
+  const xOf = (x: number): number => ml + (x - x0) / (x1 - x0) * W;
+  const yOf = (z: number): number => mt + H - (z - z0) / (z1 - z0) * H;
+  let vmin = Infinity, vmax = -Infinity, amax = 0;
+  for (const v of p.values) { vmin = Math.min(vmin, v); vmax = Math.max(vmax, v); amax = Math.max(amax, Math.abs(v)); }
+  if (p.range) { vmin = p.range[0]; vmax = p.range[1]; amax = Math.max(Math.abs(vmin), Math.abs(vmax)); }
+  const out: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" font-family="sans-serif" font-size="11">`,
+    `<rect width="100%" height="100%" fill="#fff"/>`, `<text x="${ml}" y="16" font-size="13" font-weight="bold">${p.title} (${p.units})</text>`];
+  const xe = (c: number): number => (c === 0 ? x0 : c === nc ? x1 : 0.5 * (p.x[c - 1]! + p.x[c]!));
+  const ze = (r: number): number => (r === 0 ? z0 : r === nr ? z1 : 0.5 * (p.z[r - 1]! + p.z[r]!));
+  for (let r = 0; r < nr; r++) for (let c = 0; c < nc; c++) {
+    const v = p.values[r * nc + c]!;
+    const t = Math.max(-1, Math.min(1, p.diverging ? v / (amax || 1) : (v - vmin) / ((vmax - vmin) || 1)));
+    if (!p.diverging && t < 0.01) continue;
+    out.push(`<rect x="${xOf(xe(c)).toFixed(1)}" y="${yOf(ze(r + 1)).toFixed(1)}" width="${(xOf(xe(c + 1)) - xOf(xe(c)) + 0.4).toFixed(1)}" height="${(yOf(ze(r)) - yOf(ze(r + 1)) + 0.4).toFixed(1)}" fill="${color(t, p.diverging)}"/>`);
+  }
+  const xs = p.x.map(xOf), ys = p.z.map(yOf), val = (r: number, c: number): number => p.values[r * nc + c]!;
+  for (let i = Math.ceil(vmin / p.contourStep); i <= Math.floor(vmax / p.contourStep); i++) {
+    if (i === 0) continue;
+    const d = contours(xs, ys, val, i * p.contourStep);
+    if (d) out.push(`<path d="${d}" stroke="${i < 0 ? '#333' : '#000'}" stroke-width="0.7" ${i < 0 ? 'stroke-dasharray="3,2"' : ''} fill="none"/>`);
+  }
+  out.push(`<rect x="${ml}" y="${mt}" width="${W}" height="${H}" fill="none" stroke="#000"/>`);
+  const nice = (span: number): number => { const s = span / 6, e = Math.pow(10, Math.floor(Math.log10(s))); return [1, 2, 5, 10].map((m) => m * e).find((v) => v >= s)!; };
+  const sx = nice(x1 - x0), sz = nice(z1 - z0);
+  for (let x = Math.ceil(x0 / sx) * sx; x <= x1 + 1e-9; x += sx) out.push(`<text x="${xOf(x).toFixed(1)}" y="${mt + H + 14}" text-anchor="middle">${+x.toFixed(3)}</text>`);
+  for (let z = 0; z <= z1 + 1e-9; z += sz) out.push(`<text x="${ml - 4}" y="${(yOf(z) + 4).toFixed(1)}" text-anchor="end">${+z.toFixed(3)}</text>`);
+  out.push(`<text x="${ml + W / 2}" y="${mt + H + 30}" text-anchor="middle">${p.xLabel ?? 'x (km)'}</text>`);
+  out.push(`<text x="12" y="${mt + H / 2}" transform="rotate(-90 12 ${mt + H / 2})" text-anchor="middle">z (km)</text>`);
+  out.push(`<text x="${ml + W}" y="${mt + H + 30}" text-anchor="end" fill="#555">range ${vmin.toPrecision(3)} … ${vmax.toPrecision(3)}, contour ${p.contourStep}</text></svg>`);
+  return out.join('\n');
+}

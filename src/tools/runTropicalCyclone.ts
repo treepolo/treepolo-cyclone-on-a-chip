@@ -5,7 +5,7 @@ import { RegionalModel } from '../regional/core.js';
 import { KesslerMicrophysics, QR } from '../regional/kessler.js';
 import { RegionalPhysics } from '../regional/physics.js';
 import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../regional/tropical.js';
-import { xySvg, sectionSvg } from './plot.js';
+import { xySvg, xzSvg } from './plot.js';
 
 const days = Number(process.argv[2] ?? 8), dx = Number(process.argv[3] ?? 15000), L = Number(process.argv[4] ?? 1200000);
 const outDir = process.argv[5] ?? 'results/tc';
@@ -54,10 +54,8 @@ function snapshot(tag: string, ic: number, jc: number): void {
     ww[k * nb + b] = ww[k * nb + b]! + 0.5 * (m.w[q]! + m.w[q + m.plane]!);
     cnt[k * nb + b] = cnt[k * nb + b]! + 1;
   }
-  // draw with sectionSvg: 'lat' axis reused as radius (km, mapped to 90..-90), 'sigma' as 1 - z/ztop
-  const rad = Array.from({ length: nb }, (_, b) => 90 - 180 * (b + 0.5) / nb);
-  const lev = Array.from({ length: nz }, (_, k) => 1 - m.zc[nz - 1 - k]! / (nz * dz));
-  const flip = (a: Float64Array): number[] => { const o: number[] = []; for (let k = nz - 1; k >= 0; k--) for (let b = 0; b < nb; b++) o.push(cnt[k * nb + b]! ? a[k * nb + b]! / cnt[k * nb + b]! : 0); return o; };
-  writeFileSync(`${outDir}/vt_rz_${tag}.svg`, sectionSvg({ title: `azimuthal-mean tangential wind (x: radius 0-${(nb * dx / 1000).toFixed(0)} km, y: height 0-${nz} km) ${tag}`, lat: rad, sigma: lev, values: flip(vt), units: 'm/s', diverging: true, contourStep: 5 }));
-  writeFileSync(`${outDir}/w_rz_${tag}.svg`, sectionSvg({ title: `azimuthal-mean vertical velocity ${tag}`, lat: rad, sigma: lev, values: flip(ww), units: 'm/s', diverging: true, contourStep: 0.2 }));
+  const rad = Array.from({ length: nb }, (_, b) => (b + 0.5) * dx / 1000), zk = Array.from({ length: nz }, (_, k) => m.zc[k]! / 1000);
+  const mean = (a: Float64Array): number[] => Array.from(a, (x, n) => (cnt[n]! ? x / cnt[n]! : 0));
+  writeFileSync(`${outDir}/vt_rz_${tag}.svg`, xzSvg({ title: `azimuthal-mean tangential wind, ${tag}`, x: rad, z: zk, values: mean(vt), units: 'm/s', diverging: true, contourStep: 5, xLabel: 'radius (km)' }));
+  writeFileSync(`${outDir}/w_rz_${tag}.svg`, xzSvg({ title: `azimuthal-mean vertical velocity, ${tag}`, x: rad, z: zk, values: mean(ww), units: 'm/s', diverging: true, contourStep: 0.5, xLabel: 'radius (km)' }));
 }

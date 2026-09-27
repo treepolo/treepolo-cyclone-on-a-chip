@@ -6,7 +6,7 @@
 
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { DAY, EARTH } from '../core/constants.js';
-import { EARTH_PRESETS, EarthData, createEarth } from '../model/presets.js';
+import { EARTH_PRESETS, EarthData, createEarth, decodeSstAmip, MonthlyLatLon } from '../model/presets.js';
 import type { GrayPhysicsConfig } from '../model/moist/aquaplanet.js';
 import { ZonalMeanAccumulator, summarize } from '../model/diagnostics.js';
 import { mapSvg, sectionSvg } from './plot.js';
@@ -23,7 +23,12 @@ const data = JSON.parse(readFileSync('data/earth_t42.json', 'utf8')) as EarthDat
 
 // optional physics overrides for sensitivity experiments, e.g. PHYS='{"albedoLand":0.3}'
 const overrides = process.env.PHYS ? JSON.parse(process.env.PHYS) as Partial<GrayPhysicsConfig> : {};
-const { model, physics } = createEarth(cfg, data, overrides);
+// SST=data/sst_amip_2deg.json: prescribed-SST (AMIP-type) run over open ocean, writing the implied
+// ocean heat-flux convergence to <outDir>/qflux.json; QFLUX=<file>: slab ocean with that q-flux field
+const climate: { sst?: MonthlyLatLon; qflux?: MonthlyLatLon } = {};
+if (process.env.SST) climate.sst = decodeSstAmip(JSON.parse(readFileSync(process.env.SST, 'utf8')));
+if (process.env.QFLUX) climate.qflux = JSON.parse(readFileSync(process.env.QFLUX, 'utf8')) as MonthlyLatLon;
+const { model, physics } = createEarth(cfg, data, { ...(climate.qflux ? { qflux: false } : {}), ...(climate.sst ? { qflux: false } : {}), ...overrides }, climate);
 const tr = model.tr, ng = model.ng, K = model.K, nlat = tr.nlat, nlon = tr.nlon;
 const year = physics.cfg.yearLength;
 const ckpt = `${outDir}/checkpoint.bin`;
@@ -64,9 +69,11 @@ const stepsPerDay = Math.round(DAY / cfg.dt), sampleEvery = Math.max(1, Math.rou
 say(`Earth ${presetName}: T${cfg.trunc} (${nlon}x${nlat}), L${K}, dt=${cfg.dt}s, land fraction ${(physics.surface.land.reduce((a, b) => a + b, 0) / ng).toFixed(3)}, spin-up ${spinupYears} y, average ${avgYears} y`);
 const gmean = (f: Float64Array): number => { let s = 0; for (let j = 0; j < nlat; j++) { let r = 0; for (let i = 0; i < nlon; i++) r += f[j * nlon + i]!; s += tr.weight[j]! * r / nlon; } return s / 2; };
 
+let netReset = model.time > startAvg;
 while (model.time < endT - 1) {
   model.step();
   const t = model.time;
+  if (t > startAvg && !netReset) { for (const f of physics.netAcc) f.fill(0); physics.netW.fill(0); netReset = true; }
   if (t > startAvg) {
     const doy = (t % year) / DAY;
     const pr = physics.f.precipRate;
@@ -144,6 +151,11 @@ function writeOutputs(): void {
   writeFileSync(`${outDir}/u.svg`, sectionSvg({ title: `annual-mean [u], ${presetName}`, lat: c.lat, sigma: c.sigma, values: c.u, units: 'm/s', diverging: true, contourStep: 5 }));
   writeFileSync(`${outDir}/psi.svg`, sectionSvg({ title: `annual-mean ψ, ${presetName}`, lat: c.lat, sigma: c.sigmaHalf.slice(1, K), values: c.psi.slice(nlat, K * nlat).map((x) => x / 1e9), units: '1e9 kg/s', diverging: true, contourStep: 20 }));
   writeFileSync(`${outDir}/climate.json`, JSON.stringify({ lat: latDeg, lon: lonDeg, land, P: { JJA: Array.from(P.JJA!), DJF: Array.from(P.DJF!) }, Ts: { JJA: Array.from(Ts.JJA!), DJF: Array.from(Ts.DJF!) } }));
+  if (physics.sstClim) {
+    const q = physics.impliedQflux();
+    writeFileSync(`${outDir}/qflux.json`, JSON.stringify({ source: `implied ocean heat-flux convergence (W m-2) from the fixed-SST run ${presetName}`, lat: latDeg, lon: lonDeg, days: q.days, yearDays: q.yearDays,
+      fields: q.fields.map((f) => Array.from(f, (x) => Math.round(x * 10) / 10)) }));
+  }
   writeFileSync(`${outDir}/summary.txt`, lines.join('\n') + '\n\nRun log:\n' + log.join('\n') + '\n');
   console.log(lines.join('\n'));
 }

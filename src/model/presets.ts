@@ -5,7 +5,7 @@ import { Dycore } from './dycore.js';
 import { HeldSuarezForcing, heldSuarezTeq } from './heldSuarez.js';
 import { uniformSigmaHalf } from './vertical.js';
 import { rng } from '../core/random.js';
-import { GrayAquaplanet, GrayPhysics, GrayPhysicsConfig } from './moist/aquaplanet.js';
+import { GrayAquaplanet, GrayPhysics, GrayPhysicsConfig, MonthlyField } from './moist/aquaplanet.js';
 import { qsat } from './moist/thermo.js';
 
 export interface HeldSuarezConfig {
@@ -138,7 +138,44 @@ export function sampleEarth(d: EarthData, field: number[], lat: number, lon: num
   return at(j) * (1 - wy) + at(j + 1) * wy;
 }
 
-export function createEarth(cfg: EarthConfig, data: EarthData, physicsOverrides: Partial<GrayPhysicsConfig> = {}): { model: Dycore; physics: GrayPhysics } {
+/** Monthly climatology on a regular latitude-longitude grid (degrees; latitude in either order). */
+export interface MonthlyLatLon { lat: number[]; lon: number[]; days: number[]; yearDays: number; fields: ArrayLike<number>[] }
+
+/** Decode data/sst_amip_2deg.json (uint16 = (K - 200) * 100, months x lat x lon, latitude south -> north). */
+export function decodeSstAmip(j: { nlat: number; nlon: number; lat: number[]; lon: number[]; monthDay: number[]; yearDays: number; data: string }): MonthlyLatLon {
+  const bin = typeof atob === 'function' ? Uint8Array.from(atob(j.data), (c) => c.charCodeAt(0)) : Uint8Array.from(Buffer.from(j.data, 'base64'));
+  const u = new Uint16Array(bin.buffer, bin.byteOffset, bin.byteLength / 2), n = j.nlat * j.nlon;
+  const fields = j.monthDay.map((_, m) => Float64Array.from(u.subarray(m * n, (m + 1) * n), (x) => 200 + x / 100));
+  return { lat: j.lat, lon: j.lon, days: j.monthDay, yearDays: j.yearDays, fields };
+}
+
+/** Bilinear sample of a lat-lon field at (lat, lon) in radians (periodic in longitude, clamped in latitude). */
+export function sampleLatLon(lat: number[], lon: number[], field: ArrayLike<number>, la: number, lo: number): number {
+  const nl = lat.length, nn = lon.length, y = la * 180 / Math.PI;
+  const asc = lat[nl - 1]! > lat[0]!;
+  let j = 0;
+  while (j < nl - 2 && (asc ? lat[j + 1]! < y : lat[j + 1]! > y)) j++;
+  const wy = Math.max(0, Math.min(1, (y - lat[j]!) / (lat[j + 1]! - lat[j]!)));
+  const dx = 360 / nn;
+  let x = ((lo * 180 / Math.PI - lon[0]!) / dx) % nn; if (x < 0) x += nn;
+  const i0 = Math.floor(x) % nn, i1 = (i0 + 1) % nn, wx = x - Math.floor(x);
+  const at = (jj: number): number => field[jj * nn + i0]! * (1 - wx) + field[jj * nn + i1]! * wx;
+  return at(j) * (1 - wy) + at(j + 1) * wy;
+}
+
+function toModelGrid(c: MonthlyLatLon, tr: { lat: Float64Array; lon: Float64Array; nlat: number; nlon: number }): MonthlyField {
+  return {
+    days: c.days, yearDays: c.yearDays,
+    fields: c.fields.map((f) => {
+      const out = new Float64Array(tr.nlat * tr.nlon);
+      for (let j = 0; j < tr.nlat; j++) for (let i = 0; i < tr.nlon; i++) out[j * tr.nlon + i] = sampleLatLon(c.lat, c.lon, f, tr.lat[j]!, tr.lon[i]!);
+      return out;
+    }),
+  };
+}
+
+export function createEarth(cfg: EarthConfig, data: EarthData, physicsOverrides: Partial<GrayPhysicsConfig> = {},
+  climate: { sst?: MonthlyLatLon; qflux?: MonthlyLatLon } = {}): { model: Dycore; physics: GrayPhysics } {
   const model = new Dycore({
     trunc: cfg.trunc, sigmaHalf: FRIERSON_SIGMA_HALF, dt: cfg.dt, planet: EARTH, air: DRY_AIR,
     tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : 0.1 * DAY, robert: 0.03, moist: true, massFixer: true,
@@ -156,6 +193,8 @@ export function createEarth(cfg: EarthConfig, data: EarthData, physicsOverrides:
   for (let p = 0; p < ng; p++) zs[p] = Math.max(0, phis[p]! / EARTH.gravity);
   const physics = new GrayPhysics(EARTH, DRY_AIR, tr.nlat, nlon, K, tr.lat, { ...EARTH_PHYSICS, ...physicsOverrides }, { land, zsurf: zs });
   model.columnPhysics = physics;
+  if (climate.sst) physics.sstClim = toModelGrid(climate.sst, tr);
+  if (climate.qflux) physics.qfluxField = toModelGrid(climate.qflux, tr);
   const T = new Float64Array(ng * K), q = new Float64Array(ng * K), ps = new Float64Array(ng);
   const r = rng(cfg.seed);
   const expo = DRY_AIR.rd * 0.0065 / EARTH.gravity;

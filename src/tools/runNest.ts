@@ -82,6 +82,8 @@ const spec: NestSpec = { lat0, lon0, L: 1200000, dx: dxKm * 1000, nz: fine ? 30 
 let snap = snapshot(gm);
 const nest = nestFromGlobal(snap, spec, 6);
 const m = nest.model, { nx, ny, nz } = m.c, n2 = nx * ny;
+// diagnostics exclude the lateral relaxation zone
+const nr = m.c.relaxCells ?? 8, nInterior = (nx - 2 * nr) * (ny - 2 * nr);
 const mp = new IceMicrophysics(m);
 const wet = Float64Array.from({ length: ng }, (_, p) => physics.surface.land[p] ? Math.min(1, physics.f.bucket[p]! / (0.75 * physics.cfg.bucketMax)) : 1);
 const tsk = sampleSurface(snap, spec, physics.f.sst), wetR = sampleSurface(snap, spec, wet);
@@ -106,7 +108,7 @@ bA = cloneB(nest.boundary);
 // global precipitation over the box: mean over global points inside the domain
 const boxPts: number[] = [];
 {
-  const half = spec.L / 2 / EARTH.radius;
+  const half = (spec.L / 2 - nr * spec.dx) / EARTH.radius;
   for (let j = 0; j < gm.tr.nlat; j++) for (let i = 0; i < gm.tr.nlon; i++) {
     const la = gm.tr.lat[j]!;
     let dl = gm.tr.lon[i]! - lon0; dl -= Math.round(dl / (2 * Math.PI)) * 2 * Math.PI;
@@ -155,11 +157,11 @@ for (let s = 1; s <= nSteps; s++) {
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const q = m.idx(i, j, 0);
       vmax = Math.max(vmax, Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!), 0.5 * (m.v[q]! + m.v[q + m.sx]!)));
-      rsum += mp.rainAcc[j * nx + i]!;
+      if (i >= nr && j >= nr && i < nx - nr && j < ny - nr) rsum += mp.rainAcc[j * nx + i]!;
       let c = 0; for (let k = 0; k < nz; k++) c = Math.max(c, m.scalars[QC]![m.idx(i, j, k)]!);
       if (c > 1e-4) cloudy++;
     }
-    const rmean = rsum / n2, rate = (rmean - rainPrev) / ((t - (series.t.length ? series.t[series.t.length - 1]! * 3600 : 0)) / 3600);
+    const rmean = rsum / nInterior, rate = (rmean - rainPrev) / ((t - (series.t.length ? series.t[series.t.length - 1]! * 3600 : 0)) / 3600);
     rainPrev = rmean;
     series.t.push(t / 3600); series.wmax.push(wmax); series.rain.push(rate * 24); series.vmax.push(vmax); series.cloud.push(cloudy / n2);
     say(`t=${(t / 3600).toFixed(0)} h: wmax ${wmax.toFixed(1)} m/s  qc max ${(qcm * 1000).toFixed(2)} g/kg  cloud cover ${(100 * cloudy / n2).toFixed(0)}%  domain rain ${(rate * 24).toFixed(1)} mm/day  sfc vmax ${vmax.toFixed(1)} m/s  wall ${((Date.now() - t0) / 1000).toFixed(0)} s`);
@@ -178,6 +180,6 @@ for (let s = 1; s <= nSteps; s++) {
   }
 }
 const gP = (gPrecip() - gP0) / globalAdvanced * DAY;
-let rtot = 0; for (let i = 0; i < n2; i++) rtot += mp.rainAcc[i]!;
-say(`summary: regional domain-mean rain ${(rtot / n2 / (series.t[series.t.length - 1]! / 24)).toFixed(2)} mm/day; global model over the same box ${gP.toFixed(2)} mm/day (${boxPts.length} global points)`);
+let rtot = 0; for (let j = nr; j < ny - nr; j++) for (let i = nr; i < nx - nr; i++) rtot += mp.rainAcc[j * nx + i]!;
+say(`summary: regional interior-mean rain (relaxation zone excluded) ${(rtot / nInterior / (series.t[series.t.length - 1]! / 24)).toFixed(2)} mm/day; global model over the same box ${gP.toFixed(2)} mm/day (${boxPts.length} global points)`);
 writeFileSync(`${outDir}/summary.txt`, log.join('\n') + '\n');

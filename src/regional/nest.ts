@@ -148,6 +148,13 @@ function interpolateToNest(g: GlobalSnapshot, spec: NestSpec, m: RegionalModel, 
     s /= nx * ny;
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) pp[m.idx(i, j, k)] = pp[m.idx(i, j, k)]! - s;
   }
+  // Cap vapour at saturation for the regional thermodynamic state: small differences between the
+  // global and regional temperature / pressure mapping would otherwise make the relaxation zone force
+  // condensation continuously (spurious rain along the inflow boundaries).
+  if (qvA) for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const q = m.idx(i, j, k), pi = m.pi0[k]! + pp[q]!, T = th[q]! * pi, p = DRY_AIR.pRef * Math.pow(pi, 1 / kap);
+    qvA[q] = Math.min(qvA[q]!, 380 / p * Math.exp(17.27 * (T - 273.15) / (T - 35.86)));
+  }
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const q = m.idx(i, j, k), o = (k * ny + j) * nx;
     u[q] = i > 0 ? 0.5 * (uc[o + i - 1]! + uc[o + i]!) : uc[o + i]!;
