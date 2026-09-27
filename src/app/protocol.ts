@@ -26,6 +26,8 @@ export interface FrameMessage {
   v: Float32Array;
   maxWind: number;
   psDrift: number;
+  /** season information for seasonal experiments */
+  declinationDeg: number | null;
 }
 
 export interface ZonalMessage {
@@ -43,5 +45,5 @@ export interface ZonalMessage {
 export type FromWorker =
   | FrameMessage
   | ZonalMessage
-  | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number; moist: boolean }
+  | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number; moist: boolean; lat: Float64Array; land: Uint8Array | null }
   | { type: 'error'; message: string };

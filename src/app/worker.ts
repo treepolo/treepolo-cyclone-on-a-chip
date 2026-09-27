@@ -2,14 +2,15 @@
 
 import { DAY, EARTH } from '../core/constants.js';
 import { Dycore } from '../model/dycore.js';
-import { HS_PRESETS, AQUA_PRESETS, createHeldSuarez, createAquaplanet } from '../model/presets.js';
-import type { GrayAquaplanet } from '../model/moist/aquaplanet.js';
+import { HS_PRESETS, AQUA_PRESETS, EARTH_PRESETS, createHeldSuarez, createAquaplanet, createEarth, EarthData } from '../model/presets.js';
+import type { GrayPhysics } from '../model/moist/aquaplanet.js';
 import { ZonalMeanAccumulator } from '../model/diagnostics.js';
 import { createJablonowski } from '../model/jablonowski.js';
 import type { FieldId, FromWorker, ToWorker } from './protocol.js';
 
 let model: Dycore | null = null;
-let physics: GrayAquaplanet | null = null;
+let physics: GrayPhysics | null = null;
+let earthData: EarthData | null = null;
 /** precipitation rate smoothed over ~6 model hours (kg m^-2 s^-1) */
 let precipSmooth = new Float64Array(0);
 let acc: ZonalMeanAccumulator | null = null;
@@ -23,13 +24,20 @@ let lastFrame = 0, lastZonal = 0, rateSteps = 0, rateT = performance.now(), rate
 
 const post = (m: FromWorker, transfer: Transferable[] = []): void => (self as unknown as Worker).postMessage(m, transfer);
 
-self.onmessage = (ev: MessageEvent<ToWorker>): void => {
+self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
   const m = ev.data;
   try {
     if (m.type === 'init') {
       let cfg: { trunc: number; dt: number };
       physics = null;
-      if (AQUA_PRESETS[m.preset]) {
+      if (EARTH_PRESETS[m.preset]) {
+        if (!earthData) earthData = await (await fetch(new URL('../../data/earth_t42.json', import.meta.url))).json() as EarthData;
+        cfg = EARTH_PRESETS[m.preset]!;
+        const built = createEarth(EARTH_PRESETS[m.preset]!, earthData);
+        model = built.model;
+        physics = built.physics;
+        precipSmooth = new Float64Array(model.ng);
+      } else if (AQUA_PRESETS[m.preset]) {
         cfg = AQUA_PRESETS[m.preset]!;
         const built = createAquaplanet(AQUA_PRESETS[m.preset]!);
         model = built.model;
@@ -48,7 +56,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>): void => {
       accFrom = 0;
       ps0 = model.meanSurfacePressure();
       if (level < 0 || level >= model.K) level = model.K - 1;
-      post({ type: 'ready', preset: m.preset, trunc: cfg.trunc, nlat: model.tr.nlat, nlon: model.tr.nlon, K: model.K, dt: cfg.dt, moist: physics !== null });
+      post({ type: 'ready', preset: m.preset, trunc: cfg.trunc, nlat: model.tr.nlat, nlon: model.tr.nlon, K: model.K, dt: cfg.dt, moist: physics !== null, lat: model.tr.lat, land: physics && physics.surface.land.some((x) => x === 1) ? physics.surface.land : null });
       sendFrame();
     } else if (m.type === 'run') {
       running = m.running;
@@ -126,5 +134,6 @@ function sendFrame(): void {
     type: 'frame', day: model.time / DAY, steps: model.steps, stepsPerSecond: rate,
     nlat: model.tr.nlat, nlon: model.tr.nlon, K: model.K, lat: model.tr.lat, sigma: model.lev.sigma,
     level: k, field, scalar, u, v, maxWind, psDrift: (model.meanSurfacePressure() - ps0) / ps0,
+    declinationDeg: physics && physics.cfg.seasonal ? physics.declination * 180 / Math.PI : null,
   }, [scalar.buffer, u.buffer, v.buffer]);
 }

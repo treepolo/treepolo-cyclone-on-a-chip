@@ -1,45 +1,82 @@
-// Gray-radiation moist aquaplanet physics (Frierson, Held & Zurita-Gotor 2006; Frierson 2007),
-// configured as the Isca "frierson" test case. Applied column by column after each dynamics step.
+// Gray-radiation moist physics for an Earth-like planet, applied column by column after each
+// dynamics step. Default configuration = the moist aquaplanet of Frierson, Held & Zurita-Gotor (2006)
+// and Frierson (2007), as in the Isca "frierson" test case; options add land, seasons and a
+// water-vapour-dependent longwave optical depth (Byrne & O'Gorman 2013).
 //
-//   1. two-stream gray longwave radiation, shortwave absorbed weakly in the atmosphere and at the surface
+//   1. two-stream gray longwave radiation; shortwave absorbed weakly in the atmosphere and at the surface
 //   2. bulk surface fluxes (simplified Monin–Obukhov) + implicit K-profile boundary-layer diffusion
 //      of u, v, dry static energy and q, with a prognostic boundary-layer depth (bulk Ri = 1)
-//   3. slab mixed-layer ocean
+//   3. surface: slab mixed-layer ocean (optional prescribed ocean heat transport, simple sea-ice albedo)
+//      and land (small heat capacity, Manabe bucket hydrology, larger roughness)
 //   4. Rayleigh sponge above 50 hPa (energy conserving)
 //   5. Simplified Betts–Miller convection
 //   6. large-scale condensation with re-evaporation of falling rain
-// All fluxes are in SI units and every process conserves water and energy within the column.
+// All fluxes are in SI units; every process conserves water and energy within the column
+// (runoff from full buckets is the only water leaving the system, and it is accounted).
 
 import { DAY, DryAir, Planet } from '../../core/constants.js';
 import { ColumnPhysics, MoistGridState } from '../dycore.js';
 import { MOIST, dqsatdT, qsat } from './thermo.js';
 import { sbmColumn, sbmWork, SbmWork } from './sbm.js';
 
-export const AQUA = {
-  solarConstant: 1360,     // W m^-2
-  delSol: 1.4,             // pole-equator insolation contrast
-  albedo: 0.31,
-  atmAbs: 0.2,             // shortwave optical depth at the surface
-  tauEq: 6.0,              // longwave optical depth at the surface, equator
-  tauPole: 1.5,
-  linearTau: 0.1,
-  mixedLayerDepth: 2.5,    // m
-  roughness: 3.21e-5,      // m
-  richCrit: 1.0,
-  fracInner: 0.1,
-  spongePBottom: 5000,     // Pa
-  spongeTau: 0.25 * DAY,
-  useConvection: true,
+export interface GrayPhysicsConfig {
+  radiation: 'frierson' | 'byrne';
+  solarConstant: number;     // W m^-2
+  delSol: number;            // perpetual-equinox pole-equator insolation contrast (Frierson p2 profile)
+  seasonal: boolean;         // daily-mean insolation with obliquity (otherwise perpetual equinox p2 profile)
+  obliquityDeg: number;
+  yearLength: number;        // s
+  albedo: number;            // surface albedo, ocean
+  albedoLand: number;
+  albedoIce: number;         // ocean colder than freezing
+  atmAbs: number;            // shortwave optical depth at the surface
+  tauEq: number;             // Frierson longwave optical depth at the surface, equator
+  tauPole: number;
+  linearTau: number;
+  byrneA: number;            // Byrne–O'Gorman dtau/dsigma = a + b q
+  byrneB: number;
+  mixedLayerDepth: number;   // m (ocean)
+  landHeatCapacity: number;  // J m^-2 K^-1
+  roughness: number;         // m (ocean)
+  roughnessLand: number;     // m
+  bucketMax: number;         // m of water
+  qflux: boolean;            // prescribed ocean heat transport (Merlis et al. 2013 form)
+  qfluxAmp: number;          // W m^-2
+  qfluxWidthDeg: number;
+  richCrit: number;
+  fracInner: number;
+  spongePBottom: number;     // Pa
+  spongeTau: number;         // s
+  useConvection: boolean;
+}
+
+export const AQUA: GrayPhysicsConfig = {
+  radiation: 'frierson', solarConstant: 1360, delSol: 1.4, seasonal: false, obliquityDeg: 23.44, yearLength: 360 * DAY,
+  albedo: 0.31, albedoLand: 0.31, albedoIce: 0.31, atmAbs: 0.2, tauEq: 6.0, tauPole: 1.5, linearTau: 0.1,
+  byrneA: 0.8678, byrneB: 1997.9,
+  mixedLayerDepth: 2.5, landHeatCapacity: 1e6, roughness: 3.21e-5, roughnessLand: 3.21e-5, bucketMax: 0.15,
+  qflux: false, qfluxAmp: 30, qfluxWidthDeg: 16,
+  richCrit: 1.0, fracInner: 0.1, spongePBottom: 5000, spongeTau: 0.25 * DAY, useConvection: true,
 };
 
+/** Surface description per grid point. */
+export interface SurfaceMap {
+  land: Uint8Array;          // 1 = land
+  zsurf: Float64Array;       // m
+}
+
 export interface AquaplanetFields {
+  /** surface (skin / mixed-layer) temperature, K — SST over ocean, ground temperature over land */
   sst: Float64Array;
+  bucket: Float64Array;       // soil water, m (land only)
   /** running accumulations since the last reset (per grid point) */
   precipConv: Float64Array;   // kg m^-2
   precipLS: Float64Array;
   evap: Float64Array;
   shf: Float64Array;          // J m^-2
   olr: Float64Array;          // J m^-2
+  runoff: Float64Array;       // kg m^-2
+  tsAcc: Float64Array;        // K s
   accTime: number;            // s
   /** instantaneous */
   precipRate: Float64Array;   // kg m^-2 s^-1 (last step)
@@ -47,20 +84,29 @@ export interface AquaplanetFields {
   blDepth: Float64Array;      // m
 }
 
-export class GrayAquaplanet implements ColumnPhysics {
+export class GrayPhysics implements ColumnPhysics {
   readonly f: AquaplanetFields;
+  readonly cfg: GrayPhysicsConfig;
+  readonly surface: SurfaceMap;
   private readonly K: number;
+  private readonly nlon: number;
   private readonly col: Record<string, Float64Array>;
   private readonly work: SbmWork;
-  /** clipped negative water (kg m^-2, global accumulation proxy) */
+  private readonly qfluxLat: Float64Array;
+  /** clipped negative water (kg m^-2 summed over points) */
   negativeWater = 0;
+  /** current solar declination (rad) */
+  declination = 0;
 
   constructor(private readonly planet: Planet, private readonly air: DryAir, nlat: number, nlon: number, K: number,
-              readonly lat: Float64Array) {
+              readonly lat: Float64Array, cfg: Partial<GrayPhysicsConfig> = {}, surface?: SurfaceMap) {
     const ng = nlat * nlon;
     this.K = K;
+    this.nlon = nlon;
+    this.cfg = { ...AQUA, ...cfg };
+    this.surface = surface ?? { land: new Uint8Array(ng), zsurf: new Float64Array(ng) };
     const z = (): Float64Array => new Float64Array(ng);
-    this.f = { sst: z(), precipConv: z(), precipLS: z(), evap: z(), shf: z(), olr: z(), accTime: 0, precipRate: z(), olrNow: z(), blDepth: z() };
+    this.f = { sst: z(), bucket: z(), precipConv: z(), precipLS: z(), evap: z(), shf: z(), olr: z(), runoff: z(), tsAcc: z(), accTime: 0, precipRate: z(), olrNow: z(), blDepth: z() };
     const c = (n: number): Float64Array => new Float64Array(n);
     this.col = {
       T: c(K), q: c(K), u: c(K), v: c(K), pf: c(K), ph: c(K + 1), zf: c(K), zh: c(K + 1),
@@ -68,29 +114,67 @@ export class GrayAquaplanet implements ColumnPhysics {
       cc: c(K), dd: c(K), kk: c(K + 1), sw: c(K + 1),
     };
     this.work = sbmWork(K);
+    this.qfluxLat = new Float64Array(nlat);
+    const w = this.cfg.qfluxWidthDeg * Math.PI / 180;
     for (let j = 0; j < nlat; j++) {
-      const s = Math.sin(lat[j]!);
-      for (let i = 0; i < nlon; i++) this.f.sst[j * nlon + i] = 270 + 35 * (1 - s * s);
+      const la = lat[j]!, s = Math.sin(la);
+      // Merlis et al. (2013): divergence of ocean heat transport, heats the extratropics, cools the tropics
+      this.qfluxLat[j] = this.cfg.qflux ? this.cfg.qfluxAmp * (1 - 2 * la * la / (w * w)) * Math.exp(-la * la / (w * w)) / Math.cos(la) : 0;
+      for (let i = 0; i < nlon; i++) {
+        const p = j * nlon + i;
+        this.f.sst[p] = 270 + 35 * (1 - s * s) - (this.surface.land[p] ? 0.0065 * this.surface.zsurf[p]! : 0);
+        this.f.bucket[p] = this.surface.land[p] ? this.cfg.bucketMax : 0;
+      }
+    }
+    // q-flux must integrate to zero over the ocean: remove its ocean-area mean
+    if (this.cfg.qflux) {
+      let s = 0, a = 0;
+      for (let j = 0; j < nlat; j++) {
+        const c2 = Math.cos(lat[j]!);
+        for (let i = 0; i < nlon; i++) if (!this.surface.land[j * nlon + i]) { s += this.qfluxLat[j]! * c2; a += c2; }
+      }
+      const mean = a > 0 ? s / a : 0;
+      for (let j = 0; j < nlat; j++) this.qfluxLat[j] = this.qfluxLat[j]! - mean;
     }
   }
 
   resetAccumulators(): void {
-    for (const a of [this.f.precipConv, this.f.precipLS, this.f.evap, this.f.shf, this.f.olr]) a.fill(0);
+    for (const a of [this.f.precipConv, this.f.precipLS, this.f.evap, this.f.shf, this.f.olr, this.f.runoff, this.f.tsAcc]) a.fill(0);
     this.f.accTime = 0;
   }
 
-  apply(st: MoistGridState, dt: number): void {
+  /** Daily-mean top-of-atmosphere insolation (W m^-2) at latitude lat for the current declination. */
+  insolation(lat: number): number {
+    const c = this.cfg;
+    if (!c.seasonal) {
+      const s = Math.sin(lat);
+      return 0.25 * c.solarConstant * (1 + c.delSol * (1 - 3 * s * s) / 4);
+    }
+    const d = this.declination;
+    const x = Math.max(-1, Math.min(1, -Math.tan(lat) * Math.tan(d)));
+    const h0 = Math.acos(x);
+    return c.solarConstant / Math.PI * (h0 * Math.sin(lat) * Math.sin(d) + Math.cos(lat) * Math.cos(d) * Math.sin(h0));
+  }
+
+  /** Update the solar declination for model time t (s); t = 0 is the northern spring equinox. */
+  setTime(t: number): void {
+    const c = this.cfg;
+    this.declination = c.seasonal ? Math.asin(Math.sin(c.obliquityDeg * Math.PI / 180) * Math.sin(2 * Math.PI * t / c.yearLength)) : 0;
+  }
+
+  apply(st: MoistGridState, dt: number, time = 0): void {
     const { nlat, nlon, K } = st, ng = nlat * nlon;
     const C = this.col;
+    this.setTime(time);
     for (let j = 0; j < nlat; j++) {
-      const sl = Math.sin(this.lat[j]!);
+      const la = this.lat[j]!, sl = Math.sin(la), insol = this.insolation(la), qf = this.qfluxLat[j]!;
       for (let i = 0; i < nlon; i++) {
         const p = j * nlon + i;
         for (let k = 0; k < K; k++) {
           const q = k * ng + p;
           C.T![k] = st.T[q]!; C.q![k] = st.q[q]!; C.u![k] = st.u[q]!; C.v![k] = st.v[q]!;
         }
-        this.column(p, sl, st.ps[p]!, st.sigma, st.sigmaHalf, dt);
+        this.column(p, sl, insol, qf, st.ps[p]!, st.sigma, st.sigmaHalf, dt);
         for (let k = 0; k < K; k++) {
           const q = k * ng + p;
           st.T[q] = C.T![k]!; st.q[q] = C.q![k]!; st.u[q] = C.u![k]!; st.v[q] = C.v![k]!;
@@ -100,13 +184,14 @@ export class GrayAquaplanet implements ColumnPhysics {
     this.f.accTime += dt;
   }
 
-  private column(p: number, sinLat: number, ps: number, sigma: Float64Array, sigmaHalf: Float64Array, dt: number): void {
-    const K = this.K, C = this.col, g = this.planet.gravity, cp = this.air.cp, R = this.air.rd;
+  private column(p: number, sinLat: number, insol: number, qflux: number, ps: number,
+                 sigma: Float64Array, sigmaHalf: Float64Array, dt: number): void {
+    const K = this.K, C = this.col, cfg = this.cfg, g = this.planet.gravity, cp = this.air.cp, R = this.air.rd;
     const T = C.T!, q = C.q!, u = C.u!, v = C.v!, pf = C.pf!, ph = C.ph!, zf = C.zf!, zh = C.zh!;
-    const f = this.f;
+    const f = this.f, isLand = this.surface.land[p] === 1;
     for (let k = 0; k <= K; k++) ph[k] = sigmaHalf[k]! * ps;
     for (let k = 0; k < K; k++) pf[k] = sigma[k]! * ps;
-    // heights (Simmons–Burridge hydrostatics, consistent with the dynamical core)
+    // heights above the surface (Simmons–Burridge hydrostatics, consistent with the dynamical core)
     zh[K] = 0;
     for (let k = K - 1; k >= 0; k--) {
       const lnr = k === 0 ? Math.LN2 * 2 : Math.log(ph[k + 1]! / ph[k]!);
@@ -116,19 +201,28 @@ export class GrayAquaplanet implements ColumnPhysics {
     }
 
     // ---------------- 1. radiation
-    const sst = f.sst[p]!;
-    const tau0 = AQUA.tauEq + (AQUA.tauPole - AQUA.tauEq) * sinLat * sinLat;
+    const ts = f.sst[p]!;
     const lwu = C.lwu!, lwd = C.lwd!, tr = C.tr!;
-    const tauAt = (pp: number): number => { const x = pp / 1e5; return tau0 * (AQUA.linearTau * x + (1 - AQUA.linearTau) * x * x * x * x); };
-    for (let k = 0; k < K; k++) tr[k] = Math.exp(-(tauAt(ph[k + 1]!) - tauAt(ph[k]!)));
+    if (cfg.radiation === 'frierson') {
+      const tau0 = cfg.tauEq + (cfg.tauPole - cfg.tauEq) * sinLat * sinLat;
+      const tauAt = (pp: number): number => { const x = pp / 1e5; return tau0 * (cfg.linearTau * x + (1 - cfg.linearTau) * x * x * x * x); };
+      for (let k = 0; k < K; k++) tr[k] = Math.exp(-(tauAt(ph[k + 1]!) - tauAt(ph[k]!)));
+    } else {
+      for (let k = 0; k < K; k++) tr[k] = Math.exp(-(cfg.byrneA + cfg.byrneB * q[k]!) * (ph[k + 1]! - ph[k]!) / 1e5);
+    }
     lwd[0] = 0;
     for (let k = 0; k < K; k++) { const B = MOIST.stefan * T[k]! ** 4; lwd[k + 1] = lwd[k]! * tr[k]! + B * (1 - tr[k]!); }
-    lwu[K] = MOIST.stefan * sst ** 4;
+    lwu[K] = MOIST.stefan * ts ** 4;
     for (let k = K - 1; k >= 0; k--) { const B = MOIST.stefan * T[k]! ** 4; lwu[k] = lwu[k + 1]! * tr[k]! + B * (1 - tr[k]!); }
-    const insol = 0.25 * AQUA.solarConstant * (1 + AQUA.delSol * (1 - 3 * sinLat * sinLat) / 4);
     const sw = C.sw!;
-    for (let k = 0; k <= K; k++) { const x = ph[k]! / 1e5; sw[k] = insol * Math.exp(-AQUA.atmAbs * x * x * x * x); }
-    const swSfc = sw[K]!, swUp = AQUA.albedo * swSfc;
+    for (let k = 0; k <= K; k++) { const x = ph[k]! / 1e5; sw[k] = insol * Math.exp(-cfg.atmAbs * x * x * x * x); }
+    let albedo = isLand ? cfg.albedoLand : cfg.albedo;
+    if (!isLand && cfg.albedoIce !== cfg.albedo) {
+      // simple sea-ice albedo: linear ramp from open water at 273.15 K to ice at 263.15 K
+      const w = Math.max(0, Math.min(1, (273.15 - ts) / 10));
+      albedo = cfg.albedo + w * (cfg.albedoIce - cfg.albedo);
+    }
+    const swSfc = sw[K]!, swUp = albedo * swSfc;
     for (let k = 0; k < K; k++) {
       const Ftop = lwu[k]! - lwd[k]! + swUp - sw[k]!;
       const Fbot = lwu[k + 1]! - lwd[k + 1]! + swUp - sw[k + 1]!;
@@ -137,14 +231,15 @@ export class GrayAquaplanet implements ColumnPhysics {
     const olr = lwu[0]!;
 
     // ---------------- 2. surface fluxes + boundary-layer diffusion (implicit)
+    const z0 = isLand ? cfg.roughnessLand : cfg.roughness;
     const ka = K - 1, za = zf[ka]!;
     const speed = Math.max(Math.hypot(u[ka]!, v[ka]!), 1e-3);
     const rhoA = pf[ka]! / (R * T[ka]!);
-    const thetaDiff = T[ka]! + g * za / cp - sst;
-    const ri = g * za * thetaDiff / (sst * speed * speed);
-    const lnz = Math.log(za / AQUA.roughness);
+    const thetaDiff = T[ka]! + g * za / cp - ts;
+    const ri = g * za * thetaDiff / (ts * speed * speed);
+    const lnz = Math.log(za / z0);
     const cn = (MOIST.vonKarman / lnz) ** 2;
-    const rc = AQUA.richCrit;
+    const rc = cfg.richCrit;
     const cd = ri <= 0 ? cn : ri < rc ? cn * (1 - ri / rc) ** 2 : 0;
     const ustar = Math.sqrt(cd) * speed;
     // boundary-layer depth: bulk Richardson number relative to the lowest level reaches Ri_c
@@ -163,9 +258,9 @@ export class GrayAquaplanet implements ColumnPhysics {
       if (ri <= 0) return MOIST.vonKarman * ustar * z;
       if (ri >= rc) return 0;
       const x = ri / rc;
-      return MOIST.vonKarman * ustar * z / (1 + x * Math.log(z / AQUA.roughness) / (1 - x));
+      return MOIST.vonKarman * ustar * z / (1 + x * Math.log(z / z0) / (1 - x));
     };
-    const hIn = AQUA.fracInner * h, kRef = kmo(hIn);
+    const hIn = cfg.fracInner * h, kRef = kmo(hIn);
     const a = C.a!, m = C.m!, kk = C.kk!;
     a[0] = 0; kk[0] = 0;
     for (let i = 1; i < K; i++) {
@@ -178,26 +273,37 @@ export class GrayAquaplanet implements ColumnPhysics {
       const rho = ph[i]! / (R * Th);
       a[i] = rho * Kd / (zf[i - 1]! - zf[i]!);
     }
-    a[K] = rhoA * cd * speed;
+    const aSfc = rhoA * cd * speed;
     for (let k = 0; k < K; k++) m[k] = (ph[k + 1]! - ph[k]!) / g;
     const s = C.s!;
     for (let k = 0; k < K; k++) s[k] = cp * T[k]! + g * zf[k]!;
-    const qs = qsat(sst, ps);
-    const fluxS = this.diffuse(s, cp * sst, dt);
-    const fluxQ = this.diffuse(q, qs, dt);
+    // evaporation efficiency: 1 over ocean, Manabe bucket over land
+    const beta = isLand ? Math.min(1, f.bucket[p]! / (0.75 * cfg.bucketMax)) : 1;
+    a[K] = aSfc;
+    const fluxS = this.diffuse(s, cp * ts, dt);
+    a[K] = aSfc * beta;
+    let fluxQ = this.diffuse(q, qsat(ts, ps), dt);
+    a[K] = aSfc;
     this.diffuse(u, 0, dt);
     this.diffuse(v, 0, dt);
     for (let k = 0; k < K; k++) T[k] = (s[k]! - g * zf[k]!) / cp;
+    // dew onto a dry bucket is allowed (fluxQ < 0); evaporation cannot exceed the available soil water
+    if (isLand && fluxQ * dt > f.bucket[p]! * MOIST.rhoWater) {
+      const excess = fluxQ * dt - f.bucket[p]! * MOIST.rhoWater;   // kg m^-2 over-evaporated
+      q[ka] = q[ka]! - excess / m[ka]!;
+      fluxQ -= excess / dt;
+    }
     const lh = MOIST.Lv * fluxQ;
-    // slab ocean
-    const heatCap = MOIST.rhoWater * MOIST.cpWater * AQUA.mixedLayerDepth;
-    f.sst[p] = sst + dt * (swSfc * (1 - AQUA.albedo) + lwd[K]! - MOIST.stefan * sst ** 4 - fluxS - lh) / heatCap;
+    // surface energy budget
+    const heatCap = isLand ? cfg.landHeatCapacity : MOIST.rhoWater * MOIST.cpWater * cfg.mixedLayerDepth;
+    const net = swSfc * (1 - albedo) + lwd[K]! - MOIST.stefan * ts ** 4 - fluxS - lh + (isLand ? 0 : qflux);
+    f.sst[p] = ts + dt * net / heatCap;
 
     // ---------------- 4. sponge above 50 hPa (kinetic energy lost is returned as heat)
     for (let k = 0; k < K; k++) {
-      if (pf[k]! >= AQUA.spongePBottom) break;
-      const x = (AQUA.spongePBottom - pf[k]!) / AQUA.spongePBottom;
-      const r = x * x / AQUA.spongeTau;
+      if (pf[k]! >= cfg.spongePBottom) break;
+      const x = (cfg.spongePBottom - pf[k]!) / cfg.spongePBottom;
+      const r = x * x / cfg.spongeTau;
       const un = u[k]! / (1 + dt * r), vn = v[k]! / (1 + dt * r);
       T[k] = T[k]! + 0.5 * (u[k]! ** 2 + v[k]! ** 2 - un * un - vn * vn) / cp;
       u[k] = un; v[k] = vn;
@@ -205,11 +311,11 @@ export class GrayAquaplanet implements ColumnPhysics {
 
     // ---------------- 5. convection
     let rainConv = 0;
-    if (AQUA.useConvection) rainConv = sbmColumn(T, q, pf, ph, dt, g, this.work).rain;
+    if (cfg.useConvection) rainConv = sbmColumn(T, q, pf, ph, dt, g, this.work).rain;
 
     // ---------------- 6. large-scale condensation with re-evaporation
     const hlcp = MOIST.Lv / cp;
-    let exq = 0, rainLS = 0;
+    let exq = 0;
     for (let k = 0; k < K; k++) {
       const mass = (ph[k + 1]! - ph[k]!) / g;
       const qsk = qsat(T[k]!, pf[k]!), dqs = dqsatdT(T[k]!, pf[k]!);
@@ -225,14 +331,23 @@ export class GrayAquaplanet implements ColumnPhysics {
         exq -= def * mass;
       }
     }
-    rainLS = Math.max(0, exq);
+    const rainLS = Math.max(0, exq);
     for (let k = 0; k < K; k++) if (q[k]! < 0) { this.negativeWater -= q[k]! * (ph[k + 1]! - ph[k]!) / g; q[k] = 0; }
+
+    // ---------------- land hydrology (bucket): dW/dt = (P - E)/rho_w, runoff above capacity
+    if (isLand) {
+      let w = f.bucket[p]! + (rainConv + rainLS - fluxQ * dt) / MOIST.rhoWater;
+      if (w < 0) w = 0;
+      if (w > cfg.bucketMax) { f.runoff[p] = f.runoff[p]! + (w - cfg.bucketMax) * MOIST.rhoWater; w = cfg.bucketMax; }
+      f.bucket[p] = w;
+    }
 
     f.precipConv[p] = f.precipConv[p]! + rainConv;
     f.precipLS[p] = f.precipLS[p]! + rainLS;
     f.evap[p] = f.evap[p]! + fluxQ * dt;
     f.shf[p] = f.shf[p]! + fluxS * dt;
     f.olr[p] = f.olr[p]! + olr * dt;
+    f.tsAcc[p] = f.tsAcc[p]! + f.sst[p]! * dt;
     f.olrNow[p] = olr;
     f.precipRate[p] = (rainConv + rainLS) / dt;
   }
@@ -244,7 +359,6 @@ export class GrayAquaplanet implements ColumnPhysics {
    */
   private diffuse(X: Float64Array, xs: number, dt: number): number {
     const K = this.K, a = this.col.a!, m = this.col.m!, cc = this.col.cc!, dd = this.col.dd!;
-    // tridiagonal: -dt a_k X_{k-1} + (m_k + dt(a_k + a_{k+1})) X_k - dt a_{k+1} X_{k+1} = m_k X_k (+ dt a_K xs)
     let prevC = 0, prevD = 0;
     for (let k = 0; k < K; k++) {
       const lower = -dt * a[k]!;
@@ -260,5 +374,12 @@ export class GrayAquaplanet implements ColumnPhysics {
     X[K - 1] = dd[K - 1]!;
     for (let k = K - 2; k >= 0; k--) X[k] = dd[k]! - cc[k]! * X[k + 1]!;
     return a[K]! * (xs - X[K - 1]!);
+  }
+}
+
+/** The Frierson et al. (2006) moist gray aquaplanet (Isca "frierson" test-case settings). */
+export class GrayAquaplanet extends GrayPhysics {
+  constructor(planet: Planet, air: DryAir, nlat: number, nlon: number, K: number, lat: Float64Array) {
+    super(planet, air, nlat, nlon, K, lat, AQUA);
   }
 }

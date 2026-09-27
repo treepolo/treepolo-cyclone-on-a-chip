@@ -5,7 +5,7 @@ import { Dycore } from './dycore.js';
 import { HeldSuarezForcing, heldSuarezTeq } from './heldSuarez.js';
 import { uniformSigmaHalf } from './vertical.js';
 import { rng } from '../core/random.js';
-import { GrayAquaplanet } from './moist/aquaplanet.js';
+import { GrayAquaplanet, GrayPhysics, GrayPhysicsConfig } from './moist/aquaplanet.js';
 import { qsat } from './moist/thermo.js';
 
 export interface HeldSuarezConfig {
@@ -91,6 +91,78 @@ export function createAquaplanet(cfg: AquaplanetConfig): { model: Dycore; physic
         T[idx] = Math.max(200, (ts - 5) * Math.pow(sig, expo)) + 0.1 * (r() - 0.5);
         q[idx] = sig > 0.5 ? 0.5 * qsat(T[idx]!, sig * DRY_AIR.pRef) : 2e-6;
       }
+    }
+  }
+  model.setFromGrid(T, ps);
+  model.setMoisture(q);
+  return { model, physics };
+}
+
+// ---------------------------------------------------------------------------
+// Earth: real land–sea mask and orography, seasonal insolation, gray radiation with
+// water-vapour-dependent longwave optical depth (Byrne & O'Gorman 2013), slab ocean with
+// prescribed ocean heat transport, bucket land hydrology, simple sea-ice albedo.
+
+/** Surface dataset on a regular or Gaussian lat-lon grid (lat north -> south, lon from 0 east). */
+export interface EarthData { nlat: number; nlon: number; lat: number[]; lon: number[]; zsurf_m: number[]; land: number[] }
+
+export interface EarthConfig { trunc: number; dt: number; seed: number }
+export const EARTH_PRESETS: Record<string, EarthConfig> = {
+  EARTH_T21: { trunc: 21, dt: 1200, seed: 3 },
+  EARTH_T42: { trunc: 42, dt: 720, seed: 3 },
+};
+
+export const EARTH_PHYSICS: Partial<GrayPhysicsConfig> = {
+  radiation: 'byrne', seasonal: true, obliquityDeg: 23.44, yearLength: 365.25 * DAY,
+  albedo: 0.31, albedoLand: 0.31, albedoIce: 0.6,
+  mixedLayerDepth: 20, landHeatCapacity: 2e6, roughness: 3.21e-5, roughnessLand: 0.05, bucketMax: 0.15,
+  qflux: true, qfluxAmp: 30, qfluxWidthDeg: 16,
+};
+
+/** Bilinear interpolation of a lat-lon dataset to model points (lat, lon in radians). */
+export function sampleEarth(d: EarthData, field: number[], lat: number, lon: number): number {
+  const la = lat * 180 / Math.PI;
+  let lo = lon * 180 / Math.PI;
+  lo = ((lo % 360) + 360) % 360;
+  const L = d.lat;
+  let j = 0;
+  while (j < d.nlat - 2 && L[j + 1]! > la) j++;
+  const wy = Math.max(0, Math.min(1, (L[j]! - la) / (L[j]! - L[j + 1]!)));
+  const dx = 360 / d.nlon, x = (lo - d.lon[0]!) / dx;
+  const i0 = ((Math.floor(x) % d.nlon) + d.nlon) % d.nlon, i1 = (i0 + 1) % d.nlon, wx = x - Math.floor(x);
+  const at = (jj: number): number => field[jj * d.nlon + i0]! * (1 - wx) + field[jj * d.nlon + i1]! * wx;
+  return at(j) * (1 - wy) + at(j + 1) * wy;
+}
+
+export function createEarth(cfg: EarthConfig, data: EarthData, physicsOverrides: Partial<GrayPhysicsConfig> = {}): { model: Dycore; physics: GrayPhysics } {
+  const model = new Dycore({
+    trunc: cfg.trunc, sigmaHalf: FRIERSON_SIGMA_HALF, dt: cfg.dt, planet: EARTH, air: DRY_AIR,
+    tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : 0.1 * DAY, robert: 0.03, moist: true, massFixer: true,
+  });
+  const tr = model.tr, ng = tr.gridSize, K = model.K, nlon = tr.nlon;
+  const land = new Uint8Array(ng), zs = new Float64Array(ng), phis = new Float64Array(ng);
+  for (let j = 0; j < tr.nlat; j++) for (let i = 0; i < nlon; i++) {
+    const p = j * nlon + i;
+    land[p] = sampleEarth(data, data.land, tr.lat[j]!, tr.lon[i]!) >= 0.5 ? 1 : 0;
+    zs[p] = Math.max(0, sampleEarth(data, data.zsurf_m, tr.lat[j]!, tr.lon[i]!));
+    phis[p] = EARTH.gravity * zs[p]!;
+  }
+  model.setSurfaceGeopotential(phis, 0.1);
+  model.surfaceGeopotentialGrid(phis);
+  for (let p = 0; p < ng; p++) zs[p] = Math.max(0, phis[p]! / EARTH.gravity);
+  const physics = new GrayPhysics(EARTH, DRY_AIR, tr.nlat, nlon, K, tr.lat, { ...EARTH_PHYSICS, ...physicsOverrides }, { land, zsurf: zs });
+  model.columnPhysics = physics;
+  const T = new Float64Array(ng * K), q = new Float64Array(ng * K), ps = new Float64Array(ng);
+  const r = rng(cfg.seed);
+  const expo = DRY_AIR.rd * 0.0065 / EARTH.gravity;
+  for (let j = 0; j < tr.nlat; j++) for (let i = 0; i < nlon; i++) {
+    const p = j * nlon + i;
+    const tsfc = physics.f.sst[p]!;
+    ps[p] = DRY_AIR.pRef * Math.exp(-phis[p]! / (DRY_AIR.rd * 280));
+    for (let k = 0; k < K; k++) {
+      const sig = model.lev.sigma[k]!, idx = k * ng + p;
+      T[idx] = Math.max(200, (tsfc - 5) * Math.pow(sig, expo)) + 0.1 * (r() - 0.5);
+      q[idx] = sig > 0.5 ? 0.5 * qsat(T[idx]!, sig * ps[p]!) : 2e-6;
     }
   }
   model.setFromGrid(T, ps);

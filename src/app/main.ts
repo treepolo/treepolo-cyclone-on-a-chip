@@ -70,6 +70,12 @@ function rainColour(v: number): [number, number, number] {
   return RAIN_STOPS[RAIN_STOPS.length - 1]![1];
 }
 
+/** Calendar date for a model day counted from the northern spring equinox (20 March). */
+function dateFromEquinox(day: number): string {
+  const d = new Date(Date.UTC(2001, 2, 20) + (day % 365.25) * 86400000);
+  return `${d.getUTCMonth() + 1} 月 ${d.getUTCDate()} 日 / ${d.toLocaleString('en', { month: 'short', timeZone: 'UTC' })} ${d.getUTCDate()}`;
+}
+
 // ---------------- tracers (massless Lagrangian particles advected by the model wind at the displayed level)
 const NTR = 5000, RADIUS = 6.371e6;
 const trLat = new Float64Array(NTR), trLon = new Float64Array(NTR), trAge = new Float64Array(NTR);
@@ -124,6 +130,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
   if (m.type === 'ready') {
     log(`模式就緒 / Model ready: T${m.trunc} ${m.nlon}×${m.nlat} L${m.K}, Δt = ${m.dt} s`);
     $('grid').textContent = `T${m.trunc} · ${m.nlon}×${m.nlat} · L${m.K}`;
+    globe.setOutline(m.lat, m.nlon, m.land);
     const lev = $<HTMLInputElement>('level');
     lev.max = String(m.K - 1);
     if (Number(lev.value) > m.K - 1) lev.value = String(m.K - 1);
@@ -135,6 +142,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
     $('rate').textContent = `${m.stepsPerSecond.toFixed(1)} 步/s steps/s · ${(m.stepsPerSecond * Number($('dt').dataset.dt ?? 0) / 86400 * 60).toFixed(1)} 日/分 days/min`;
     $('maxwind').textContent = `${m.maxWind.toFixed(1)} m/s`;
     $('psdrift').textContent = m.psDrift.toExponential(2);
+    $('season').textContent = m.declinationDeg === null ? '—' : `${dateFromEquinox(m.day)} · 太陽赤緯 / declination ${m.declinationDeg.toFixed(1)}°`;
     $('levelLabel').textContent = `σ = ${m.sigma[m.level]!.toFixed(3)} (≈ ${(m.sigma[m.level]! * 1000).toFixed(0)} hPa)`;
   } else if (m.type === 'zonal') {
     zonal = m;
@@ -171,7 +179,11 @@ $('preset').onchange = (): void => init();
 function init(): void {
   running = false; syncRun();
   const p = $<HTMLSelectElement>('preset').value;
-  $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : '900';
+  $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : p === 'EARTH_T21' ? '1200' : p === 'EARTH_T42' ? '720' : '900';
+  if (p.startsWith('EARTH')) {
+    $<HTMLSelectElement>('field').value = 'precip';
+    log('地球：真實海陸與地形、季節日照；模式從 3 月 20 日（春分）開始 / Earth: real land, orography and seasons; the model starts on 20 March (equinox)');
+  }
   if (p.startsWith('AQUA')) {
     $<HTMLSelectElement>('field').value = 'precip';
     log('濕水球：對流、ITCZ、風暴路徑與降水需約 30–60 模式日發展 / Moist aquaplanet: convection, ITCZ, storm tracks and rain develop over ~30–60 model days');

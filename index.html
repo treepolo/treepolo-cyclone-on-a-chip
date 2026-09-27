@@ -37,6 +37,10 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <option value="T42L20" selected>T42 L20（標準 / standard）</option>
 <option value="T63L20">T63 L20（精細 / fine）</option>
 </optgroup>
+<optgroup label="地球：海陸、地形、季節 / Earth: land, orography, seasons">
+<option value="EARTH_T21">T21 L25：季風、大陸季節變化 / monsoons, continental seasons</option>
+<option value="EARTH_T42">T42 L25（較慢 / slower）</option>
+</optgroup>
 <optgroup label="濕大氣水球（灰體輻射）/ Moist aquaplanet (gray radiation)">
 <option value="AQUA_T21">T21 L25：降水、ITCZ、風暴路徑 / rain, ITCZ, storm tracks</option>
 <option value="AQUA_T42">T42 L25（較慢 / slower）</option>
@@ -61,7 +65,7 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <option value="ps">地面氣壓 / Surface pressure</option>
 <option value="precip">降水率（濕模式）/ Precipitation rate (moist)</option>
 <option value="q">比濕（濕模式）/ Specific humidity (moist)</option>
-<option value="sst">海面溫度（濕模式）/ Sea-surface temperature (moist)</option>
+<option value="sst">地表／海面溫度（濕模式）/ Surface temperature (moist)</option>
 <option value="olr">外逸長波輻射（濕模式）/ Outgoing longwave radiation (moist)</option>
 </select>
 <label for="level">垂直層 / Model level <span id="levelLabel" class="muted"></span></label>
@@ -75,6 +79,7 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <div class="row"><span>速度 / Speed</span><span id="rate" data-dt="1200">—</span><span id="dt" hidden></span></div>
 <div class="row"><span>最大風速 / Max wind</span><span id="maxwind">—</span></div>
 <div class="row"><span>全球平均地面氣壓漂移 / Mean ps drift</span><span id="psdrift">—</span></div>
+<div class="row"><span>日期 / Date</span><span id="season">—</span></div>
 
 <h2>緯向平均 / Zonal means</h2>
 <div id="zonalInfo" class="muted">執行後每 6 模式小時取樣 / Sampled every 6 model hours once running</div>

@@ -99,6 +99,12 @@ export interface MapPlot {
   contourStep: number;
   latRange: [number, number]; // [south, north]
   diverging?: boolean;
+  /** optional 0/1 field whose 0.5 contour is drawn as coastline */
+  outline?: number[];
+  /** optional fixed colour range */
+  range?: [number, number];
+  /** optional wind vectors (u, v) drawn every `stride` points */
+  vectors?: { u: number[]; v: number[]; stride: number; scale: number };
 }
 
 /** Equirectangular map of a Gaussian-grid field, restricted to a latitude band. */
@@ -112,6 +118,7 @@ export function mapSvg(p: MapPlot, width = 900, height = 300): string {
   for (let j = 0; j < nl; j++) if (p.lat[j]! >= s0 - 3 && p.lat[j]! <= n0 + 3) rows.push(j);
   let vmin = Infinity, vmax = -Infinity, amax = 0;
   for (const j of rows) for (let i = 0; i < nx; i++) { const v = p.values[j * nx + i]!; vmin = Math.min(vmin, v); vmax = Math.max(vmax, v); amax = Math.max(amax, Math.abs(v)); }
+  if (p.range) { vmin = p.range[0]; vmax = p.range[1]; amax = Math.max(Math.abs(vmin), Math.abs(vmax)); }
   const out: string[] = [];
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" font-family="sans-serif" font-size="11">`);
   out.push(`<rect width="100%" height="100%" fill="#fff"/><defs><clipPath id="c"><rect x="${ml}" y="${mt}" width="${W}" height="${H}"/></clipPath></defs>`);
@@ -132,6 +139,20 @@ export function mapSvg(p: MapPlot, width = 900, height = 300): string {
   for (let i = lo; i <= hi; i++) {
     const d = contours(xs, ys, val, i * p.contourStep + 1e-9);
     if (d) out.push(`<path d="${d}" stroke="#000" stroke-width="0.7" fill="none"/>`);
+  }
+  if (p.outline) {
+    const ol = p.outline;
+    const d = contours(xs, ys, (r: number, c: number): number => ol[rows[r]! * nx + (c % nx)]!, 0.5);
+    if (d) out.push(`<path d="${d}" stroke="#222" stroke-width="1.4" fill="none"/>`);
+  }
+  if (p.vectors) {
+    const V = p.vectors;
+    for (let r = 0; r < rows.length; r += V.stride) for (let i = 0; i < nx; i += V.stride) {
+      const j = rows[r]!, uu = V.u[j * nx + i]!, vv = V.v[j * nx + i]!;
+      const x0 = xOf(p.lon[i]!), y0 = yOf(p.lat[j]!), x1 = x0 + uu * V.scale, y1 = y0 - vv * V.scale;
+      const ang = Math.atan2(y1 - y0, x1 - x0), hl = Math.min(4, 0.35 * Math.hypot(x1 - x0, y1 - y0));
+      out.push(`<path d="M${x0.toFixed(1)},${y0.toFixed(1)}L${x1.toFixed(1)},${y1.toFixed(1)}M${(x1 - hl * Math.cos(ang - 0.5)).toFixed(1)},${(y1 - hl * Math.sin(ang - 0.5)).toFixed(1)}L${x1.toFixed(1)},${y1.toFixed(1)}L${(x1 - hl * Math.cos(ang + 0.5)).toFixed(1)},${(y1 - hl * Math.sin(ang + 0.5)).toFixed(1)}" stroke="#111" stroke-width="0.8" fill="none"/>`);
+    }
   }
   out.push('</g>');
   out.push(`<rect x="${ml}" y="${mt}" width="${W}" height="${H}" fill="none" stroke="#000"/>`);

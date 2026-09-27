@@ -29,6 +29,7 @@ export class Globe {
   private readonly grat: { vao: WebGLVertexArrayObject; count: number };
   private readonly trc: { vao: WebGLVertexArrayObject; pos: WebGLBuffer; col: WebGLBuffer };
   private trcCount = 0;
+  private coast: { vao: WebGLVertexArrayObject; count: number } | null = null;
   yaw = -0.4;
   pitch = 0.35;
   dist = 3.2;
@@ -140,6 +141,35 @@ export class Globe {
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, col);
   }
 
+  /** Coastlines: 0.5 contour of a [lat][lon] land mask (marching squares), or null to clear. */
+  setOutline(lat: Float64Array, nlon: number, mask: Uint8Array | null): void {
+    if (!mask) { this.coast = null; return; }
+    const gl = this.gl, nlat = lat.length, v: number[] = [], c: number[] = [];
+    const P = (la: number, lo: number): void => { v.push(Math.cos(la) * Math.cos(lo), Math.sin(la), -Math.cos(la) * Math.sin(lo)); c.push(0.05, 0.05, 0.05); };
+    for (let j = 0; j < nlat - 1; j++) for (let i = 0; i < nlon; i++) {
+      const i1 = (i + 1) % nlon;
+      const lo0 = i * 2 * Math.PI / nlon, lo1 = (i + 1) * 2 * Math.PI / nlon, la0 = lat[j]!, la1 = lat[j + 1]!;
+      const corners: [number, number, number][] = [
+        [la0, lo0, mask[j * nlon + i]!], [la0, lo1, mask[j * nlon + i1]!], [la1, lo1, mask[(j + 1) * nlon + i1]!], [la1, lo0, mask[(j + 1) * nlon + i]!],
+      ];
+      const pts: [number, number][] = [];
+      for (let e = 0; e < 4; e++) {
+        const a = corners[e]!, b = corners[(e + 1) % 4]!;
+        if (a[2] !== b[2]) pts.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+      }
+      if (pts.length >= 2) { P(pts[0]![0], pts[0]![1]); P(pts[1]![0], pts[1]![1]); }
+      if (pts.length === 4) { P(pts[2]![0], pts[2]![1]); P(pts[3]![0], pts[3]![1]); }
+    }
+    const vao = gl.createVertexArray()!;
+    gl.bindVertexArray(vao);
+    const pb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, pb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(this.loc.pos); gl.vertexAttribPointer(this.loc.pos, 3, gl.FLOAT, false, 0, 0);
+    const cb = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, cb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(c), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(this.loc.col); gl.vertexAttribPointer(this.loc.col, 3, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    this.coast = { vao, count: v.length / 3 };
+  }
+
   /** Tracer streaks: pairs of unit vectors (head, tail) with colours. */
   setTracers(pos: Float32Array, col: Float32Array, count: number): void {
     const gl = this.gl;
@@ -174,6 +204,11 @@ export class Globe {
     gl.uniform1f(this.loc.scale, 1.002); gl.uniform1f(this.loc.alpha, 0.18);
     gl.bindVertexArray(this.grat.vao);
     gl.drawArrays(gl.LINES, 0, this.grat.count);
+    if (this.coast) {
+      gl.uniform1f(this.loc.scale, 1.003); gl.uniform1f(this.loc.alpha, 0.9);
+      gl.bindVertexArray(this.coast.vao);
+      gl.drawArrays(gl.LINES, 0, this.coast.count);
+    }
     if (this.trcCount > 0) {
       gl.uniform1f(this.loc.scale, 1.004); gl.uniform1f(this.loc.alpha, 0.85);
       gl.bindVertexArray(this.trc.vao);

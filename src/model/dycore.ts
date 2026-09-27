@@ -217,10 +217,25 @@ export class Dycore {
     this.time = 0;
   }
 
-  /** Set the surface geopotential Phi_s = g z_s (m^2 s^-2) from a [lat][lon] grid. */
-  setSurfaceGeopotential(phis: Float64Array): void {
-    this.tr.anal(phis, this.phis);
+  /**
+   * Set the surface geopotential Phi_s = g z_s (m^2 s^-2) from a [lat][lon] grid.
+   * smoothing = remaining amplitude at n = T of the filter exp(-c [n(n+1)]^2) (1 = no smoothing),
+   * used to suppress Gibbs ripples of steep orography.
+   */
+  setSurfaceGeopotential(phis: Float64Array, smoothing = 1): void {
+    const tr = this.tr;
+    tr.anal(phis, this.phis);
+    if (smoothing < 1) {
+      const nm = tr.trunc * (tr.trunc + 1), c = -Math.log(smoothing) / (nm * nm);
+      for (let s = 0; s < tr.nspec; s++) {
+        const f = Math.exp(-c * tr.nn1[s]! ** 2);
+        this.phis.re[s] = this.phis.re[s]! * f; this.phis.im[s] = this.phis.im[s]! * f;
+      }
+    }
   }
+
+  /** Surface geopotential on the grid (m^2 s^-2), as seen by the dynamics. */
+  surfaceGeopotentialGrid(out: Float64Array): void { this.tr.synth(this.phis, out); }
 
   // ------------------------------------------------------------------
   // Time stepping
