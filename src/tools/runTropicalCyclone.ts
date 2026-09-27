@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { RegionalModel } from '../regional/core.js';
 import { KesslerMicrophysics, QR } from '../regional/kessler.js';
 import { RegionalPhysics } from '../regional/physics.js';
-import { tropicalSounding, insertVortex, tcMetrics } from '../regional/tropical.js';
+import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../regional/tropical.js';
 import { xySvg, sectionSvg } from './plot.js';
 
 const days = Number(process.argv[2] ?? 8), dx = Number(process.argv[3] ?? 15000), L = Number(process.argv[4] ?? 1200000);
@@ -27,7 +27,7 @@ while (m.time < days * 86400 - 1e-9) {
   if (m.steps % every === 0) {
     const r = tcMetrics(m);
     let lhmax = 0; for (const x of ph.lhf) lhmax = Math.max(lhmax, x);
-    say(`t=${(m.time / 3600).toFixed(0)} h: pmin ${r.pmin.toFixed(1)} hPa  vmax ${r.vmax.toFixed(1)} m/s  RMW ${(r.rmw / 1000).toFixed(0)} km  max LHF ${lhmax.toFixed(0)} W/m2  wall ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+    say(`t=${(m.time / 3600).toFixed(0)} h: pmin ${r.pmin.toFixed(1)} hPa  vmax ${r.vmax.toFixed(1)} m/s  RMW ${(r.rmw / 1000).toFixed(0)} km  max LHF ${lhmax.toFixed(0)} W/m2  eyewalls ${eyewallProfile(m).peaks.map((e) => `${(e.r / 1000).toFixed(0)} km/${e.v.toFixed(0)}`).join(' + ') || '-'}  wall ${((Date.now() - t0) / 1000).toFixed(0)} s`);
     if (!Number.isFinite(r.pmin)) { say('NaN'); process.exit(1); }
     if (Math.round(m.time / 3600) % 24 === 0) snapshot(`d${Math.round(m.time / 86400)}`, r.ic, r.jc);
   }

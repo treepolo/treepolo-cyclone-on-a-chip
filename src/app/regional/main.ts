@@ -45,6 +45,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('rainmax').textContent = `${s.rainmax.toFixed(1)} mm`;
     $('vmax').textContent = `${s.vmax.toFixed(1)} m/s`;
     $('dp').textContent = s.dp === null ? '—' : `${s.dp.toFixed(1)} hPa${s.rmw ? ` · RMW ${(s.rmw / 1000).toFixed(0)} km` : ''}`;
+    $('eyewalls').textContent = !s.eyewalls ? '—' : s.eyewalls.length === 0 ? '未形成 / none yet'
+      : (s.eyewalls.length >= 2 ? '雙眼牆 / concentric: ' : '') + s.eyewalls.map((e) => `${(e.r / 1000).toFixed(0)} km (${e.v.toFixed(0)} m/s)`).join(' · ');
     $('legend').textContent = `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); }
 };

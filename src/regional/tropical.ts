@@ -130,3 +130,40 @@ export function tcMetrics(m: RegionalModel): { pmin: number; vmax: number; ic: n
   for (let b = 0; b < nb; b++) if (cnt[b]! > 0 && vt[b]! / cnt[b]! > best) { best = vt[b]! / cnt[b]!; rmw = (b + 0.5) * dx; }
   return { pmin, vmax, ic, jc, rmw };
 }
+
+/**
+ * Eyewall diagnostics (measurement only): azimuthal-mean tangential wind vt(r) around the surface
+ * pressure minimum at height z, lightly smoothed, and its local maxima. Two maxima separated by a
+ * minimum ("moat") at least 10 % below the weaker one indicate concentric eyewalls; an inner maximum
+ * decaying while the outer one strengthens is the signature of an eyewall replacement cycle.
+ */
+export function eyewallProfile(m: RegionalModel, z = 1500): { r: number[]; vt: number[]; peaks: { r: number; v: number }[]; concentric: boolean } {
+  const { nx, ny, dx, nz } = m.c, sx = m.sx;
+  const { ic, jc } = tcMetrics(m);
+  let k = 0; for (let kk = 0; kk < nz; kk++) if (Math.abs(m.zc[kk]! - z) < Math.abs(m.zc[k]! - z)) k = kk;
+  const nb = Math.floor(Math.min(nx, ny) / 2), sum = new Float64Array(nb), cnt = new Float64Array(nb);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const x = (i - ic) * dx, y = (j - jc) * dx, r = Math.hypot(x, y);
+    const b = Math.floor(r / dx);
+    if (b >= nb || r === 0) continue;
+    const q = m.idx(i, j, k);
+    const ua = 0.5 * (m.u[q]! + m.u[q + 1]!), va = 0.5 * (m.v[q]! + m.v[q + sx]!);
+    sum[b] = sum[b]! + (-ua * y + va * x) / r; cnt[b] = cnt[b]! + 1;
+  }
+  const raw = Array.from(sum, (s, b) => (cnt[b]! > 0 ? s / cnt[b]! : 0));
+  const vt = raw.map((_, b) => (raw[Math.max(0, b - 1)]! + 2 * raw[b]! + raw[Math.min(nb - 1, b + 1)]!) / 4);
+  const r = vt.map((_, b) => (b + 0.5) * dx);
+  const vmax = Math.max(...vt);
+  const peaks: { r: number; v: number; b: number }[] = [];
+  for (let b = 1; b < nb - 1; b++) if (vt[b]! > vt[b - 1]! && vt[b]! >= vt[b + 1]! && vt[b]! > 0.5 * vmax && vt[b]! > 10) peaks.push({ r: r[b]!, v: vt[b]!, b });
+  // keep maxima separated by a moat at least 10 % below the weaker neighbour peak
+  const kept: typeof peaks = [];
+  for (const p of peaks) {
+    const last = kept[kept.length - 1];
+    if (!last) { kept.push(p); continue; }
+    let moat = Infinity; for (let b = last.b; b <= p.b; b++) moat = Math.min(moat, vt[b]!);
+    if (moat < 0.9 * Math.min(last.v, p.v)) kept.push(p);
+    else if (p.v > last.v) kept[kept.length - 1] = p;
+  }
+  return { r, vt, peaks: kept.map(({ r: rr, v }) => ({ r: rr, v })), concentric: kept.length >= 2 };
+}

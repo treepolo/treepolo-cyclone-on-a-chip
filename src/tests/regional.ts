@@ -4,6 +4,7 @@ import { RegionalModel, RegionalConfig } from '../regional/core.js';
 import { check, summary } from './assert.js';
 import { KesslerMicrophysics, weismanKlemp, QV, QC, QR } from '../regional/kessler.js';
 import { IceMicrophysics, cellProcesses, ICE, QI, QS, QG } from '../regional/ice.js';
+import { eyewallProfile } from '../regional/tropical.js';
 
 const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200, dt: 1, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 0, dampRate: 0, kdiff2: 0 };
 
@@ -166,6 +167,32 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
   check('ice regional: no liquid water colder than -40 °C', liqCold < 1e-9, liqCold);
   check('ice regional: precipitation reaches the ground', rain > 0, `total ${(rain / (nx * nx)).toFixed(2)} mm mean, frozen part ${(100 * frozen / Math.max(rain, 1e-30)).toFixed(0)}%`);
   check('ice regional: total water conserved within 0.5%', drift < 5e-3, drift);
+}
+
+// 7. Eyewall diagnostic: single and concentric wind maxima of a prescribed vortex are recognised
+{
+  const cfg: RegionalConfig = { ...base, nx: 120, ny: 120, nz: 6, dx: 2000, dy: 2000, dz: 500, dt: 10 };
+  const mk = (vt: (r: number) => number): RegionalModel => {
+    const m = new RegionalModel(cfg, (z) => ({ theta: 300 + 0.004 * z, qv: 0 }), 0);
+    const c = 60 * 2000;
+    for (let k = 0; k < 6; k++) for (let j = 0; j < 120; j++) for (let i = 0; i < 120; i++) {
+      const q = m.idx(i, j, k);
+      const xu = i * 2000 - c + 1000, yu = (j + 0.5) * 2000 - c;           // u point: west face
+      const xv = (i + 0.5) * 2000 - c, yv = j * 2000 - c + 1000;           // v point: south face
+      const ru = Math.hypot(xu, yu) || 1, rv = Math.hypot(xv, yv) || 1;
+      m.u[q] = -vt(ru) * yu / ru; m.v[q] = vt(rv) * xv / rv;
+      const xc = (i + 0.5) * 2000 - c - 1000, yc = (j + 0.5) * 2000 - c - 1000;
+      m.pp[q] = -1e-3 * Math.exp(-(xc * xc + yc * yc) / (2 * 30000 ** 2));
+    }
+    return m;
+  };
+  const single = eyewallProfile(mk((r) => 50 * (r < 25000 ? r / 25000 : Math.pow(25000 / r, 0.6))), 1000);
+  const dbl = eyewallProfile(mk((r) => {
+    const inner = 45 * Math.exp(-(((r - 20000) / 8000) ** 2)), outer = 40 * Math.exp(-(((r - 70000) / 12000) ** 2));
+    return Math.max(inner, outer, 12 * Math.min(1, r / 20000));
+  }), 1000);
+  check('eyewall diagnostic: single eyewall at ~25 km', single.peaks.length === 1 && !single.concentric && Math.abs(single.peaks[0]!.r - 25000) < 4000, single.peaks.map((p) => (p.r / 1000).toFixed(0)).join(','));
+  check('eyewall diagnostic: concentric eyewalls at ~20 and ~70 km', dbl.concentric && Math.abs(dbl.peaks[0]!.r - 20000) < 4000 && Math.abs(dbl.peaks[1]!.r - 70000) < 4000, dbl.peaks.map((p) => (p.r / 1000).toFixed(0)).join(','));
 }
 
 void DRY_AIR;

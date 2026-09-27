@@ -35,7 +35,7 @@ export interface RegionalFrame {
   ground: Float32Array;       // [j][i]
   groundField: GroundField;
   groundRange: [number, number];
-  stats: { wmax: number; wmin: number; qcmax: number; qrmax: number; rainmax: number; vmax: number; dp: number | null; rmw: number | null };
+  stats: { wmax: number; wmin: number; qcmax: number; qrmax: number; rainmax: number; vmax: number; dp: number | null; rmw: number | null; eyewalls: { r: number; v: number }[] | null };
   stepsPerSecond: number;
 }
 

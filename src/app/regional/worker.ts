@@ -4,7 +4,7 @@ import { RegionalModel } from '../../regional/core.js';
 import { weismanKlemp } from '../../regional/kessler.js';
 import { IceMicrophysics, QV, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { RegionalPhysics } from '../../regional/physics.js';
-import { tropicalSounding, insertVortex, tcMetrics } from '../../regional/tropical.js';
+import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, sampleSurface, NestSpec } from '../../regional/nest.js';
@@ -182,8 +182,8 @@ async function sendFrame(): Promise<void> {
   for (const v of g) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
   if (ground === 'theta') { const a = Math.max(Math.abs(lo), Math.abs(hi), 0.5); lo = -a; hi = a; }
   else { lo = 0; hi = Math.max(hi, ground === 'rain' || ground === 'snow' ? 5 : 10); }
-  let dp: number | null = null, rmw: number | null = null;
-  if (experiment === 'tc') { const r = tcMetrics(m); dp = r.pmin - dpEnv; rmw = r.rmw; }
+  let dp: number | null = null, rmw: number | null = null, eyewalls: { r: number; v: number }[] | null = null;
+  if (experiment === 'tc' || experiment === 'tc_hr') { const r = tcMetrics(m); dp = r.pmin - dpEnv; rmw = r.rmw; eyewalls = eyewallProfile(m).peaks; }
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
-    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw }, stepsPerSecond: rate }, [cloud.buffer, rain.buffer, g.buffer]);
+    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls }, stepsPerSecond: rate }, [cloud.buffer, rain.buffer, g.buffer]);
 }
