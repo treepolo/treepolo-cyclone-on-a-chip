@@ -115,6 +115,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     const haloAll = disp(pHalo, bg(pHalo, [this.S, haloParams(0, NF, nz + 1)]), haloN(NF, nz + 1));
     const haloUV = disp(pHalo, bg(pHalo, [this.S, haloParams(0, 2, nz)]), haloN(2, nz));
     const haloPP = disp(pHalo, bg(pHalo, [this.S, haloParams(4, 1, nz)]), haloN(1, nz));
+    const haloThQ = disp(pHalo, bg(pHalo, [this.S, haloParams(3, 5, nz)]), haloN(5, nz));
     const haloPPold = disp(pHalo, bg(pHalo, [this.aux, haloParams(0, 1, nz)]), haloN(1, nz));
     const haloK = disp(pHalo, bg(pHalo, [this.aux, haloParams(1, 1, nz)]), haloN(1, nz));
     const nInt = nx * ny * nz, nInt1 = nx * ny * (nz + 1), nCol = nx * ny;
@@ -134,7 +135,8 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
         if (pSfc) seq.push(disp(pSfc, bg(pSfc, [this.S, this.F]), nCol));
       }
       seq.push(disp(pStage, bg(pStage, [this.S, this.S0, this.F, this.aux, prm]), size));
-      const ah = disp(pAh, bg(pAh, [this.S, this.F, this.aux, baseBuf, prm]), nInt);
+      seq.push(haloThQ);
+      const ah = disp(pAh, bg(pAh, [this.S, this.F, this.aux, prm]), nInt);
       const av = disp(pAv, bg(pAv, [this.S, this.F, baseBuf, prm]), nCol);
       const cp2 = disp(pCopyPP, bg(pCopyPP, [this.S, this.aux]), size);
       for (let i = 0; i < ns; i++) seq.push(haloPP, haloPPold, ah, haloUV, cp2, av);
@@ -252,11 +254,12 @@ ${BASE_FNS}
 fn U(q: u32) -> f32 { return S[q]; }
 fn V(q: u32) -> f32 { return S[SIZE + q]; }
 fn W(q: u32) -> f32 { return S[2u * SIZE + q]; }
-fn buoy(q: u32, k: u32) -> f32 {
-  var b = G * (S[3u * SIZE + q] - bth0(k)) / bth0(k);
-  if (MOIST) { b += G * (0.61 * (S[5u * SIZE + q] - bqv0(k)) - S[6u * SIZE + q] - S[7u * SIZE + q]); }
-  return b;
+fn thr(q: u32) -> f32 {
+  var f = 1.0;
+  if (MOIST) { f += 0.61 * S[5u * SIZE + q] - S[6u * SIZE + q] - S[7u * SIZE + q]; }
+  return S[3u * SIZE + q] * f;
 }
+fn buoy(q: u32, k: u32) -> f32 { return G * (thr(q) - bthv(k)) / bthv(k); }
 fn zfaceU(q: u32, kf: u32, vel: f32, off: u32) -> f32 {
   if (kf >= 3u && kf <= NZ - 3u) { return f5(S[off + q - 3u * PL], S[off + q - 2u * PL], S[off + q - PL], S[off + q], S[off + q + PL], S[off + q + 2u * PL], vel); }
   if (kf >= 2u && kf <= NZ - 2u) { return f3(S[off + q - 2u * PL], S[off + q - PL], S[off + q], S[off + q + PL], vel); }
@@ -505,9 +508,12 @@ const ACOUSTIC_H_WGSL = /* wgsl */`
 @group(0) @binding(0) var<storage, read_write> S: array<f32>;
 @group(0) @binding(1) var<storage, read> F: array<f32>;
 @group(0) @binding(2) var<storage, read> A: array<f32>;
-@group(0) @binding(3) var<storage, read> base: array<f32>;
-${BASE_FNS}
-@group(0) @binding(4) var<uniform> p: P;
+@group(0) @binding(3) var<uniform> p: P;
+fn thr(q: u32) -> f32 {
+  var f = 1.0;
+  if (MOIST) { f += 0.61 * S[5u * SIZE + q] - S[6u * SIZE + q] - S[7u * SIZE + q]; }
+  return S[3u * SIZE + q] * f;
+}
 fn pstar(q: u32) -> f32 { let pp = S[4u * SIZE + q]; return pp + DIVD * (pp - A[q]); }
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -515,10 +521,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (t >= NX * NY * NZ) { return; }
   let k = t / (NX * NY); let r = t % (NX * NY); let j = r / NX; let i = r % NX;
   let q = ix(i, j, k);
-  let thv = bthv(k);
+  let tq = thr(q);
   let ps = pstar(q);
-  S[q] += p.dts * (F[q] - CP * thv * (ps - pstar(q - 1u)) / DX);
-  S[SIZE + q] += p.dts * (F[SIZE + q] - CP * thv * (ps - pstar(q - SX)) / DY);
+  S[q] += p.dts * (F[q] - CP * 0.5 * (tq + thr(q - 1u)) * (ps - pstar(q - 1u)) / DX);
+  S[SIZE + q] += p.dts * (F[SIZE + q] - CP * 0.5 * (tq + thr(q - SX)) * (ps - pstar(q - SX)) / DY);
 }
 `;
 
@@ -536,7 +542,11 @@ const ACOUSTIC_V_WGSL = /* wgsl */`
 @group(0) @binding(2) var<storage, read> base: array<f32>;
 ${BASE_FNS}
 @group(0) @binding(3) var<uniform> p: P;
-var<private> E: array<f32, ${'${NZ}'}>;
+fn thr(q: u32) -> f32 {
+  var f = 1.0;
+  if (MOIST) { f += 0.61 * S[5u * SIZE + q] - S[6u * SIZE + q] - S[7u * SIZE + q]; }
+  return S[3u * SIZE + q] * f;
+}
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
@@ -554,7 +564,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   for (var k = 1u; k < NZ; k++) {
     let q = ix(i, j, k);
-    let cth = CP * bth0f(k) / DZ;
+    let cth = CP * 0.5 * (thr(q) + thr(q - PL)) / DZ;
     let gk = dts * bcfac(k) * bp / DZ; let gkm = dts * bcfac(k - 1u) * bp / DZ;
     let rtk = brtf(k);
     a[k] = select(0.0, -dts * cth * bp * gkm * brtf(k - 1u), k - 1u >= 1u);
@@ -572,7 +582,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   for (var k = 0u; k <= NZ; k++) { S[2u * SIZE + ix(i, j, k)] = wn[k]; }
 }
-`.replace("var<private> E: array<f32, ${NZ}>;\n", '');
+`;
 
 // Kessler microphysics per column (clip negatives, sedimentation, warm rain, saturation adjustment)
 const KESSLER_WGSL = /* wgsl */`

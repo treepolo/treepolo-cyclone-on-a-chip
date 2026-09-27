@@ -27,7 +27,14 @@ export interface RegionalConfig {
   dampDepth: number;                        // Rayleigh damping layer depth below the lid (m)
   dampRate: number;                         // Rayleigh damping max rate (s^-1)
   kdiff2: number;                           // constant eddy diffusivity (m^2/s) for tests (0 = off)
+  /** lateral boundaries: doubly periodic (default) or open with a Davies relaxation zone */
+  lateral?: 'periodic' | 'open';
+  relaxCells?: number;                      // relaxation-zone width (cells), open boundaries
+  relaxTau?: number;                        // relaxation time scale at the outer boundary (s)
 }
+
+/** Boundary targets for open lateral boundaries (same layout as the prognostic arrays). */
+export interface BoundaryTargets { u: Float64Array; v: Float64Array; th: Float64Array; qv: Float64Array | null; pp?: Float64Array | null }
 
 export class RegionalModel {
   readonly c: RegionalConfig;
@@ -52,8 +59,12 @@ export class RegionalModel {
   private readonly sc0: Float64Array[]; private readonly fsc: Float64Array[];
   private readonly ppOld: Float64Array;
   private readonly flux: Float64Array;
+  /** density potential temperature theta_rho = theta (1 + 0.61 qv - qc - qr) of the current stage */
+  private readonly thr: Float64Array;
   /** buoyancy / extra slow forcing hook for w and theta (moist physics adds here) */
   buoyancy: ((m: RegionalModel, out: Float64Array) => void) | null = null;
+  /** relaxation targets for open lateral boundaries (set by a nesting driver) */
+  boundary: BoundaryTargets | null = null;
   /** sub-grid / surface / radiation slow tendencies hook */
   physicsTend: ((m: RegionalModel, t: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }) => void) | null = null;
 
@@ -74,7 +85,7 @@ export class RegionalModel {
     this.u = z(); this.v = z(); this.w = z(); this.th = z(); this.pp = z();
     this.u0 = z(); this.v0 = z(); this.w0 = z(); this.th0s = z(); this.pp0 = z();
     this.fu = z(); this.fv = z(); this.fw = z(); this.fth = z(); this.fpp = z();
-    this.ppOld = z(); this.flux = z();
+    this.ppOld = z(); this.flux = z(); this.thr = z();
     this.scalars = Array.from({ length: nScalars }, z);
     this.sc0 = Array.from({ length: nScalars }, z);
     this.fsc = Array.from({ length: nScalars }, z);
@@ -114,6 +125,21 @@ export class RegionalModel {
   /** Fill periodic halos of a 3-D array for levels [0, nk). */
   fillHalo(a: Float64Array, nk: number): void {
     const { nx, ny } = this.c, sx = this.sx;
+    if (this.c.lateral === 'open') {
+      // zero-gradient extrapolation into the halo
+      for (let k = 0; k < nk; k++) {
+        const o = k * this.plane;
+        for (let j = 0; j < ny; j++) {
+          const r = o + (j + H) * sx;
+          for (let h = 0; h < H; h++) { a[r + h] = a[r + H]!; a[r + nx + H + h] = a[r + nx + H - 1]!; }
+        }
+        for (let h = 0; h < H; h++) {
+          a.copyWithin(o + h * sx, o + H * sx, o + (H + 1) * sx);
+          a.copyWithin(o + (ny + H + h) * sx, o + (ny + H - 1) * sx, o + (ny + H) * sx);
+        }
+      }
+      return;
+    }
     for (let k = 0; k < nk; k++) {
       const o = k * this.plane;
       for (let j = 0; j < ny; j++) {
@@ -125,6 +151,19 @@ export class RegionalModel {
         a.copyWithin(o + (ny + H + h) * sx, o + (H + h) * sx, o + (H + h + 1) * sx);
       }
     }
+  }
+
+  /** theta_rho from theta and moisture scalars (qv, qc, qr by convention in slots 0, 1, 2). */
+  private computeThetaRho(): void {
+    const n = this.size, th = this.th, qv = this.scalars[0], qc = this.scalars[1], qr = this.scalars[2], t = this.thr;
+    for (let i = 0; i < n; i++) {
+      let f = 1;
+      if (qv) f += 0.61 * qv[i]!;
+      if (qc) f -= qc[i]!;
+      if (qr) f -= qr[i]!;
+      t[i] = th[i]! * f;
+    }
+    this.fillHalo(t, this.c.nz);
   }
 
   // ----------------------------------------------------------------------------------------
@@ -266,9 +305,12 @@ export class RegionalModel {
     // Coriolis (f-plane), buoyancy
     const buoy = this.flux;
     buoy.fill(0);
+    this.computeThetaRho();
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const q = this.idx(i, j, k);
-      buoy[q] = g * (this.th[q]! - this.th0[k]!) / this.th0[k]!;
+      // exact buoyancy of the pi'-form vertical equation with the full theta_rho pressure-gradient term
+      const thr0 = this.th0[k]! * (1 + 0.61 * this.qv0[k]!);
+      buoy[q] = g * (this.thr[q]! - thr0) / thr0;
       if (f !== 0) {
         const vAtU = 0.25 * (v[q]! + v[q - 1]! + v[q + sx]! + v[q - 1 + sx]!);
         const uAtV = 0.25 * (u[q]! + u[q + 1]! + u[q - sx]! + u[q + 1 - sx]!);
@@ -292,18 +334,42 @@ export class RegionalModel {
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const q = this.idx(i, j, k);
         if (k < nz) {
-          this.fu[q] = this.fu[q]! - rc * (u[q]! - this.ub[k]!);
-          this.fv[q] = this.fv[q]! - rc * (v[q]! - this.vb[k]!);
-          this.fth[q] = this.fth[q]! - rc * (this.th[q]! - this.th0[k]!);
+          // nested runs damp toward the (3-D) boundary targets, otherwise toward the base state
+          const bd = this.boundary;
+          this.fu[q] = this.fu[q]! - rc * (u[q]! - (bd ? bd.u[q]! : this.ub[k]!));
+          this.fv[q] = this.fv[q]! - rc * (v[q]! - (bd ? bd.v[q]! : this.vb[k]!));
+          this.fth[q] = this.fth[q]! - rc * (this.th[q]! - (bd ? bd.th[q]! : this.th0[k]!));
         }
         this.fw[q] = this.fw[q]! - rw * this.w[q]!;
       }
     }
     if (this.physicsTend) this.physicsTend(this, { fu: this.fu, fv: this.fv, fw: this.fw, fth: this.fth, fsc: this.fsc });
+    if (this.c.lateral === 'open' && this.boundary) this.relaxBoundaries();
     // constant eddy diffusion (tests)
     if (this.c.kdiff2 > 0) {
       this.diffuse(this.u, this.fu, nz); this.diffuse(this.v, this.fv, nz); this.diffuse(this.th, this.fth, nz, this.th0);
       this.diffuseW();
+    }
+  }
+
+  /** Davies-type relaxation toward boundary targets in the outer relaxCells cells (u, v, theta, qv; w -> 0). */
+  private relaxBoundaries(): void {
+    const { nx, ny, nz } = this.c, nr = this.c.relaxCells ?? 5, tau = this.c.relaxTau ?? 300;
+    const b = this.boundary!;
+    const qv = this.scalars[0];
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const d = Math.min(i, j, nx - 1 - i, ny - 1 - j);
+      if (d >= nr) continue;
+      const r = (1 - d / nr) ** 2 / tau;
+      for (let k = 0; k < nz; k++) {
+        const q = this.idx(i, j, k);
+        this.fu[q] = this.fu[q]! - r * (this.u[q]! - b.u[q]!);
+        this.fv[q] = this.fv[q]! - r * (this.v[q]! - b.v[q]!);
+        this.fth[q] = this.fth[q]! - r * (this.th[q]! - b.th[q]!);
+        if (qv && b.qv && this.fsc[0]) this.fsc[0][q] = this.fsc[0][q]! - r * (qv[q]! - b.qv[q]!);
+        if (b.pp) this.fpp[q] = this.fpp[q]! - r * (this.pp[q]! - b.pp[q]!);
+        this.fw[q] = this.fw[q]! - r * this.w[q]!;
+      }
     }
   }
 
@@ -342,6 +408,8 @@ export class RegionalModel {
     const a = new Float64Array(nz + 1), b = new Float64Array(nz + 1), c = new Float64Array(nz + 1), r = new Float64Array(nz + 1);
     const cfac = new Float64Array(nz);   // cs^2 / (cp rho0 thv0^2)
     const E = new Float64Array(nz), wn = new Float64Array(nz + 1);
+    this.computeThetaRho();
+    const thr = this.thr;
     for (let k = 0; k < nz; k++) {
       const thv = this.th0[k]! * (1 + 0.61 * this.qv0[k]!);
       const cs2 = cp / cv * rd * this.pi0[k]! * thv;
@@ -351,14 +419,13 @@ export class RegionalModel {
       this.fillHalo(pp, nz); this.fillHalo(this.ppOld, nz);
       // horizontal momentum with divergence-damped pressure (pi* = pi' + divDamp (pi' - pi'_old))
       for (let k = 0; k < nz; k++) {
-        const thv = this.th0[k]! * (1 + 0.61 * this.qv0[k]!);
         for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
           const q = this.idx(i, j, k);
           const ps = pp[q]! + divDamp * (pp[q]! - this.ppOld[q]!);
           const pw = pp[q - 1]! + divDamp * (pp[q - 1]! - this.ppOld[q - 1]!);
           const pn = pp[q - sx]! + divDamp * (pp[q - sx]! - this.ppOld[q - sx]!);
-          u[q] = u[q]! + dts * (this.fu[q]! - cp * thv * (ps - pw) / dx);
-          v[q] = v[q]! + dts * (this.fv[q]! - cp * thv * (ps - pn) / dy);
+          u[q] = u[q]! + dts * (this.fu[q]! - cp * 0.5 * (thr[q]! + thr[q - 1]!) * (ps - pw) / dx);
+          v[q] = v[q]! + dts * (this.fv[q]! - cp * 0.5 * (thr[q]! + thr[q - sx]!) * (ps - pn) / dy);
         }
       }
       this.fillHalo(u, nz); this.fillHalo(v, nz);
@@ -381,7 +448,7 @@ export class RegionalModel {
         // coefficients for w_k (k=1..nz-1): pi_new_k = E_k - dts cfac_k bp (rt_{k+1} w_{k+1} - rt_k w_k)/(rtc_k dz)
         for (let k = 1; k < nz; k++) {
           const q = this.idx(i, j, k);
-          const cth = cp * this.th0f[k]! / dz;
+          const cth = cp * 0.5 * (thr[q]! + thr[q - pl]!) / dz;
           const rtk = this.rho0f[k]! * this.th0f[k]!;
           const g_k = dts * cfac[k]! * bp / dz;        // pi_new_k = E_k - g_k (rt_{k+1} w_{k+1} - rt_k w_k)
           const g_km = dts * cfac[k - 1]! * bp / dz;

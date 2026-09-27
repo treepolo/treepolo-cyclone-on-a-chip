@@ -18,15 +18,7 @@ export class KesslerMicrophysics {
 
   constructor(private readonly m: RegionalModel) {
     this.rainAcc = new Float64Array(m.c.nx * m.c.ny);
-    // moist buoyancy: B = g [theta'/theta0 + 0.61 (qv - qv0) - qc - qr]
-    m.buoyancy = (mm, out): void => {
-      const { nx, ny, nz } = mm.c, g = 9.80665;
-      const qv = mm.scalars[QV]!, qc = mm.scalars[QC]!, qr = mm.scalars[QR]!;
-      for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-        const q = mm.idx(i, j, k);
-        out[q] = out[q]! + g * (0.61 * (qv[q]! - mm.qv0[k]!) - qc[q]! - qr[q]!);
-      }
-    };
+    // moist buoyancy is computed exactly in the core from theta_rho = theta (1 + 0.61 qv - qc - qr)
   }
 
   /** Apply microphysics over dt (call after each dynamics step). */
