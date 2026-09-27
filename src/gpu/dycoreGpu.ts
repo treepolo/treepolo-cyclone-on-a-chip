@@ -33,6 +33,14 @@ export class GpuDycore {
   private readonly params: GPUBuffer;
   private readonly ops: ((pass: GPUComputePassEncoder) => void)[][] = [];   // per rotation
   private readonly siFirst: GPUBuffer; private readonly siNormal: GPUBuffer;
+  /** optional work inserted between the semi-implicit solve and the time filter, per rotation */
+  private hooks: ((pass: GPUComputePassEncoder) => void)[][] = [[], [], []];
+  /** called before each step is encoded (e.g. to update physics uniforms) */
+  beforeStep: ((time: number) => void) | null = null;
+  pipePsi!: GPUComputePipeline;
+  specInfo!: GPUBuffer;
+  readonly paramsBuffer: GPUBuffer;
+  readonly gridBuffer: GPUBuffer;
 
   constructor(device: GPUDevice, cpu: Dycore, opts: GpuDycoreOptions) {
     this.device = device;
@@ -45,6 +53,7 @@ export class GpuDycore {
     this.spec = [0, 1, 2].map(() => tr.specBuffer(this.nState));
     const nSyn = 5 * K + 3, nAn = 6 * K + 1;
     this.four = tr.fourierBuffer(nSyn); this.grid = tr.gridBuffer(nSyn);
+    this.gridBuffer = this.grid;
     this.fourT = tr.fourierBuffer(nAn); this.gridT = tr.gridBuffer(nAn);
     this.tend = tr.specBuffer(4 * K + 1);
     this.sdot = tr.gridBuffer(K);
@@ -78,6 +87,7 @@ export class GpuDycore {
     const phis = tr.upload(phisData);
     // params: [leap, h, radius, R*Tref, nu, alpha, filterOn, omega, rd, cp, kappa, hs, pRef, 0,0,0]
     this.params = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.paramsBuffer = this.params;
 
     const consts = `
 const K: u32 = ${K}u;
@@ -92,7 +102,8 @@ struct Params { leap: f32, h: f32, radius: f32, RT: f32, nu: f32, alpha: f32, fi
                 rd: f32, cp: f32, kappa: f32, hs: f32, pRef: f32, p1: f32, p2: f32, p3: f32 };
 `;
     const pipe = (code: string): GPUComputePipeline => device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: consts + code }), entryPoint: 'main' } });
-    const pPsi = pipe(PSI_WGSL), pGrid = pipe(gridWgsl(opts.heldSuarez)), pSI = pipe(SI_WGSL);
+    const pPsi = pipe(PSI_WGSL), pGrid = pipe(gridWgsl(opts.heldSuarez)), pSI = pipe(SI_WGSL), pFilter = pipe(FILTER_WGSL);
+    this.pipePsi = pPsi; this.specInfo = specInfo;
 
     // ---- recipes
     const ia = 1 / a;
@@ -143,7 +154,11 @@ struct Params { leap: f32, h: f32, radius: f32, RT: f32, nu: f32, alpha: f32, fi
       const siBGn = mkSI(this.siNormal), siBGf = mkSI(this.siFirst);
       const siOp = (first: boolean) => (pass: GPUComputePassEncoder): void => { pass.setPipeline(pSI); pass.setBindGroup(0, first ? siBGf : siBGn); pass.dispatchWorkgroups(Math.ceil(nspec / WG)); };
       const psiOp = (pass: GPUComputePassEncoder): void => { pass.setPipeline(pPsi); pass.setBindGroup(0, psiBG); pass.dispatchWorkgroups(Math.ceil(nspec / WG)); };
-      this.ops.push([psiOp, synthOp, invOp, gridOp, fwdScaled, fwdPlain, analOp, siOp(false), siOp(true)]);
+      const fBG = device.createBindGroup({ layout: pFilter.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: old } }, { binding: 1, resource: { buffer: cur } }, { binding: 2, resource: { buffer: nxt } }, { binding: 3, resource: { buffer: this.params } },
+      ] });
+      const filterOp = (pass: GPUComputePassEncoder): void => { pass.setPipeline(pFilter); pass.setBindGroup(0, fBG); pass.dispatchWorkgroups(Math.ceil((3 * K + 1) * nspec / WG)); };
+      this.ops.push([psiOp, synthOp, invOp, gridOp, fwdScaled, fwdPlain, analOp, siOp(false), siOp(true), filterOp]);
     }
     void HS94;
   }
@@ -155,6 +170,14 @@ struct Params { leap: f32, h: f32, radius: f32, RT: f32, nu: f32, alpha: f32, fi
     const p = new Float32Array([leap, leap / 2, c.planet.radius, c.air.rd * lev.tRef, robert, williams, first ? 0 : 1, c.planet.omega,
       c.air.rd, c.air.cp, c.air.kappa, 1, c.air.pRef, 0, 0, 0]);
     this.device.queue.writeBuffer(this.params, 0, p);
+  }
+
+  /** State buffers as (old, cur, nxt) for rotation r. */
+  stateBuffers(r: number): [GPUBuffer, GPUBuffer, GPUBuffer] { return [this.spec[r]!, this.spec[(r + 1) % 3]!, this.spec[(r + 2) % 3]!]; }
+
+  /** Register GPU work to run after the semi-implicit solve and before the time filter (per rotation). */
+  setHooks(build: (r: number, old: GPUBuffer, cur: GPUBuffer, nxt: GPUBuffer) => ((pass: GPUComputePassEncoder) => void)[]): void {
+    this.hooks = [0, 1, 2].map((r) => build(r, ...this.stateBuffers(r)));
   }
 
   /** Copy the CPU model's spectral state (old and current levels) to the GPU. */
@@ -182,8 +205,11 @@ struct Params { leap: f32, h: f32, radius: f32, RT: f32, nu: f32, alpha: f32, fi
       const ops = this.ops[this.rot]!;
       const enc = this.device.createCommandEncoder();
       const pass = enc.beginComputePass();
+      if (this.beforeStep) this.beforeStep(this.time);
       for (let o = 0; o < 7; o++) ops[o]!(pass);
       (first ? ops[8]! : ops[7]!)(pass);
+      for (const h of this.hooks[this.rot]!) h(pass);
+      ops[9]!(pass);
       pass.end();
       this.device.queue.submit([enc.finish()]);
       this.rot = (this.rot + 1) % 3;
@@ -307,7 +333,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // semi-implicit solve per spectral coefficient; hyperdiffusion; Robert–Asselin–Williams filter
 const SI_WGSL = /* wgsl */`
 @group(0) @binding(0) var<storage, read> old: array<vec2<f32>>;
-@group(0) @binding(1) var<storage, read_write> cur: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read> cur: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> nxt: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read> td: array<vec2<f32>>;
 @group(0) @binding(4) var<storage, read> mats: array<f32>;
@@ -353,27 +379,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var nuD = vec2<f32>(0.0);
   for (var k = 0u; k < K; k++) { nuD += mats[2u * K * K + k] * Db[k]; }
   let damp = 1.0 / (1.0 + leap * kd);
-  let doF = P.filterOn > 0.5;
-  let fnu = 0.5 * P.nu;
-  // ln ps
-  var pn = 2.0 * (Pst - h * nuD) - old[idx(3u * K, s)];
-  if (doF) { let d = fnu * (old[idx(3u * K, s)] - 2.0 * cur[idx(3u * K, s)] + pn); cur[idx(3u * K, s)] += P.alpha * d; pn -= (1.0 - P.alpha) * d; }
-  nxt[idx(3u * K, s)] = pn;
+  nxt[idx(3u * K, s)] = 2.0 * (Pst - h * nuD) - old[idx(3u * K, s)];
   for (var k = 0u; k < K; k++) {
     var tD = vec2<f32>(0.0);
     for (var j = 0u; j <= k; j++) { tD += mats[K * K + k * K + j] * Db[j]; }
     var tn = 2.0 * (Tst[k] - h * tD) - old[idx(2u * K + k, s)];
     if (n > 0u) { tn *= damp; }
-    var dn = (2.0 * Db[k] - old[idx(K + k, s)]) * damp;
-    var vn = (old[idx(k, s)] + leap * td[idx(k, s)]) * damp;
-    if (doF) {
-      var d = fnu * (old[idx(k, s)] - 2.0 * cur[idx(k, s)] + vn); cur[idx(k, s)] += P.alpha * d; vn -= (1.0 - P.alpha) * d;
-      d = fnu * (old[idx(K + k, s)] - 2.0 * cur[idx(K + k, s)] + dn); cur[idx(K + k, s)] += P.alpha * d; dn -= (1.0 - P.alpha) * d;
-      d = fnu * (old[idx(2u * K + k, s)] - 2.0 * cur[idx(2u * K + k, s)] + tn); cur[idx(2u * K + k, s)] += P.alpha * d; tn -= (1.0 - P.alpha) * d;
-    }
-    nxt[idx(k, s)] = vn;
-    nxt[idx(K + k, s)] = dn;
+    nxt[idx(k, s)] = (old[idx(k, s)] + leap * td[idx(k, s)]) * damp;
+    nxt[idx(K + k, s)] = (2.0 * Db[k] - old[idx(K + k, s)]) * damp;
     nxt[idx(2u * K + k, s)] = tn;
   }
+}
+`;
+
+// Robert–Asselin–Williams filter on all prognostic spectral fields
+const FILTER_WGSL = /* wgsl */`
+@group(0) @binding(0) var<storage, read> old: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read_write> cur: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> nxt: array<vec2<f32>>;
+@group(0) @binding(3) var<uniform> P: Params;
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= (3u * K + 1u) * NSPEC || P.filterOn < 0.5) { return; }
+  let d = 0.5 * P.nu * (old[i] - 2.0 * cur[i] + nxt[i]);
+  cur[i] += P.alpha * d;
+  nxt[i] -= (1.0 - P.alpha) * d;
 }
 `;
