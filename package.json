@@ -7,7 +7,10 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node dist/tests/spectral.js && node dist/tests/dycore.js && node dist/tests/moist.js",
     "climate": "npm run build && node dist/tools/runHeldSuarez.js",
-    "serve": "npm run build && node tools/serve.mjs"
+    "serve": "npm run build && node tools/serve.mjs",
+    "test:gpu": "npm run build && node tools/gpuTest.mjs",
+    "earth": "npm run build && node dist/tools/runEarth.js",
+    "aquaplanet": "npm run build && node dist/tools/runAquaplanet.js"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

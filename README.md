@@ -13,13 +13,17 @@ v0.1 是一次**完整重新設計**（原因與路線圖見 [`docs/ARCHITECTURE
 - ✅ Held–Suarez 乾大氣氣候（T42，300 日平均）：由靜止大氣自行發展出三胞環流（Hadley／Ferrel／極地胞）、33 m/s @ 43° 的渦動驅動噴流、信風與中緯西風，與 HS94 參考氣候一致（[`docs/RESULTS_R1_DRY.md`](docs/RESULTS_R1_DRY.md)）。
 - ✅ Jablonowski–Williamson 斜壓波：1 m/s 小擾動在第 9 日自行發展成 949 hPa 的溫帶氣旋與冷暖鋒。
 - ✅ 瀏覽器 3D 地球：模式在 Web Worker 中即時積分，顯示溫度／風／渦度／氣壓、風場示蹤粒子與緯向平均剖面。
-- ⏭ 下一步：水汽與降水、灰體輻射、地表通量（濕水球）→ 海陸與季節（季風）→ GPU → 區域非靜力巢狀模式（颱風內核、超大胞、龍捲）。
+- ✅ 濕大氣水球（R2）：形狀保持半拉格朗日水汽輸送、灰體輻射、邊界層、Simplified Betts–Miller 對流、大尺度凝結；水收支逐欄閉合。
+- 🔄 地球設定（R3）：真實海陸與地形、季節日照、隨水汽變化的灰體輻射、陸地 bucket 水文、海冰反照率；季風氣候驗收中。
+- ✅ WebGPU 後端（R4）：整個模式（動力、水汽輸送、柱物理）可在 GPU 上執行，並對 CPU Float64 參考解驗證；瀏覽器自動使用 WebGPU。
+- ⏭ 之後：季風與季節驗收 → 高解析（T85+）熱帶氣旋自然生成 → 區域非靜力巢狀模式（颱風眼牆、超大胞、龍捲）。
 
 ## 執行 / Run
 
 ```bash
 npm install
-npm test          # 轉換與動力核心驗收 / transform + dycore regressions
+npm test          # CPU 驗收（轉換、動力核心、水汽物理）/ CPU regressions
+npm run test:gpu  # WebGPU 驗收（headless Chromium + SwiftShader）/ GPU regressions
 npm run serve     # http://127.0.0.1:5173/
 ```
 
@@ -28,6 +32,8 @@ npm run serve     # http://127.0.0.1:5173/
 ```bash
 npm run climate -- T42L20 200 300     # preset, spin-up days, averaging days
 node dist/tools/runJablonowski.js 42 26 900 10
+npm run aquaplanet -- AQUA_T42 200 200     # 濕水球 / moist aquaplanet
+npm run earth -- EARTH_T21 2 1             # 地球：季節、季風 / Earth: seasons, monsoons (years)
 ```
 
 輸出包含 `summary.txt`、`climate.json` 與緯向平均 [u]、[T]、ψ、渦動通量的 SVG 圖。
@@ -42,7 +48,11 @@ node dist/tools/runJablonowski.js 42 26 900 10
 | `src/model/heldSuarez.ts` | Held–Suarez (1994) 強迫 |
 | `src/model/jablonowski.ts` | Jablonowski–Williamson (2006) 斜壓波初始場 |
 | `src/model/diagnostics.ts` | 緯向平均、經圈流函數、渦動通量 |
-| `src/app/` | 瀏覽器介面：WebGL2 地球、Web Worker 模式、剖面圖 |
+| `src/model/semiLagrangian.ts` | 形狀保持半拉格朗日水汽輸送 |
+| `src/model/moist/` | 濕熱力學、灰體輻射柱物理、Simplified Betts–Miller 對流 |
+| `src/gpu/` | WebGPU 版本：轉換、動力核心、水汽與柱物理；`src/gpu/tests/` GPU 驗收 |
+| `data/earth_t42.json` | ERA 地表高度與海陸遮罩（T42） |
+| `src/app/` | 瀏覽器介面：WebGL2 地球、Web Worker 模式（WebGPU/CPU）、剖面圖 |
 | `src/tools/` | Node 長期積分與 SVG 繪圖 |
 | `src/tests/` | 驗收測試 |
 | `docs/` | 架構與路線圖、物理規格、驗收計畫、UI 規格 |

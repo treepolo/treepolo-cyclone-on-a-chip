@@ -56,22 +56,21 @@ The hydrostatic approximation is a scale-justified approximation of the real equ
 - 驗收：緯向平均 [u]、[T]、經圈流函數 ψ、渦動通量與 HS94 / 文獻 dry-core 比較（噴流強度與位置、熱帶地面東風、中緯地面西風、Hadley 與 Ferrel 胞）。
 - Jablonowski–Williamson 斜壓波（確定性溫帶氣旋、鋒面發展）。
 
-### R2 濕大氣水球 / Moist aquaplanet
-- 水汽 q_v 輸送：格點上的 **有限體積／半拉格朗日、正定、守恆** 輸送（不使用會產生負值的譜輸送）。
-- 大尺度凝結、潛熱、降水；簡化對流調整（Betts–Miller 類）→ 之後可換更完整方案。
-- 灰體輻射（Frierson et al. 2006 類）取代 Newtonian relaxation。
-- 地表：bulk 公式的感熱、潛熱、動量通量；slab ocean。
-- 驗收：地球般的三胞環流（含極地胞）、ITCZ、副熱帶乾區、溫帶風暴路徑、水量守恆。
+### R2 濕大氣水球 / Moist aquaplanet — **已實作，氣候驗收中 / implemented, climate validation running**
+- 水汽 q：格點上的 **形狀保持半拉格朗日** 輸送（三維軌跡、跨極點、三次內插 + Bermejo–Staniforth 限制器，q ≥ 0、不產生新極值），全球水量修正（NCAR CCM3 / ECMWF IFS 做法）。完全局地守恆的有限體積輸送留待之後比較。
+- 物理（Frierson et al. 2006, 2007；參數取自 Isca `frierson` 測試案例）：兩流灰體輻射、簡化 Monin–Obukhov 地表通量、隱式 K-profile 邊界層（Ri_b = 1 診斷邊界層高度）、2.5 m slab ocean、50 hPa 以上能量守恆 sponge、Simplified Betts–Miller 對流、大尺度凝結與降水再蒸發。
+- 物理在每個動力步之後 **依序分裂（process splitting）** 作用：剛性的邊界層／對流過程若在 leapfrog 中心時間計算，會激發不穩定的計算模態。
+- 已驗證：SL 均勻場保持、跨極點餘弦鐘、SBM 焓與水量守恆、逐欄水收支閉合（< 1e-9 kg/m²）；T21 全球 P = E = 4.25 mm/day。
 
-### R3 真實地表與季節 / Land, seasons, topography
-- 海陸分布、陸面熱容量與土壤水、反照率、地形（σ 座標 + 地表位勢）。
-- 日照的季節與日變化、地軸傾角。
-- 驗收：季風反轉、季節性 ITCZ 移動、陸海溫差、地形效應。
+### R3 真實地表與季節 / Land, seasons, topography — **進行中 / in progress**
+- ERA 地表高度與海陸遮罩（T42 Gaussian，來源 Isca input data），頻譜平滑地形、靜力平衡初始 p_s。
+- 季節日照（黃赤交角 23.44°，日平均），Byrne & O'Gorman (2013) 隨水汽變化的灰體長波光學厚度，海冰反照率、Merlis et al. (2013) 形式的海洋熱傳輸 q-flux，陸地 bucket 水文。
+- 第一次三年積分出現水汽失控增溫（反照率 0.31 太低）；已改用 Isca 季節性 Byrne 設定的 0.38 反照率與陸地參數，重新積分中。
 
-### R4 GPU 加速 / GPU acceleration
-- 勒讓德轉換本質上是矩陣乘法，FFT 與格點物理逐欄獨立，皆適合 WebGPU。
-- CPU Float64 版本保留為參考解，GPU 版本以一致性測試驗收。
-- 目標：T85–T170 互動速度，讓熱帶氣旋能在全球模式中自然生成。
+### R4 GPU 加速 / GPU acceleration — **已實作並對 CPU 驗證 / implemented and validated against the CPU core**
+- WebGPU/WGSL（f32）：批次勒讓德轉換、workgroup Stockham FFT（雙精度 twiddle 表）、格點動力、半隱式求解、RAW 濾波、半拉格朗日水汽、完整灰體柱物理（含 SBM）、全球水量與質量修正。
+- `npm run test:gpu`：以 headless Chromium + SwiftShader 軟體 WebGPU 執行。Held–Suarez T21 100 步後 GPU/CPU 相對 L2 1.4e-5；濕水球 72 步後 T 6.6e-5、q 2.1e-3；GPU 單獨 20 天 P = E = 4.40 mm/day。
+- 瀏覽器 worker 自動使用 WebGPU（不可用時退回 CPU），新增 T85 設定。實際 GPU 速度需在使用者裝置上量測。
 
 ### R5 區域非靜力巢狀模式 / Regional non-hydrostatic nest
 - 全可壓縮非靜力方程、笛卡兒 C 網格、分裂顯式聲波 + 垂直隱式（CM1/WRF 類）。
