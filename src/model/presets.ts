@@ -73,7 +73,7 @@ export const AQUA_PRESETS: Record<string, AquaplanetConfig> = {
 export function createAquaplanet(cfg: AquaplanetConfig): { model: Dycore; physics: GrayAquaplanet } {
   const model = new Dycore({
     trunc: cfg.trunc, sigmaHalf: FRIERSON_SIGMA_HALF, dt: cfg.dt, planet: EARTH, air: DRY_AIR,
-    tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : 0.1 * DAY, robert: 0.03, moist: true,
+    tRef: 300, hyperdiffTau: cfg.trunc <= 21 ? 0.25 * DAY : 0.1 * DAY, robert: 0.03, moist: true, massFixer: true,
   });
   const tr = model.tr, ng = tr.gridSize, K = model.K;
   const physics = new GrayAquaplanet(EARTH, DRY_AIR, tr.nlat, tr.nlon, K, tr.lat);

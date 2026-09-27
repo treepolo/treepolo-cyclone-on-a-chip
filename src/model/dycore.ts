@@ -68,6 +68,8 @@ export interface DycoreOptions {
   /** Prognostic water vapour (semi-Lagrangian, grid point) */
   moist?: boolean;
   columnPhysics?: ColumnPhysics;
+  /** Restore the initial global-mean surface pressure after every step (global dry-mass fixer). */
+  massFixer?: boolean;
 }
 
 export interface SpectralState {
@@ -95,6 +97,8 @@ export class Dycore {
   /** sigma-dot at full levels from the last dynamics evaluation (s^-1). */
   private readonly sdotFull: Float64Array;
   private readonly post: MoistGridState;
+  private readonly massFixer: boolean;
+  private psTarget = 0;
   /** accumulated water-fixer correction (kg m^-2, global mean) */
   waterFixer = 0;
   time = 0;
@@ -169,6 +173,7 @@ export class Dycore {
     for (let j = 0; j < tr.nlat; j++) this.fcor[j] = 2 * o.planet.omega * tr.mu[j]!;
     this.scratch = tr.newSpec();
     this.moist = !!o.moist;
+    this.massFixer = !!o.massFixer;
     this.columnPhysics = o.columnPhysics;
     this.q = new Float64Array(this.moist ? nK : 0);
     this.qNext = new Float64Array(this.moist ? nK : 0);
@@ -207,6 +212,7 @@ export class Dycore {
       }
     }
     copyState(this.cur, this.old);
+    this.psTarget = this.meanSurfacePressure();
     this.steps = 0;
     this.time = 0;
   }
@@ -233,6 +239,7 @@ export class Dycore {
     if (this.moist) this.advectMoisture();
     if (this.columnPhysics) this.applyColumnPhysics();
     if (!first) this.timeFilter();
+    if (this.massFixer) this.fixMass(this.nxt);
     if (this.moist) { const t = this.q; this.q = this.qNext; this.qNext = t; this.post.q = this.qNext; }
     // rotate buffers: old <- cur, cur <- nxt
     const o = this.old;
@@ -485,6 +492,21 @@ export class Dycore {
     }
   }
 
+  /** Global dry-mass fixer: shift ln(ps) uniformly so that the global-mean ps equals the initial value. */
+  private fixMass(st: SpectralState): void {
+    const tr = this.tr, g = this.post.ps;
+    tr.synth(st.lnps, g);
+    let s = 0;
+    for (let j = 0; j < tr.nlat; j++) {
+      let r = 0;
+      for (let i = 0; i < tr.nlon; i++) r += Math.exp(g[j * tr.nlon + i]!);
+      s += tr.weight[j]! * r / tr.nlon;
+    }
+    const mean = s / 2;
+    // the (0,0) coefficient multiplies P_0^0 = 1/sqrt(2)
+    st.lnps.re[0] = st.lnps.re[0]! + Math.log(this.psTarget / mean) * Math.SQRT2;
+  }
+
   /** Robert–Asselin–Williams filter on the current level. */
   private timeFilter(): void {
     const nu = this.robert, al = this.williams;
@@ -582,6 +604,10 @@ export class Dycore {
     this.time = s.time;
     this.steps = s.steps;
   }
+
+  /** Global-mean surface pressure the mass fixer restores (Pa). */
+  get massTarget(): number { return this.psTarget; }
+  set massTarget(v: number) { this.psTarget = v; }
 }
 
 function copyState(a: SpectralState, b: SpectralState): void {

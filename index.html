@@ -37,6 +37,10 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <option value="T42L20" selected>T42 L20（標準 / standard）</option>
 <option value="T63L20">T63 L20（精細 / fine）</option>
 </optgroup>
+<optgroup label="濕大氣水球（灰體輻射）/ Moist aquaplanet (gray radiation)">
+<option value="AQUA_T21">T21 L25：降水、ITCZ、風暴路徑 / rain, ITCZ, storm tracks</option>
+<option value="AQUA_T42">T42 L25（較慢 / slower）</option>
+</optgroup>
 <optgroup label="斜壓波 / Baroclinic wave (Jablonowski–Williamson)">
 <option value="JW_T42">T42 L26：溫帶氣旋與鋒面自行生成 / extratropical cyclone and fronts develop</option>
 </optgroup>
@@ -55,6 +59,10 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <option value="vor">相對渦度 / Relative vorticity</option>
 <option value="div">輻散 / Divergence</option>
 <option value="ps">地面氣壓 / Surface pressure</option>
+<option value="precip">降水率（濕模式）/ Precipitation rate (moist)</option>
+<option value="q">比濕（濕模式）/ Specific humidity (moist)</option>
+<option value="sst">海面溫度（濕模式）/ Sea-surface temperature (moist)</option>
+<option value="olr">外逸長波輻射（濕模式）/ Outgoing longwave radiation (moist)</option>
 </select>
 <label for="level">垂直層 / Model level <span id="levelLabel" class="muted"></span></label>
 <input id="level" type="range" min="0" max="19" value="19" />

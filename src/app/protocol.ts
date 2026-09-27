@@ -1,6 +1,6 @@
 // Messages between the UI thread and the simulation worker.
 
-export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div';
+export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip' | 'sst' | 'q' | 'olr';
 
 export type ToWorker =
   | { type: 'init'; preset: string }
@@ -43,5 +43,5 @@ export interface ZonalMessage {
 export type FromWorker =
   | FrameMessage
   | ZonalMessage
-  | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number }
+  | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number; moist: boolean }
   | { type: 'error'; message: string };

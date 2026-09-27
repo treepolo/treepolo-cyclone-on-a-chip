@@ -2,12 +2,16 @@
 
 import { DAY, EARTH } from '../core/constants.js';
 import { Dycore } from '../model/dycore.js';
-import { HS_PRESETS, createHeldSuarez } from '../model/presets.js';
+import { HS_PRESETS, AQUA_PRESETS, createHeldSuarez, createAquaplanet } from '../model/presets.js';
+import type { GrayAquaplanet } from '../model/moist/aquaplanet.js';
 import { ZonalMeanAccumulator } from '../model/diagnostics.js';
 import { createJablonowski } from '../model/jablonowski.js';
 import type { FieldId, FromWorker, ToWorker } from './protocol.js';
 
 let model: Dycore | null = null;
+let physics: GrayAquaplanet | null = null;
+/** precipitation rate smoothed over ~6 model hours (kg m^-2 s^-1) */
+let precipSmooth = new Float64Array(0);
 let acc: ZonalMeanAccumulator | null = null;
 let accFrom = 0;
 let running = false;
@@ -24,7 +28,14 @@ self.onmessage = (ev: MessageEvent<ToWorker>): void => {
   try {
     if (m.type === 'init') {
       let cfg: { trunc: number; dt: number };
-      if (m.preset === 'JW_T42') {
+      physics = null;
+      if (AQUA_PRESETS[m.preset]) {
+        cfg = AQUA_PRESETS[m.preset]!;
+        const built = createAquaplanet(AQUA_PRESETS[m.preset]!);
+        model = built.model;
+        physics = built.physics;
+        precipSmooth = new Float64Array(model.ng);
+      } else if (m.preset === 'JW_T42') {
         cfg = { trunc: 42, dt: 900 };
         model = createJablonowski({ trunc: 42, levels: 26, dt: 900, perturb: true });
       } else {
@@ -37,7 +48,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>): void => {
       accFrom = 0;
       ps0 = model.meanSurfacePressure();
       if (level < 0 || level >= model.K) level = model.K - 1;
-      post({ type: 'ready', preset: m.preset, trunc: cfg.trunc, nlat: model.tr.nlat, nlon: model.tr.nlon, K: model.K, dt: cfg.dt });
+      post({ type: 'ready', preset: m.preset, trunc: cfg.trunc, nlat: model.tr.nlat, nlon: model.tr.nlon, K: model.K, dt: cfg.dt, moist: physics !== null });
       sendFrame();
     } else if (m.type === 'run') {
       running = m.running;
@@ -62,6 +73,10 @@ function loop(): void {
     for (let i = 0; i < stepsPerTick; i++) {
       model.step();
       rateSteps++;
+      if (physics) {
+        const a = Math.min(1, model.dt / (6 * 3600)), pr = physics.f.precipRate;
+        for (let q = 0; q < pr.length; q++) precipSmooth[q] = precipSmooth[q]! * (1 - a) + pr[q]! * a;
+      }
       if (model.steps % sampleEvery === 0) acc!.add(model.refreshGrid());
     }
     if (!model.isFinite()) {
@@ -90,7 +105,14 @@ function sendFrame(): void {
   let maxWind = 0;
   for (let q = 0; q < g.u.length; q++) maxWind = Math.max(maxWind, Math.hypot(g.u[q]!, g.v[q]!));
   for (let q = 0; q < ng; q++) { u[q] = g.u[o + q]!; v[q] = g.v[o + q]!; }
-  if (field === 'vor' || field === 'div') {
+  if ((field === 'precip' || field === 'sst' || field === 'olr' || field === 'q') && !physics) field = 'T';
+  if (field === 'precip' || field === 'sst' || field === 'olr') {
+    const src = field === 'precip' ? precipSmooth : field === 'sst' ? physics!.f.sst : physics!.f.olrNow;
+    const f = field === 'precip' ? 86400 : 1;
+    for (let q = 0; q < ng; q++) scalar[q] = src[q]! * f;
+  } else if (field === 'q') {
+    for (let q = 0; q < ng; q++) scalar[q] = model.q[o + q]! * 1000;
+  } else if (field === 'vor' || field === 'div') {
     const tmp = new Float64Array(ng);
     if (field === 'vor') model.vorticityGrid(k, tmp); else model.divergenceGrid(k, tmp);
     for (let q = 0; q < ng; q++) scalar[q] = tmp[q]!;

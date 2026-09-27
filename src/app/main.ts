@@ -28,6 +28,10 @@ const FIELD_STYLE: Record<FieldId, { div: boolean; range?: [number, number]; sym
   vor: { div: true, sym: 1e-4, unit: 's⁻¹' },
   div: { div: true, sym: 1e-5, unit: 's⁻¹' },
   ps: { div: false, range: [970, 1030], unit: 'hPa' },
+  precip: { div: false, range: [0, 40], unit: 'mm/day' },
+  sst: { div: false, unit: 'K' },
+  q: { div: false, unit: 'g/kg' },
+  olr: { div: false, range: [100, 320], unit: 'W/m²' },
 };
 
 function colourise(f: FrameMessage): void {
@@ -41,9 +45,29 @@ function colourise(f: FrameMessage): void {
     $('legend').textContent = `±${scale.toPrecision(2)} ${st.unit}`;
   } else {
     const [a, b] = st.range && f.field !== 'ps' ? st.range : [lo, hi];
-    globe.setField(f.lat, f.nlon, f.scalar, (v) => sequential((v - a) / ((b - a) || 1)));
+    if (f.field === 'precip') {
+      // rain: transparent-to-blue style ramp on a square-root scale
+      globe.setField(f.lat, f.nlon, f.scalar, rainColour);
+    } else globe.setField(f.lat, f.nlon, f.scalar, (v) => sequential((v - a) / ((b - a) || 1)));
     $('legend').textContent = `${a.toFixed(1)} … ${b.toFixed(1)} ${st.unit}`;
   }
+}
+
+/** Radar-style rain colours: dark ocean below 0.5 mm/day, then log-scaled blue -> green -> yellow -> red -> magenta. */
+const RAIN_STOPS: [number, [number, number, number]][] = [
+  [0.5, [0.16, 0.3, 0.55]], [2, [0.35, 0.6, 0.95]], [5, [0.2, 0.75, 0.45]], [10, [0.95, 0.9, 0.25]],
+  [20, [0.98, 0.55, 0.15]], [40, [0.85, 0.15, 0.15]], [80, [0.8, 0.2, 0.8]],
+];
+function rainColour(v: number): [number, number, number] {
+  if (v < RAIN_STOPS[0]![0]) return [0.06, 0.12, 0.24];
+  for (let i = 1; i < RAIN_STOPS.length; i++) {
+    const [x1, c1] = RAIN_STOPS[i]!, [x0, c0] = RAIN_STOPS[i - 1]!;
+    if (v <= x1) {
+      const t = Math.log(v / x0) / Math.log(x1 / x0);
+      return [c0[0] + t * (c1[0] - c0[0]), c0[1] + t * (c1[1] - c0[1]), c0[2] + t * (c1[2] - c0[2])];
+    }
+  }
+  return RAIN_STOPS[RAIN_STOPS.length - 1]![1];
 }
 
 // ---------------- tracers (massless Lagrangian particles advected by the model wind at the displayed level)
@@ -147,7 +171,11 @@ $('preset').onchange = (): void => init();
 function init(): void {
   running = false; syncRun();
   const p = $<HTMLSelectElement>('preset').value;
-  $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : '900';
+  $('dt').dataset.dt = p === 'T21L20' ? '2400' : p === 'T42L20' ? '1200' : p === 'AQUA_T21' ? '1200' : p === 'AQUA_T42' ? '720' : '900';
+  if (p.startsWith('AQUA')) {
+    $<HTMLSelectElement>('field').value = 'precip';
+    log('濕水球：對流、ITCZ、風暴路徑與降水需約 30–60 模式日發展 / Moist aquaplanet: convection, ITCZ, storm tracks and rain develop over ~30–60 model days');
+  }
   if (p === 'JW_T42') {
     $<HTMLSelectElement>('field').value = 'ps';
     log('斜壓波：第 6–10 日可見氣旋加深與鋒面 / Baroclinic wave: cyclones deepen and fronts form around days 6–10');
