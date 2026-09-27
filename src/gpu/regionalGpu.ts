@@ -14,6 +14,7 @@ const WG = 64;
 const GX = 32768;
 /** kernel passes per command buffer: about PASS_CELLS / grid size (at least 4) */
 const PASS_CELLS = 2e7;
+type Pass = ((pass: GPUComputePassEncoder) => void) & { label: string };
 const linearGid = (code: string): string => code.replace(/fn main\(@builtin\(global_invocation_id\) gid: vec3<u32>\) \{/g,
   `fn main(@builtin(global_invocation_id) gid3: vec3<u32>) { let gid = vec3<u32>(gid3.x + gid3.y * ${GX * WG}u, 0u, 0u);`);
 
@@ -59,13 +60,18 @@ export class GpuRegional {
   readonly nq: number;
   time = 0;
   steps = 0;
+  /** current time step (s); starts at the configured dt, changed by setDt (adaptive stepping) */
+  dt: number;
+  private readonly nsound: number;
   private readonly params: GPUBuffer[];
-  private readonly passes: ((p: GPUComputePassEncoder) => void)[];
+  private readonly consts: string;
+  private readonly passes: Pass[];
 
   constructor(device: GPUDevice, m: RegionalModel, opts: GpuRegionalOptions) {
     this.device = device;
     this.cpu = m;
     const { nx, ny, nz, dx, dy, dz, f, beta, divDamp, nsound, dt } = m.c;
+    this.dt = dt; this.nsound = nsound;
     const size = m.size;
     this.nq = opts.moist ? (opts.ice ? 6 : 3) : 0;
     if (this.nq > m.scalars.length) throw new Error(`GPU regional model needs ${this.nq} scalars, CPU model has ${m.scalars.length}`);
@@ -125,22 +131,22 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     // 2-D dispatch (at most 65535 workgroups per dimension), folded back to a linear invocation index
     const pipe = (code: string): GPUComputePipeline => device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: consts + linearGid(code) }), entryPoint: 'main' } });
     const bg = (p: GPUComputePipeline, bufs: GPUBuffer[]): GPUBindGroup => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: bufs.map((b, i) => ({ binding: i, resource: { buffer: b } })) });
-    const disp = (p: GPUComputePipeline, g: GPUBindGroup, n: number) => {
+    const disp = (p: GPUComputePipeline, g: GPUBindGroup, n: number, label: string): Pass => {
       const groups = Math.ceil(n / WG), gx = Math.min(groups, GX), gy = Math.ceil(groups / GX);
-      return (pass: GPUComputePassEncoder): void => { pass.setPipeline(p); pass.setBindGroup(0, g); pass.dispatchWorkgroups(gx, gy); };
+      return Object.assign((pass: GPUComputePassEncoder): void => { pass.setPipeline(p); pass.setBindGroup(0, g); pass.dispatchWorkgroups(gx, gy); }, { label });
     };
 
     const pHalo = pipe(HALO_WGSL), pMom = pipe(MOM_WGSL), pSca = pipe(scalarWgsl(false)), pScaPD = this.nq > 0 ? pipe(scalarWgsl(true)) : null, pPD = this.nq > 0 ? pipe(PDRATIO_WGSL) : null, pStage = pipe(STAGE_WGSL);
-    const pAh = pipe(ACOUSTIC_H_WGSL), pAv = pipe(ACOUSTIC_V_WGSL), pCopyPP = pipe(COPYPP_WGSL), pSave = pipe(SAVE_WGSL);
+    const pAh = pipe(ACOUSTIC_H_WGSL), pAv = pipe(ACOUSTIC_V_WGSL), pSave = pipe(SAVE_WGSL);
     const pKes = pipe(KESSLER_WGSL);
-    let relax: ((p: GPUComputePassEncoder) => void) | null = null;
+    let relax: Pass | null = null;
     if (bnd) {
       const bd = new Float32Array(5 * size);
       [bnd.u, bnd.v, bnd.th, bnd.qv, bnd.pp].forEach((a, f) => { if (a) for (let i = 0; i < size; i++) bd[f * size + i] = a[i]!; });
       this.B = device.createBuffer({ size: bd.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(this.B, 0, bd);
       const pRelax = pipe(RELAX_WGSL);
-      relax = disp(pRelax, bg(pRelax, [this.S, this.F, this.B, baseBuf]), nx * ny * nz);
+      relax = disp(pRelax, bg(pRelax, [this.S, this.F, this.B, baseBuf]), nx * ny * nz, 'relax');
     }
     const pTurbK = ph ? pipe(TURBK_WGSL) : null, pTurb = ph ? pipe(TURB_WGSL) : null, pSfc = sfc ? pipe(surfaceWgsl((ph?.z0 ?? 0) > 0)) : null;
     let sfcBuf: GPUBuffer | null = null;
@@ -151,6 +157,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     }
     // uniform params per stage: [dts, dtStage, dtBig]
     const stages: [number, number][] = [[dt / 3, Math.max(1, Math.round(nsound / 3))], [dt / 2, Math.max(1, Math.round(nsound / 2))], [dt, nsound]];
+    this.consts = consts;
     this.params = stages.map(([dts, ns]) => {
       const b = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(b, 0, new Float32Array([dts / ns, dts, dt, 0]));
@@ -161,43 +168,42 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
       device.queue.writeBuffer(b, 0, new Uint32Array([f0, nf, nk, 0]));
       return b;
     };
-    const haloN = (nf: number, nk: number): number => m.sx * m.sy * nk * nf;
-    const haloAll = disp(pHalo, bg(pHalo, [this.S, haloParams(0, NF, nz + 1)]), haloN(NF, nz + 1));
-    const haloUV = disp(pHalo, bg(pHalo, [this.S, haloParams(0, 2, nz)]), haloN(2, nz));
-    const haloPP = disp(pHalo, bg(pHalo, [this.S, haloParams(4, 1, nz)]), haloN(1, nz));
-    const haloThQ = disp(pHalo, bg(pHalo, [this.S, haloParams(3, 5, nz)]), haloN(5, nz));
-    const haloPPold = disp(pHalo, bg(pHalo, [this.aux, haloParams(0, 1, nz)]), haloN(1, nz));
-    const haloK = disp(pHalo, bg(pHalo, [this.aux, haloParams(1, 1, nz)]), haloN(1, nz));
+    const haloN = (nf: number, nk: number): number => (m.sx * m.sy - nx * ny) * nk * nf;
+    const haloAll = disp(pHalo, bg(pHalo, [this.S, haloParams(0, NF, nz + 1)]), haloN(NF, nz + 1), 'halo all');
+    const haloUV = disp(pHalo, bg(pHalo, [this.S, haloParams(0, 2, nz)]), haloN(2, nz), 'halo u v');
+    const haloPP = disp(pHalo, bg(pHalo, [this.S, haloParams(4, 1, nz)]), haloN(1, nz), 'halo pp');
+    const haloThQ = disp(pHalo, bg(pHalo, [this.S, haloParams(3, 5, nz)]), haloN(5, nz), 'halo th q');
+    const haloPPold = disp(pHalo, bg(pHalo, [this.aux, haloParams(0, 1, nz)]), haloN(1, nz), 'halo pp old');
+    const haloK = disp(pHalo, bg(pHalo, [this.aux, haloParams(1, 1, nz)]), haloN(1, nz), 'halo K');
     if (this.nq > 0) this.R = buf(this.nq * size * 4);
-    const haloR = this.R ? disp(pHalo, bg(pHalo, [this.R, haloParams(0, this.nq, nz)]), haloN(this.nq, nz)) : null;
+    const haloR = this.R ? disp(pHalo, bg(pHalo, [this.R, haloParams(0, this.nq, nz)]), haloN(this.nq, nz), 'halo PD ratio') : null;
     const nInt = nx * ny * nz, nInt1 = nx * ny * (nz + 1), nCol = nx * ny;
-    const save = disp(pSave, bg(pSave, [this.S, this.S0]), NF * size);
+    const save = disp(pSave, bg(pSave, [this.S, this.S0]), NF * size, 'save state');
     const pIce = this.nq === 6 ? pipe(iceWgsl()) : null;
-    const kes = pIce ? disp(pIce, bg(pIce, [this.S, baseBuf, this.aux, this.params[2]!]), nCol) : disp(pKes, bg(pKes, [this.S, baseBuf, this.aux, this.params[2]!]), nCol);
+    const kes = pIce ? disp(pIce, bg(pIce, [this.S, baseBuf, this.aux, this.params[2]!]), nCol, 'microphysics (ice)') : disp(pKes, bg(pKes, [this.S, baseBuf, this.aux, this.params[2]!]), nCol, 'microphysics (Kessler)');
     this.passes = [];
-    const seq: ((p: GPUComputePassEncoder) => void)[] = [save];
+    const seq: Pass[] = [save];
     stages.forEach(([, ns], s) => {
       const prm = this.params[s]!;
       seq.push(haloAll);
-      seq.push(disp(pMom, bg(pMom, [this.S, this.F, baseBuf]), nInt1));
+      seq.push(disp(pMom, bg(pMom, [this.S, this.F, baseBuf]), nInt1, 'momentum advection'));
       if (s === 2 && pScaPD && pPD) {
-        seq.push(disp(pPD, bg(pPD, [this.S, this.S0, this.R!, baseBuf, prm]), nInt));
+        seq.push(disp(pPD, bg(pPD, [this.S, this.S0, this.R!, baseBuf, prm]), nInt, 'PD limiter ratio'));
         seq.push(haloR!);
-        seq.push(disp(pScaPD, bg(pScaPD, [this.S, this.F, baseBuf, this.R!]), nInt));
-      } else seq.push(disp(pSca, bg(pSca, [this.S, this.F, baseBuf]), nInt));
+        seq.push(disp(pScaPD, bg(pScaPD, [this.S, this.F, baseBuf, this.R!]), nInt, 'scalar advection'));
+      } else seq.push(disp(pSca, bg(pSca, [this.S, this.F, baseBuf]), nInt, 'scalar advection'));
       if (ph) {
-        seq.push(disp(pTurbK!, bg(pTurbK!, [this.S, this.aux]), nInt));
+        seq.push(disp(pTurbK!, bg(pTurbK!, [this.S, this.aux]), nInt, 'turbulence K'));
         seq.push(haloK);
-        seq.push(disp(pTurb!, bg(pTurb!, [this.S, this.F, this.aux, baseBuf]), nInt1));
-        if (pSfc) seq.push(disp(pSfc, bg(pSfc, [this.S, this.F, sfcBuf!]), nCol));
+        seq.push(disp(pTurb!, bg(pTurb!, [this.S, this.F, this.aux, baseBuf]), nInt1, 'turbulent mixing'));
+        if (pSfc) seq.push(disp(pSfc, bg(pSfc, [this.S, this.F, sfcBuf!]), nCol, 'surface fluxes'));
       }
       if (relax) seq.push(relax);
-      seq.push(disp(pStage, bg(pStage, [this.S, this.S0, this.F, this.aux, prm]), size));
+      seq.push(disp(pStage, bg(pStage, [this.S, this.S0, this.F, this.aux, prm]), size, 'RK stage'));
       seq.push(haloThQ);
-      const ah = disp(pAh, bg(pAh, [this.S, this.F, this.aux, prm]), nInt);
-      const av = disp(pAv, bg(pAv, [this.S, this.F, baseBuf, prm]), nCol);
-      const cp2 = disp(pCopyPP, bg(pCopyPP, [this.S, this.aux]), size);
-      for (let i = 0; i < ns; i++) seq.push(haloPP, haloPPold, ah, haloUV, cp2, av);
+      const ah = disp(pAh, bg(pAh, [this.S, this.F, this.aux, prm]), nInt, 'acoustic horizontal');
+      const av = disp(pAv, bg(pAv, [this.S, this.F, baseBuf, prm, this.aux]), nCol, 'acoustic vertical (implicit)');
+      for (let i = 0; i < ns; i++) seq.push(haloPP, haloPPold, ah, haloUV, av);
     });
     if (opts.moist) seq.push(kes);
     this.passes = seq;
@@ -228,8 +234,54 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
 
   /** Release GPU buffers. */
   destroy(): void {
-    for (const b of [this.S, this.S0, this.F, this.aux, this.B, this.R, this.disp?.D, this.disp?.C, ...this.params]) b?.destroy();
+    for (const b of [this.S, this.S0, this.F, this.aux, this.B, this.R, this.disp?.D, this.disp?.C, this.cflK?.out, ...this.params]) b?.destroy();
   }
+
+  /** Change the time step (all kernels take it from the per-stage uniforms). */
+  setDt(dt: number): void {
+    this.dt = dt;
+    const ns = this.nsound, stages: [number, number][] = [[dt / 3, Math.max(1, Math.round(ns / 3))], [dt / 2, Math.max(1, Math.round(ns / 2))], [dt, ns]];
+    stages.forEach(([dts, n], i) => this.device.queue.writeBuffer(this.params[i]!, 0, new Float32Array([dts / n, dts, dt, 0])));
+  }
+
+  /** Largest advective Courant rate max(|u|/dx + |v|/dy + |w|/dz) over the domain (1/s), from a per-column
+   *  GPU reduction (one value per column read back). */
+  async maxCourantRate(): Promise<number> {
+    const { nx, ny } = this.cpu.c, nCol = nx * ny, dev = this.device;
+    if (!this.cflK) {
+      const code = this.consts + linearGid(`
+@group(0) @binding(0) var<storage, read> S: array<f32>;
+@group(0) @binding(1) var<storage, read_write> O: array<f32>;
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= NX * NY) { return; }
+  let j = t / NX; let i = t % NX;
+  var r = 0.0;
+  for (var k = 0u; k < NZ; k++) {
+    let q = ix(i, j, k);
+    r = max(r, max(abs(S[q]), abs(S[q + 1u])) / DX + max(abs(S[SIZE + q]), abs(S[SIZE + q + SX])) / DY + max(abs(S[2u * SIZE + q]), abs(S[2u * SIZE + q + PL])) / DZ);
+  }
+  O[t] = r;
+}`);
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
+      const out = dev.createBuffer({ size: nCol * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      this.cflK = { pipe, out, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: out } }] }) };
+    }
+    const k = this.cflK, st = dev.createBuffer({ size: nCol * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    const groups = Math.ceil(nCol / WG);
+    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.min(groups, GX), Math.ceil(groups / GX)); pass.end();
+    enc.copyBufferToBuffer(k.out, 0, st, 0, nCol * 4);
+    dev.queue.submit([enc.finish()]);
+    await st.mapAsync(GPUMapMode.READ);
+    const a = new Float32Array(st.getMappedRange());
+    let r = 0;
+    for (let i = 0; i < nCol; i++) r = Math.max(r, a[i]!);
+    st.unmap(); st.destroy();
+    return r;
+  }
+  private cflK: { pipe: GPUComputePipeline; out: GPUBuffer; bind: GPUBindGroup } | null = null;
 
   step(n = 1): void {
     // several short command buffers per step: on large grids one step is ~1 s of GPU work, and a single
@@ -243,7 +295,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
         pass.end();
         this.device.queue.submit([enc.finish()]);
       }
-      this.time += this.cpu.c.dt;
+      this.time += this.dt;
       this.steps++;
     }
   }
@@ -278,6 +330,44 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     for (let i = 0; i < n; i++) this.passes[i]!(pass);
     pass.end();
     this.device.queue.submit([enc.finish()]);
+  }
+
+  /** Time the kernels of `steps` model steps (the model advances). With the 'timestamp-query' feature
+   *  every kernel gets its own compute pass with GPU timestamps; otherwise each kernel is timed on the
+   *  CPU as its own submission (includes submission overhead, coarser). Returns ms per step by kernel
+   *  name, sorted, and the total. */
+  async profile(steps = 3): Promise<{ method: 'gpu-timestamps' | 'cpu-timing'; total: number; rows: { label: string; ms: number; calls: number }[] }> {
+    const dev = this.device, P = this.passes, acc = new Map<string, { ms: number; calls: number }>();
+    const add = (label: string, ms: number): void => { const r = acc.get(label) ?? { ms: 0, calls: 0 }; r.ms += ms / steps; r.calls += 1 / steps; acc.set(label, r); };
+    this.step(1); await dev.queue.onSubmittedWorkDone();                   // warm-up
+    const ts = dev.features.has('timestamp-query');
+    for (let s = 0; s < steps; s++) {
+      if (ts) {
+        const qs = dev.createQuerySet({ type: 'timestamp', count: 2 * P.length });
+        const res = dev.createBuffer({ size: 16 * P.length, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+        const rd = dev.createBuffer({ size: 16 * P.length, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = dev.createCommandEncoder();
+        P.forEach((p, i) => { const pass = enc.beginComputePass({ timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 2 * i, endOfPassWriteIndex: 2 * i + 1 } }); p(pass); pass.end(); });
+        enc.resolveQuerySet(qs, 0, 2 * P.length, res, 0);
+        enc.copyBufferToBuffer(res, 0, rd, 0, 16 * P.length);
+        dev.queue.submit([enc.finish()]);
+        await rd.mapAsync(GPUMapMode.READ);
+        const t = new BigInt64Array(rd.getMappedRange().slice(0));
+        rd.unmap(); rd.destroy(); res.destroy(); qs.destroy();
+        P.forEach((p, i) => add(p.label, Number(t[2 * i + 1]! - t[2 * i]!) / 1e6));
+      } else {
+        for (const p of P) {
+          const t0 = performance.now();
+          const enc = dev.createCommandEncoder(), pass = enc.beginComputePass(); p(pass); pass.end();
+          dev.queue.submit([enc.finish()]);
+          await dev.queue.onSubmittedWorkDone();
+          add(p.label, performance.now() - t0);
+        }
+      }
+      this.time += this.dt; this.steps++;
+    }
+    const rows = [...acc].map(([label, r]) => ({ label, ms: r.ms, calls: Math.round(r.calls) })).sort((a, b) => b.ms - a.ms);
+    return { method: ts ? 'gpu-timestamps' : 'cpu-timing', total: rows.reduce((a, r) => a + r.ms, 0), rows };
   }
 
   private disp: { pipe: GPUComputePipeline; bind: GPUBindGroup; D: GPUBuffer; C: GPUBuffer } | null = null;
@@ -371,17 +461,27 @@ struct HP { f0: u32, nf: u32, nk: u32, pad: u32 };
 @group(0) @binding(1) var<uniform> hp: HP;
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  // one invocation per halo cell only: NH = SX*SY - NX*NY per level, enumerated as the full-width
+  // bottom and top strips (2*HH rows of SX) followed by the side strips (NY rows of 2*HH)
   let t = gid.x;
-  let per = SX * SY * hp.nk;
+  let NH = SX * SY - NX * NY;
+  let per = NH * hp.nk;
   if (t >= per * hp.nf) { return; }
   let f = hp.f0 + t / per;
   let r = t % per;
-  let k = r / (SX * SY);
-  let e = r % (SX * SY);
-  let je = e / SX; let ie = e % SX;
-  let inI = ie >= HH && ie < NX + HH;
-  let inJ = je >= HH && je < NY + HH;
-  if (inI && inJ) { return; }
+  let k = r / NH;
+  let h = r % NH;
+  var ie: u32; var je: u32;
+  if (h < 2u * HH * SX) {
+    let row = h / SX;
+    je = select(row - HH + NY + HH, row, row < HH);
+    ie = h % SX;
+  } else {
+    let h2 = h - 2u * HH * SX;
+    je = HH + h2 / (2u * HH);
+    let c = h2 % (2u * HH);
+    ie = select(c - HH + NX + HH, c, c < HH);
+  }
   var si = (ie + NX - HH) % NX + HH;
   var sj = (je + NY - HH) % NY + HH;
   if (OPEN) { si = clamp(ie, HH, NX + HH - 1u); sj = clamp(je, HH, NY + HH - 1u); }
@@ -778,20 +878,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-const COPYPP_WGSL = /* wgsl */`
-@group(0) @binding(0) var<storage, read> S: array<f32>;
-@group(0) @binding(1) var<storage, read_write> A: array<f32>;
-@compute @workgroup_size(${WG})
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) { if (gid.x < SIZE) { A[gid.x] = S[4u * SIZE + gid.x]; } }
-`;
-
-// acoustic step: vertically implicit w - pi' per column
+// acoustic step: vertically implicit w - pi' per column. Thomas algorithm with the coefficients formed on
+// the fly and only three per-thread arrays (E, normalised c', d'): long per-thread arrays spill out of
+// registers on real GPUs. Also stores the pre-update pi' in A (the previous-substep pi' used by the
+// divergence damping of the next horizontal acoustic step; formerly a separate copy pass).
 const ACOUSTIC_V_WGSL = /* wgsl */`
 @group(0) @binding(0) var<storage, read_write> S: array<f32>;
 @group(0) @binding(1) var<storage, read> F: array<f32>;
 @group(0) @binding(2) var<storage, read> base: array<f32>;
 ${BASE_FNS}
 @group(0) @binding(3) var<uniform> p: P;
+@group(0) @binding(4) var<storage, read_write> A: array<f32>;
 ${THR_FNS}
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -800,33 +897,38 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let j = t / NX; let i = t % NX;
   let dts = p.dts;
   let bp = 0.5 * (1.0 + BETA); let bm = 0.5 * (1.0 - BETA);
-  var a: array<f32, NZ + 1u>; var b: array<f32, NZ + 1u>; var c: array<f32, NZ + 1u>; var rr: array<f32, NZ + 1u>; var wn: array<f32, NZ + 1u>;
-  var Ek: array<f32, NZ>;
+  var Ek: array<f32, NZ>; var cp: array<f32, NZ + 1u>; var dp: array<f32, NZ + 1u>;
   for (var k = 0u; k < NZ; k++) {
     let q = ix(i, j, k);
     let dh = (S[q + 1u] - S[q]) / DX + (S[SIZE + q + SX] - S[SIZE + q]) / DY;
     let oldW = bm * (brtf(k + 1u) * S[2u * SIZE + q + PL] - brtf(k) * S[2u * SIZE + q]) / DZ;
     Ek[k] = S[4u * SIZE + q] + dts * F[4u * SIZE + q] - dts * bcfac(k) * (brtc(k) * dh + oldW);
   }
+  // forward sweep over the interior w levels 1 .. NZ-1 (w = 0 at 0 and NZ)
+  cp[0] = 0.0; dp[0] = 0.0;
   for (var k = 1u; k < NZ; k++) {
     let q = ix(i, j, k);
     let cth = CP * 0.5 * (thr(q) + thr(q - PL)) / DZ;
     let gk = dts * bcfac(k) * bp / DZ; let gkm = dts * bcfac(k - 1u) * bp / DZ;
     let rtk = brtf(k);
-    a[k] = select(0.0, -dts * cth * bp * gkm * brtf(k - 1u), k - 1u >= 1u);
-    c[k] = select(0.0, -dts * cth * bp * gk * brtf(k + 1u), k + 1u <= NZ - 1u);
-    b[k] = 1.0 + dts * cth * bp * (gk * rtk + gkm * rtk);
-    rr[k] = S[2u * SIZE + q] + dts * (F[2u * SIZE + q] - cth * (bp * (Ek[k] - Ek[k - 1u]) + bm * (S[4u * SIZE + q] - S[4u * SIZE + q - PL])));
+    let a = select(0.0, -dts * cth * bp * gkm * brtf(k - 1u), k - 1u >= 1u);
+    let c = select(0.0, -dts * cth * bp * gk * brtf(k + 1u), k + 1u <= NZ - 1u);
+    let b = 1.0 + dts * cth * bp * (gk * rtk + gkm * rtk);
+    let r = S[2u * SIZE + q] + dts * (F[2u * SIZE + q] - cth * (bp * (Ek[k] - Ek[k - 1u]) + bm * (S[4u * SIZE + q] - S[4u * SIZE + q - PL])));
+    let den = b - a * cp[k - 1u];
+    cp[k] = c / den;
+    dp[k] = (r - a * dp[k - 1u]) / den;
   }
-  for (var k = 2u; k < NZ; k++) { let mm = a[k] / b[k - 1u]; b[k] -= mm * c[k - 1u]; rr[k] -= mm * rr[k - 1u]; }
-  wn[0] = 0.0; wn[NZ] = 0.0;
-  if (NZ > 1u) { wn[NZ - 1u] = rr[NZ - 1u] / b[NZ - 1u]; }
-  for (var kk = i32(NZ) - 2; kk >= 1; kk--) { let k = u32(kk); wn[k] = (rr[k] - c[k] * wn[k + 1u]) / b[k]; }
+  // back substitution: dp[k] becomes w[k]
+  dp[NZ] = 0.0;
+  for (var kk = i32(NZ) - 1; kk >= 1; kk--) { let k = u32(kk); dp[k] = dp[k] - cp[k] * dp[k + 1u]; }
+  dp[0] = 0.0;
   for (var k = 0u; k < NZ; k++) {
     let q = ix(i, j, k);
-    S[4u * SIZE + q] = Ek[k] - dts * bcfac(k) * bp * (brtf(k + 1u) * wn[k + 1u] - brtf(k) * wn[k]) / DZ;
+    A[q] = S[4u * SIZE + q];
+    S[4u * SIZE + q] = Ek[k] - dts * bcfac(k) * bp * (brtf(k + 1u) * dp[k + 1u] - brtf(k) * dp[k]) / DZ;
   }
-  for (var k = 0u; k <= NZ; k++) { S[2u * SIZE + ix(i, j, k)] = wn[k]; }
+  for (var k = 0u; k <= NZ; k++) { S[2u * SIZE + ix(i, j, k)] = dp[k]; }
 }
 `;
 

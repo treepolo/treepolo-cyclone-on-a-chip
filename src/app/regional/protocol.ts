@@ -26,7 +26,10 @@ export type ToRegionalWorker =
   | { type: 'speed'; stepsPerTick: number }
   | { type: 'ground'; field: GroundField }
   /** newer global state: refresh the lateral-boundary relaxation targets of the running nest */
-  | { type: 'boundary'; payload: NestPayload };
+  | { type: 'boundary'; payload: NestPayload }
+  /** time every GPU kernel for a few steps and report */
+  | { type: 'profile' }
+  | { type: 'adaptive'; on: boolean };
 
 export interface RegionalFrame {
   type: 'frame';
@@ -40,9 +43,12 @@ export interface RegionalFrame {
   groundRange: [number, number];
   stats: { wmax: number; wmin: number; qcmax: number; qrmax: number; rainmax: number; vmax: number; dp: number | null; rmw: number | null; eyewalls: { r: number; v: number }[] | null; zetaMax: number; vGround: number };
   stepsPerSecond: number;
+  /** current time step (s): varies with adaptive stepping on the GPU */
+  dt: number;
 }
 
 export type FromRegionalWorker =
   | RegionalFrame
   | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null }
+  | { type: 'profile'; text: string }
   | { type: 'error'; message: string };

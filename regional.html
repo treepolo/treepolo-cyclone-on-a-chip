@@ -39,6 +39,7 @@ a{color:#8fc1ff}
 <div id="desc" class="muted"></div>
 <p><button id="run">執行 / Run</button></p>
 <label for="speed">每輪步數 / Steps per tick</label><input id="speed" type="range" min="1" max="12" value="1" />
+<label><input id="adaptive" type="checkbox" checked /> 自動時間步長（依風速調整 Δt，GPU）/ Adaptive time step (Δt from the Courant number, GPU)</label>
 <label for="ground">地面場 / Ground field</label>
 <select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="wind">地面風速 / Surface wind speed</option><option value="theta">地面位溫擾動（冷池）/ Surface θ′ (cold pool)</option><option value="snow">累積降雪與霰（水當量）/ Accumulated snow + graupel (water equivalent)</option></select>
 <div id="legend" class="muted"></div>
@@ -56,6 +57,10 @@ a{color:#8fc1ff}
 <div class="row"><span>中心氣壓降 / Central pressure deficit</span><span id="dp">—</span></div>
 <div class="row"><span>眼牆（1.5 km 切向風極大）/ Eyewalls (1.5 km vt maxima)</span><span id="eyewalls">—</span></div>
 <div class="row"><span>近地面最大渦度・對地風速 / Near-surface max vorticity · ground-relative wind</span><span id="zeta">—</span></div>
+<h2>效能分析 / Profiling</h2>
+<p><button id="profile">分析各 GPU 程式耗時 / Time each GPU kernel</button></p>
+<div class="muted">跑 3 步並量測每個 GPU 程式的時間（模式會前進 3 步）。結果可以複製給開發者。/ Runs 3 steps and times every GPU kernel (the model advances 3 steps). The result can be copied for the developer.</div>
+<pre id="profileOut" class="log" style="max-height:320px;user-select:text"></pre>
 <h2>紀錄 / Log</h2><div id="log" class="log"></div>
 </section>
 <script type="module" src="./dist/app/regional/main.js"></script>

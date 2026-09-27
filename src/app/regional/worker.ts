@@ -27,13 +27,38 @@ let frameVel = { u: 0, v: 0 };
 let tracker: StormTracker | null = null, lastTrack = 0;
 let nestSpec: NestSpec | null = null;
 
+// Adaptive time step (GPU): dt = min(acoustic limit, CFL_TARGET / max(|u|/dx + |v|/dy + |w|/dz)),
+// between the configured dt0 and 3 dt0; shrinks at once, grows by at most 10 % per check. The
+// acoustic limit keeps the horizontal sound Courant number of the split steps c_s dt / (n_s dx) <= 0.45.
+const CFL_TARGET = 0.8, CFL_MAX = 1.1;
+let adaptive = true, dt0 = 0;
+function dtLimits(): { lo: number; hi: number } {
+  const c = m!.c;
+  const ac = c.nsound * 0.45 * Math.min(c.dx, c.dy) / 350;
+  return { lo: 0.25 * dt0, hi: Math.max(dt0, Math.min(3 * dt0, ac)) };
+}
+async function adaptDt(): Promise<void> {
+  if (!gpu || !adaptive || !m) return;
+  const rate = await gpu.maxCourantRate();
+  if (!Number.isFinite(rate)) return;
+  const { lo, hi } = dtLimits(), cur = gpu.dt;
+  let next = Math.min(hi, CFL_TARGET / Math.max(rate, 1e-9));
+  if (rate * cur > CFL_MAX) next = Math.min(next, 0.7 / rate);          // overshoot: cut back hard
+  else if (next > cur) next = Math.min(next, 1.1 * cur);
+  next = Math.max(lo, next);
+  if (Math.abs(next - cur) > 0.02 * cur) gpu.setDt(next);
+}
+
 async function getGpu(): Promise<GPUDevice | null> {
   if (gpuDevice) return gpuDevice;
   const nav = (self as unknown as { navigator: Navigator }).navigator;
   if (!nav.gpu) return null;
   const ad = await nav.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!ad) return null;
-  gpuDevice = await ad.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, maxBufferSize: ad.limits.maxBufferSize } });
+  gpuDevice = await ad.requestDevice({
+    requiredLimits: { maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, maxBufferSize: ad.limits.maxBufferSize },
+    requiredFeatures: ad.features.has('timestamp-query') ? ['timestamp-query'] : [],
+  });
   const dev = gpuDevice;
   dev.lost.then((info) => {
     if (gpuDevice === dev) gpuDevice = null;
@@ -150,6 +175,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       } else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr' || msg.experiment === 'tornado')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
       const c = m!.c;
+      dt0 = c.dt;
       post({ type: 'ready', land: null, experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note });
       await sendFrame();
     }
@@ -165,12 +191,33 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         if (reason) { note = gpuFailNote(reason); info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, false); }
       } else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
+      dt0 = c.dt;
       post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land });
       await sendFrame();
     }
     else if (msg.type === 'run') running = msg.running;
     else if (msg.type === 'speed') stepsPerTick = Math.max(1, msg.stepsPerTick | 0);
     else if (msg.type === 'ground') { ground = msg.field; sendFrame(); }
+    else if (msg.type === 'adaptive') {
+      adaptive = msg.on;
+      if (!adaptive && gpu) { while (busy) await new Promise((r) => setTimeout(r, 5)); gpu.setDt(dt0); }
+    }
+    else if (msg.type === 'profile') {
+      if (!gpu || !m) { post({ type: 'profile', text: '效能分析需要 WebGPU 後端 / profiling needs the WebGPU backend' }); return; }
+      const wasRunning = running; running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        const r = await gpu.profile(3), c = m.c;
+        const cells = c.nx * c.ny * c.nz;
+        const lines = [`效能分析 / Profile: ${c.nx}×${c.ny}×${c.nz} (${(cells / 1e6).toFixed(2)} M cells), Δt ${c.dt} s, ${r.method}`,
+          `每步 / per step: ${r.total.toFixed(1)} ms → ${(1000 / r.total).toFixed(2)} 步/s steps/s, ${(cells * 1000 / r.total / 1e6).toFixed(1)} M cell-steps/s`,
+          ...r.rows.map((x) => `${x.ms.toFixed(2).padStart(8)} ms ${(100 * x.ms / r.total).toFixed(1).padStart(5)}%  ×${x.calls}  ${x.label}`)];
+        post({ type: 'profile', text: lines.join('\n') });
+        m.time = gpu.time; m.steps = gpu.steps;
+      } catch (e) { post({ type: 'profile', text: `效能分析失敗 / profiling failed: ${String(e)}` }); }
+      busy = false; running = wasRunning;
+    }
     else if (msg.type === 'boundary' && m && nestSpec && experiment === 'nest') {
       while (busy) await new Promise((r) => setTimeout(r, 5));
       m.boundary = nestTargets(msg.payload, nestSpec, m);
@@ -187,11 +234,15 @@ async function loop(): Promise<void> {
         if (gpu) {
           // adaptive batch: about 60 ms x speed setting of GPU work between checks
           const t0 = performance.now();
-          gpu.step(gpuBatch); rateSteps += gpuBatch;
+          // with adaptive stepping, re-check the Courant number at least every 300 model seconds
+          const nb = adaptive ? Math.max(1, Math.min(gpuBatch, Math.ceil(300 / gpu.dt))) : gpuBatch;
+          gpu.step(nb); rateSteps += nb;
           await gpu.device.queue.onSubmittedWorkDone();
+          await adaptDt();
           const el = performance.now() - t0, target = 60 * stepsPerTick;
           if (DEBUG) console.log(`DBG batch ${gpuBatch} steps ${el.toFixed(0)} ms`);
-          gpuBatch = Math.max(1, Math.min(2000, Math.round(gpuBatch * Math.min(2, Math.max(0.5, target / Math.max(el, 1))))));
+          const perStep = Math.max(el, 1) / nb;
+          gpuBatch = Math.max(1, Math.min(2000, Math.round(Math.min(2 * gpuBatch, Math.max(0.5 * gpuBatch, target / perStep)))));
         }
         else for (let s = 0; s < stepsPerTick; s++) { m.step(); mp.apply(m.c.dt); rateSteps++; }
         if (tracker && m.time - lastTrack >= 600) { lastTrack = m.time; await followStorm(); }
@@ -216,10 +267,11 @@ async function followStorm(): Promise<void> {
   if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; physCfg.frameVel = frameVel; }
   if (a.di || a.dj) m.roll(a.di, a.dj, [mp.rainAcc, mp.snowAcc]);
   if (gpu) {
-    const device = gpu.device;
+    const device = gpu.device, dtNow = gpu.dt;
     gpu.destroy();
     gpu = new GpuRegional(device, m, { moist: true, physics: physCfg, ice: true });
     gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
+    gpu.setDt(dtNow);
   }
 }
 
@@ -290,5 +342,5 @@ async function sendFrame(): Promise<void> {
     vGround = Math.max(vGround, Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!) + frameVel.u, 0.5 * (m.v[q]! + m.v[q + m.sx]!) + frameVel.v));
   }
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
-    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround }, stepsPerSecond: rate }, [cloud.buffer, rain.buffer, g.buffer]);
+    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround }, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [cloud.buffer, rain.buffer, g.buffer]);
 }

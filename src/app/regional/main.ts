@@ -38,8 +38,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     view.setGround(m.nx, m.ny, rgba);
     const s = m.stats, t = m.time;
     $('time').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h (${(t / 86400).toFixed(2)} d)`;
-    const ms = m.stepsPerSecond * dt;
-    $('rate').textContent = `${m.stepsPerSecond.toFixed(m.stepsPerSecond < 10 ? 2 : 1)} 步/s steps/s · ${ms < 60 ? `${ms.toFixed(1)} 模式秒/s model-s/s` : `${(ms / 60).toFixed(1)} 模式分/s model-min/s`}`;
+    const ms = m.stepsPerSecond * m.dt;
+    $('rate').textContent = `${m.stepsPerSecond.toFixed(m.stepsPerSecond < 10 ? 2 : 1)} 步/s steps/s · ${ms < 60 ? `${ms.toFixed(1)} 模式秒/s model-s/s` : `${(ms / 60).toFixed(1)} 模式分/s model-min/s`} · Δt ${m.dt.toFixed(1)} s`;
     $('w').textContent = `${s.wmin.toFixed(1)} … ${s.wmax.toFixed(1)} m/s`;
     $('qc').textContent = `${(s.qcmax * 1000).toFixed(2)} g/kg`;
     $('qr').textContent = `${(s.qrmax * 1000).toFixed(2)} g/kg`;
@@ -51,6 +51,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('zeta').textContent = `${s.zetaMax.toFixed(3)} s⁻¹ · ${s.vGround.toFixed(1)} m/s`;
     $('legend').textContent = `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); }
+  else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
 };
 function sync(): void { $('run').textContent = running ? '暫停 / Pause' : '執行 / Run'; send({ type: 'run', running }); }
 $('run').onclick = (): void => { running = !running; sync(); };
@@ -67,6 +68,7 @@ $('exp').onchange = init;
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
+$('adaptive').onchange = (): void => send({ type: 'adaptive', on: $<HTMLInputElement>('adaptive').checked });
 // Nesting: embedded by the global page (in-page overlay, #nest...) or opened with ?nest=1; the
 // parent/opener posts the global state and the chosen point.
 const host = window.parent !== window ? window.parent : (window.opener as Window | null);
@@ -87,3 +89,4 @@ if (window.parent !== window) { const back = document.getElementById('backLink')
 init();
 function tick(): void { view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); requestAnimationFrame(tick); }
 requestAnimationFrame(tick);
+$('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };

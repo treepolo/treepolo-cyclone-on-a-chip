@@ -166,3 +166,48 @@ export async function regionalPerf(): Promise<void> {
     gcheck(`perf supercell 60x60x40 ice=${ice} env=${env}: ms per step`, true, ((performance.now() - t0) / 3).toFixed(0));
   }
 }
+
+/** Adaptive time stepping (as in the app's regional worker) vs the fixed configured dt: a sheared
+ *  warm-bubble storm run for 40 model minutes should give a similar storm with fewer steps. */
+export async function regionalAdaptiveTest(): Promise<void> {
+  const device = await getDevice();
+  const run = async (adaptive: boolean): Promise<{ wmax: number; cmax: number; rain: number; steps: number; dtEnd: number }> => {
+    const nx = 40, nz = 30, dx = 2000, dz = 500, dt0 = 6;
+    const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: dt0, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 5000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, 6);
+    m.setBaseWind((z) => ({ u: 30 * Math.tanh(z / 3000) - 15, v: 0 }));
+    for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+    const xc = nx * dx * 0.4, yc = nx * dx / 2;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+      const r = Math.sqrt((((i + 0.5) * dx - xc) / 10000) ** 2 + (((j + 0.5) * dx - yc) / 10000) ** 2 + ((m.zc[k]! - 1400) / 1400) ** 2);
+      if (r < 1) m.th[m.idx(i, j, k)] = m.th[m.idx(i, j, k)]! + 2 * Math.cos(0.5 * Math.PI * r) ** 2;
+    }
+    const g = new GpuRegional(device, m, { moist: true, physics: null, ice: true });
+    g.uploadFrom(m);
+    const hi = Math.max(dt0, Math.min(3 * dt0, 6 * 0.45 * dx / 350));
+    while (g.time < 2400 - 1e-6) {
+      const n = Math.max(1, Math.min(20, Math.ceil(Math.min(300, 2400 - g.time) / g.dt)));
+      g.step(n);
+      await device.queue.onSubmittedWorkDone();
+      if (adaptive) {
+        const rate = await g.maxCourantRate(), cur = g.dt;
+        let next = Math.min(hi, 0.8 / Math.max(rate, 1e-9));
+        if (rate * cur > 1.1) next = Math.min(next, 0.7 / rate); else if (next > cur) next = Math.min(next, 1.1 * cur);
+        next = Math.max(0.25 * dt0, Math.min(next, Math.max(0.5, 2400 - g.time)));
+        if (Math.abs(next - cur) > 0.02 * cur) g.setDt(next);
+      }
+    }
+    const d = await g.readDisplay([0]);
+    let wmax = 0, cmax = 0, rain = 0;
+    for (let c = 0; c < nx * nx; c++) { wmax = Math.max(wmax, d.col[4 * c]!); cmax = Math.max(cmax, d.col[4 * c + 2]!); }
+    for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) rain += d.rain[m.idx(i, j, 0)]!;
+    const out = { wmax, cmax, rain, steps: g.steps, dtEnd: g.dt };
+    g.destroy();
+    return out;
+  };
+  const a = await run(false), b = await run(true);
+  gcheck('adaptive dt: storm develops (fixed dt: w max > 10 m/s)', a.wmax > 10, a.wmax.toFixed(1));
+  gcheck('adaptive dt: w max within 20 % of fixed dt', Math.abs(b.wmax - a.wmax) < 0.2 * a.wmax, `${b.wmax.toFixed(1)} vs ${a.wmax.toFixed(1)}`);
+  gcheck('adaptive dt: max condensate within 25 %', Math.abs(b.cmax - a.cmax) < 0.25 * a.cmax, `${(b.cmax * 1e3).toFixed(2)} vs ${(a.cmax * 1e3).toFixed(2)} g/kg`);
+  gcheck('adaptive dt: domain rain within 30 %', Math.abs(b.rain - a.rain) < 0.3 * Math.max(a.rain, 1e-9), `${b.rain.toFixed(1)} vs ${a.rain.toFixed(1)}`);
+  gcheck('adaptive dt: fewer steps', b.steps < a.steps, `${b.steps} vs ${a.steps} steps, final dt ${b.dtEnd.toFixed(1)} s`);
+}
