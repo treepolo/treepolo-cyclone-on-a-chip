@@ -10,6 +10,10 @@ import { RegionalPhysicsConfig, surfaceState } from '../regional/physics.js';
 import { ICE, LF, gammaFn } from '../regional/ice.js';
 
 const WG = 64;
+/** workgroups along x per dispatch row; kernels see gid.x = x + y * GX * WG */
+const GX = 32768;
+const linearGid = (code: string): string => code.replace(/fn main\(@builtin\(global_invocation_id\) gid: vec3<u32>\) \{/g,
+  `fn main(@builtin(global_invocation_id) gid3: vec3<u32>) { let gid = vec3<u32>(gid3.x + gid3.y * ${GX * WG}u, 0u, 0u);`);
 
 /** Base-state accessors (only for shaders that bind `base`). */
 const BASE_FNS = `
@@ -116,9 +120,13 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
   return select(c + d, c - d, vel >= 0.0);
 }
 `;
-    const pipe = (code: string): GPUComputePipeline => device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: consts + code }), entryPoint: 'main' } });
+    // 2-D dispatch (at most 65535 workgroups per dimension), folded back to a linear invocation index
+    const pipe = (code: string): GPUComputePipeline => device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: consts + linearGid(code) }), entryPoint: 'main' } });
     const bg = (p: GPUComputePipeline, bufs: GPUBuffer[]): GPUBindGroup => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: bufs.map((b, i) => ({ binding: i, resource: { buffer: b } })) });
-    const disp = (p: GPUComputePipeline, g: GPUBindGroup, n: number) => (pass: GPUComputePassEncoder): void => { pass.setPipeline(p); pass.setBindGroup(0, g); pass.dispatchWorkgroups(Math.ceil(n / WG)); };
+    const disp = (p: GPUComputePipeline, g: GPUBindGroup, n: number) => {
+      const groups = Math.ceil(n / WG), gx = Math.min(groups, GX), gy = Math.ceil(groups / GX);
+      return (pass: GPUComputePassEncoder): void => { pass.setPipeline(p); pass.setBindGroup(0, g); pass.dispatchWorkgroups(gx, gy); };
+    };
 
     const pHalo = pipe(HALO_WGSL), pMom = pipe(MOM_WGSL), pSca = pipe(scalarWgsl(false)), pScaPD = this.nq > 0 ? pipe(scalarWgsl(true)) : null, pPD = this.nq > 0 ? pipe(PDRATIO_WGSL) : null, pStage = pipe(STAGE_WGSL);
     const pAh = pipe(ACOUSTIC_H_WGSL), pAv = pipe(ACOUSTIC_V_WGSL), pCopyPP = pipe(COPYPP_WGSL), pSave = pipe(SAVE_WGSL);
