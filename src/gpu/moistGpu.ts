@@ -11,7 +11,7 @@
 //   global dry-mass fixer on ln ps
 
 import { Dycore } from '../model/dycore.js';
-import { GrayPhysics, SEA_ICE } from '../model/moist/aquaplanet.js';
+import { GrayPhysics, SEA_ICE, monthWeights, climDay } from '../model/moist/aquaplanet.js';
 import { SBM } from '../model/moist/sbm.js';
 import { MOIST, EPS } from '../model/moist/thermo.js';
 import { GpuDycore } from './dycoreGpu.js';
@@ -90,7 +90,8 @@ struct MP { dt: f32, decl: f32, radius: f32, g: f32, psTarget: f32, p1: f32, p2:
     const sum1 = disp(pRowSum, bg(pRowSum, [this.qNext, this.grid2, red, levels, rows, rowParams(this.qNext, this.grid2, 3 * K, 0)]), nlat);
     const fin1 = disp(pFinal, bg(pFinal, [red, tr.upload(Uint32Array.from([1, 0, 0, 0]), GPUBufferUsage.UNIFORM)]), 1);
     const scaleOp = disp(pScale, bg(pScale, [this.qNext, red]), K * ng);
-    const physOp = disp(pPhys, bg(pPhys, [this.grid2, this.qNext, inc, this.sfc, levels, rows, this.mp]), ng);
+    const qfx = physics.qfluxField ? tr.upload(Float32Array.from(physics.qfluxField.fields.flatMap((a) => Array.from(a)))) : tr.upload(new Float32Array(4));
+    const physOp = disp(pPhys, bg(pPhys, [this.grid2, this.qNext, inc, this.sfc, levels, rows, this.mp, qfx]), ng);
     const fwdAB = tr.prepareFftForward(inc, fourInc, 2 * K, 0, 0, true);
     const fwdT = tr.prepareFftForward(inc, fourInc, K, 2 * K, 2 * K, false);
     const massSum = disp(pRowSum, bg(pRowSum, [this.qNext, this.grid2, red, levels, rows, rowParams(this.qNext, this.grid2, 3 * K, 1)]), nlat);
@@ -122,7 +123,8 @@ struct MP { dt: f32, decl: f32, radius: f32, g: f32, psTarget: f32, p1: f32, p2:
     });
     gd.beforeStep = (time: number): void => {
       physics.setTime(time + cpu.dt);
-      device.queue.writeBuffer(this.mp, 0, new Float32Array([cpu.dt, physics.declination, a, cpu.planet.gravity, cpu.massTarget, 0, 0, 0]));
+      const qc = physics.qfluxField, mw: [number, number, number] = qc ? monthWeights(qc, climDay(time + cpu.dt, physics.cfg.yearLength, qc.yearDays)) : [0, 0, 0];
+      device.queue.writeBuffer(this.mp, 0, new Float32Array([cpu.dt, physics.declination, a, cpu.planet.gravity, cpu.massTarget, mw[0], mw[2], 0]));
     };
     void T;
   }
@@ -422,6 +424,7 @@ function physicsWgsl(ph: GrayPhysics, cpu: Dycore): string {
 @group(0) @binding(4) var<storage, read> lev: array<f32>;
 @group(0) @binding(5) var<storage, read> rows: array<f32>;
 @group(0) @binding(6) var<uniform> M: MP;
+@group(0) @binding(7) var<storage, read> QFX: array<f32>;   // monthly q-flux fields (loaded), 12 x NG
 
 const RD: f32 = ${f(air.rd)};
 const CP: f32 = ${f(air.cp)};
@@ -632,7 +635,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let p = gid.x;
   if (p >= NG) { return; }
   let j = p / NLON;
-  let la = rows[j]; let cl = rows[NLAT + j]; let qflux = rows[2u * NLAT + j];
+  let la = rows[j]; let cl = rows[NLAT + j];
+  var qflux = rows[2u * NLAT + j];
+  if (${!!ph.qfluxField}) { let m0 = u32(M.p1); qflux = mix(QFX[m0 * NG + p], QFX[((m0 + 1u) % 12u) * NG + p], M.p2); }
   let sl = sin(la);
   let dt = M.dt; let g = M.g;
   let ps = exp(G2[3u * K * NG + p]);

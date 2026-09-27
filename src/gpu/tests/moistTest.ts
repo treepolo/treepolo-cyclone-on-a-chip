@@ -68,7 +68,11 @@ export async function moistTests(): Promise<void> {
 export async function earthTests(): Promise<void> {
   const device = await getDevice();
   const data = await (await fetch('data/earth_t42.json')).json() as EarthData;
-  const { model: cpu, physics } = createEarth(EARTH_PRESETS.EARTH_T21!, data);
+  // synthetic monthly q-flux field (exercises the loaded-q-flux path): +/-40 W m^-2 pattern varying by month
+  const qlat = Array.from({ length: 46 }, (_, j) => 90 - 4 * j), qlon = Array.from({ length: 90 }, (_, i) => 4 * i);
+  const qflux = { lat: qlat, lon: qlon, days: Array.from({ length: 12 }, (_, m) => 15 + 30 * m), yearDays: 360,
+    fields: Array.from({ length: 12 }, (_, m) => Float64Array.from({ length: 46 * 90 }, (_, p) => 40 * Math.sin((qlat[Math.floor(p / 90)]! + 30 * m) * Math.PI / 90) * Math.cos(qlon[p % 90]! * Math.PI / 180))) };
+  const { model: cpu, physics } = createEarth(EARTH_PRESETS.EARTH_T21!, data, { qflux: false }, { qflux });
   for (let i = 0; i < 72 * 10; i++) cpu.step();      // 10 days: sea ice forming at high latitudes
   const ng = cpu.ng;
   let iceN = 0; for (let p = 0; p < ng; p++) if (physics.f.ice[p]! > 0) iceN++;

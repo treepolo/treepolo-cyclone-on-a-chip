@@ -55,15 +55,34 @@ Annual mean: jets 24.9 (NH) and 31.3 m/s (SH) at 36°, Hadley cells 7.3 / −4.7
 逐格點資料（`results/EARTH_T21_y3/climate.json`）顯示：深熱帶陸地（印度南部、東南亞島嶼）比鄰近海洋冷約 10 °C，因為灰體模式的陸地反照率 0.42（高於海洋 0.38，代表雲）加上蒸發冷卻；而沒有洋流的 slab 印度洋高達 34–38 °C。季風所需的「夏季陸地比海洋熱」在深熱帶反轉，對流留在海上；冬季的雨來自溫帶風暴路徑南緣掃過華南，以及孟加拉灣的東風。
 The gridded output shows deep-tropical land about 10 °C colder than the adjacent ocean: the gray model's land albedo (0.42, above the ocean's 0.38, both standing in for clouds) plus evaporative cooling, against a slab Indian Ocean at 34–38 °C with no ocean dynamics. The land-warmer-than-sea contrast that drives a monsoon is reversed in the deep tropics, so convection stays over the ocean. The winter rain comes from the southern edge of the storm track over South China and easterlies from the Bay of Bengal.
 
-這是灰體輻射（沒有雲、沒有水汽窗區）的結構性限制，不是數值錯誤。短期敏感度實驗（陸地反照率 0.30）見 2.4；根本改善列為 R7（非灰體輻射與雲）。
-This is a structural limit of gray radiation (no clouds, no water-vapour window), not a numerical error. A land-albedo sensitivity experiment is in 2.4; the real fix is R7 (non-gray radiation and clouds).
+這是灰體輻射（沒有雲、沒有水汽窗區）的結構性限制，不是數值錯誤；敏感度實驗見 2.4。
+This is a structural limit of gray radiation (no clouds, no water-vapour window), not a numerical error; see the sensitivity experiment in 2.4.
 
-### 2.3 熱力學海冰 / Thermodynamic sea ice
+### 2.3 熱力學海冰與長期漂移 / Thermodynamic sea ice and the slow drift
 
-之前的海冰只有反照率（SST 可以一路冷到 245 K），年平均地表溫度每年下降約 1 K。現在的零層 Semtner (1976) 模式讓混合層在 271.35 K 結冰，冰厚由傳導、表面與底部熱收支決定；單元測試確認能量（混合層 + 冰面層 − 潛熱）守恆到 1e-13，GPU 與 CPU 冰厚相對誤差 9e-6。
-Previously sea ice was an albedo ramp only (the slab could cool to 245 K) and the mean surface temperature drifted down about 1 K per year. The zero-layer Semtner (1976) model now freezes the mixed layer at 271.35 K and grows or melts ice from the conductive, surface and basal heat budgets. A unit test shows energy (mixed layer + ice surface layer − latent heat) conserved to 1e-13; GPU and CPU ice thickness agree to 9e-6.
+之前的海冰只有反照率（slab 可以冷到 245 K）。現在的零層 Semtner (1976) 模式讓混合層在 271.35 K 結冰，冰厚由傳導、表面與底部熱收支決定；單元測試確認能量（混合層 + 冰面層 − 潛熱）守恆到 1e-13，GPU 與 CPU 冰厚相對誤差 9e-6。
+Previously sea ice was only an albedo ramp (the slab could cool to 245 K). The zero-layer Semtner (1976) model now freezes the mixed layer at 271.35 K and grows or melts ice from the conductive, surface and basal heat budgets; energy is conserved to 1e-13 and GPU and CPU ice thickness agree to 9e-6.
 
-### 2.4 綜觀天氣 / Synoptic weather
+兩種海冰版本的全球平均地表溫度都以約 0.5–1 K/年緩慢下降（同季節比較），所以漂移不是海冰反照率失控，而是 Byrne–O'Gorman 灰體輻射強烈的水汽回饋下，20 m slab 與大氣緩慢地走向較冷的平衡（年平均約 286–287 K、可降水量 ~21–22 kg/m²）。季節氣候與季風結果在兩個版本中相同（海冰版：南亞 JJA 2.9 / DJF 3.1、東亞 4.3 / 9.0 mm/day）。
+With either sea-ice treatment the global mean surface temperature drifts down by about 0.5–1 K per year (same-season comparison). So the drift is not an ice-albedo runaway: under the strong water-vapour feedback of the Byrne–O'Gorman gray scheme, the 20 m slab and atmosphere slowly approach a cooler equilibrium (annual mean about 286–287 K, precipitable water about 21–22 kg/m²). The seasonal climate and monsoon indices are the same in both versions (with thermodynamic ice: South Asia JJA 2.9 / DJF 3.1, East Asia 4.3 / 9.0 mm/day).
+
+### 2.4 陸地反照率敏感度：季風的開關 / Land-albedo sensitivity: the monsoon switch
+
+陸地反照率由 0.42 降為 0.30（海洋維持 0.38，同樣是 3 年積分、平均第 3 年），**五個季風區的季節性全部轉為正確**：
+With land albedo lowered from 0.42 to 0.30 (ocean kept at 0.38; 3-year run, third year averaged) **all five monsoon regions get the correct seasonality**:
+
+| 區域 / Region | 0.42：JJA / DJF (mm/day) | 0.30：JJA / DJF (mm/day) |
+|---|---|---|
+| 南亞 / South Asia | 2.9 / 3.1 | **4.1 / 2.5** |
+| 西非 / West Africa | 0.7 / 0.1 | **5.0 / 1.3** |
+| 東亞 / East Asia | 4.3 / 9.0 | **7.1 / 6.0** |
+| 澳洲北部 / N Australia | 3.7 / 2.9 | **2.7 / 5.0** |
+| 南美 / South America | 1.6 / 6.3 | **1.1 / 7.4** |
+
+這證實了 2.2 的診斷：季風由海陸熱力對比驅動，而在灰體模式中這個對比完全取決於代表「雲＋地表」的反照率。代價是氣候偏暖（全球平均 ~295 K、撒哈拉夏季 325 K、可降水量 ~33 kg/m²），因為灰體水汽回饋很強。折衷值 0.34 的積分進行中；真正的解法仍是 R7（有雲的非灰體輻射，讓陸地與海洋的反照率各自來自雲量與地表）。
+This confirms the diagnosis in 2.2: the monsoon is driven by the land–sea thermal contrast, and in a gray model that contrast is set entirely by the albedo that stands in for clouds plus surface. The price is a warm climate (global mean about 295 K, Sahara summer 325 K, precipitable water about 33 kg/m²) because the gray water-vapour feedback is strong. A compromise run at 0.34 is in progress; the real fix is still R7 (non-gray radiation with clouds, so land and ocean albedo come from cloud cover and surface separately).
+
+### 2.5 綜觀天氣 / Synoptic weather
 
 `node dist/tools/runSynoptic.js results/EARTH_T21 300 3 24`
 
@@ -115,8 +134,8 @@ A single northern-winter (December) snapshot: sea-level pressure contours (4 hPa
 | 雨 / qr max (g/kg) | 0.85 | 9.18 | 8.89 | 9.02 | 10.7 |
 | 最大累積降水 / max accumulated precipitation (mm) | 0 | 2.5 | 30.8 | 32.1 | 32.1 |
 
-暖泡在 15 分鐘內成為深對流，30 分鐘時雲頂達對流層頂（~14 km），並維持 2 小時。冰相自然分層：−40 °C 以上的過冷雲水被霰凇附（霰／冰雹核心 11–15 g/kg），砧狀雲由雲冰與雪組成，霰在融化層以下融成雨；−40 °C 以下沒有液態水（測試 6）。與 Kessler 暖雨版本相比，同樣的上升氣流強度（30–40 m/s），但地面最大累積降水 32 mm 對 81 mm：更多凝結物以冰的形式被帶進砧狀雲，降水效率較低。
-The bubble becomes deep convection within 15 minutes, reaches the tropopause (about 14 km) by 30 minutes and persists for 2 hours. The ice phases sort themselves out: supercooled water is rimed onto graupel (graupel/hail cores of 11–15 g/kg), the anvil is cloud ice and snow, and graupel melts to rain below the melting level. No liquid survives below −40 °C (test 6). Compared with the Kessler warm-rain run, updrafts are similar (30–40 m/s) but the maximum surface accumulation is 32 mm against 81 mm: more condensate is carried into the anvil as ice, so precipitation efficiency is lower.
+暖泡在 15 分鐘內成為深對流，30 分鐘時雲頂達對流層頂（~14 km），並維持 2 小時；60 分鐘時已分裂成左右對稱的兩個旋轉上升氣流（單向風切下的右移與左移胞）。x–z 剖面中霰核心位於上升氣流內、達 12 km，雲冰與雪組成的砧狀雲向下風延伸約 40 km。冰相自然分層：−40 °C 以上的過冷雲水被霰凇附（霰／冰雹核心 11–15 g/kg），砧狀雲由雲冰與雪組成，霰在融化層以下融成雨；−40 °C 以下沒有液態水（測試 6）。與 Kessler 暖雨版本相比，同樣的上升氣流強度（30–40 m/s），但地面最大累積降水 32 mm 對 81 mm：更多凝結物以冰的形式被帶進砧狀雲，降水效率較低。
+The bubble becomes deep convection within 15 minutes, reaches the tropopause (about 14 km) by 30 minutes and persists for 2 hours. By 60 minutes it has split into two mirror-image rotating updrafts (right- and left-movers, as expected in straight-line shear). In the x–z section the graupel core sits in the updraft up to 12 km and the ice/snow anvil extends about 40 km downshear. The ice phases sort themselves out: supercooled water is rimed onto graupel (graupel/hail cores of 11–15 g/kg), the anvil is cloud ice and snow, and graupel melts to rain below the melting level. No liquid survives below −40 °C (test 6). Compared with the Kessler warm-rain run, updrafts are similar (30–40 m/s) but the maximum surface accumulation is 32 mm against 81 mm: more condensate is carried into the anvil as ice, so precipitation efficiency is lower.
 
 ![w 4 km](results/supercell_ice_w4km_60.svg)
 ![liquid section](results/supercell_ice_xz_liquid_60.svg)
