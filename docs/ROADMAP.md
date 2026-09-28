@@ -1,9 +1,25 @@
 # 待辦清單 / Roadmap
 
-使用者確認的順序：**先單獨處理效能**，其餘之後依序進行。
-User-agreed order: performance first, then the rest.
+效能（含「先粗後細」細化）已完成。使用者不要：垂直網格下密上疏、聲波子步 6→4、移動巢狀、GPU 深度優化
+（龍捲項目是否例外使用地面垂直加密，做到時再問使用者）。
+Performance work (incl. coarse-to-fine refinement) is done. The user declined: stretched vertical grid,
+fewer acoustic substeps, moving nests, deep GPU optimisation (ask again before using near-ground vertical
+refinement for the tornado item).
 
-## 1. 區域模式效能（進行中）/ Regional-model performance (in progress)
+## 執行順序 / Order
+1. 存檔讀檔（第 8 節）→ 2. 速度控制（第 2 節）＋無人值守實驗與自動回報 → 3. 區域模式圖表（第 3 節）
+→ 4. 軸對稱快速版颱風模式 → 颱風雨帶（第 4 節）→ 多重眼牆（第 5 節）→ 5. 龍捲（第 6 節）→ 6. 互動（第 7 節）
+
+## 縮短測試的方法（使用者同意）/ Faster testing (agreed)
+- 從成熟狀態存檔開始測，只跑幾個模式小時（用存檔讀檔機制）
+- 軸對稱（半徑–高度）颱風快速版：幾分鐘跑數天，先篩選參數再到 3D 確認
+- 早期指標：外圍慣性穩定度、外圍對流、地面渦度等，提早判斷設定是否有希望
+- 單項小測試（例如給定風速海溫的蒸發量）
+- 4 個 CPU 核心同時跑多組參數（Node，背景）；長時間測試不畫畫面、只記數字；數值爆掉或無望時自動停止
+- 無人值守實驗：使用者按一鍵讓頁面跑一整晚，結果自動存進 Artifact 資料庫供開發者讀取
+- 不使用：在使用者電腦上跑 Claude Code（使用者覺得麻煩）
+
+## 1. 區域模式效能（已完成）/ Regional-model performance (done)
 - 效能分析按鈕：每個 GPU kernel 耗時（timestamp query），在使用者的 GTX 1650 上量測
 - kernel 合併、記憶體存取優化
 - 數值設定：聲波子步 6 → 4、垂直網格下密上疏（需穩定性測試）
