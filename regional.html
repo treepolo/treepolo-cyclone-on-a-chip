@@ -88,6 +88,11 @@ a{color:#8fc1ff}
 <pre id="profileOut" class="log" style="max-height:320px;user-select:text"></pre>
 <h2>紀錄 / Log</h2><div id="log" class="log"></div>
 </section>
+<script>
+// Opened on its own, this page has no artifact runtime (database, downloads): only the main page gets
+// it. Continue in regional mode inside the main page instead (the global model stays idle there).
+if (window.parent === window && !window.claude && !/[?&]standalone/.test(location.search)) location.replace('index.html#regional');
+</script>
 <script type="module" src="./dist/app/regional/main.js"></script>
 </body>
 </html>

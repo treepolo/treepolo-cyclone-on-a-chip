@@ -315,15 +315,16 @@ $('embed').onclick = (): void => {
 };
 $('unembed').onclick = stopEmbed;
 // the regional page opens in the same in-page overlay (it then reaches the artifact capabilities of this page)
-$('openRegional').onclick = (ev): void => {
-  ev.preventDefault();
+function openRegional(): void {
   nestReady = false; pendingNest = null;
   const frame = $<HTMLIFrameElement>('nestFrame');
   frame.src = 'regional.html';
   $('nestOverlay').hidden = false;
   nestWin = frame.contentWindow;
-};
+}
+$('openRegional').onclick = (ev): void => { ev.preventDefault(); openRegional(); };
 $('nestClose').onclick = (): void => {
+  if (!globalStarted) { globalStarted = true; history.replaceState(null, '', location.pathname + location.search); init(); }
   $('nestOverlay').hidden = true;
   $<HTMLIFrameElement>('nestFrame').src = 'about:blank';
   nestWin = null;
@@ -387,7 +388,9 @@ function init(state?: ArrayBuffer): void {
   send({ type: 'init', preset, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu', spinup: $<HTMLInputElement>('spinup').checked, ...(state ? { state } : {}) });
   send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 }
-init();
+// index.html#regional (e.g. regional.html opened on its own): regional mode first, global model idle until "back"
+let globalStarted = location.hash !== '#regional';
+if (globalStarted) init(); else openRegional();
 window.addEventListener('resize', drawZonal);
 
 let last = performance.now();

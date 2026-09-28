@@ -7,6 +7,9 @@ import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalEx
 
 const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tornado: '250 m' };
 
+// Opened on its own without the artifact runtime: regional.html redirects to the main page (see the
+// inline script there); stop here instead of starting a model that is about to be unloaded.
+if (window.parent === window && !(window as unknown as { claude?: unknown }).claude && !/[?&]standalone/.test(location.search)) await new Promise(() => {});
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const log = (s: string): void => { const el = $('log'); el.textContent = `${s}\n${el.textContent ?? ''}`.slice(0, 3000); };
 const view = new VolumeView($<HTMLCanvasElement>('view'));
