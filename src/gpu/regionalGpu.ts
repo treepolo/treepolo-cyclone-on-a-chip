@@ -15,6 +15,9 @@ const GX = 32768;
 /** kernel passes per command buffer: about PASS_CELLS / grid size (at least 4) */
 const PASS_CELLS = 2e7;
 type Pass = ((pass: GPUComputePassEncoder) => void) & { label: string };
+/** values per column in the display readback (see readDisplay) */
+export const COL = 8;
+export interface DisplayPlanes { u: Float32Array; v: Float32Array; w: Float32Array; wTop: Float32Array; th: Float32Array; pp: Float32Array; sc: Float32Array[] }
 const linearGid = (code: string): string => code.replace(/fn main\(@builtin\(global_invocation_id\) gid: vec3<u32>\) \{/g,
   `fn main(@builtin(global_invocation_id) gid3: vec3<u32>) { let gid = vec3<u32>(gid3.x + gid3.y * ${GX * WG}u, 0u, 0u);`);
 
@@ -268,7 +271,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
 
   /** Release GPU buffers. */
   destroy(): void {
-    for (const b of [this.S, this.S0, this.F, this.aux, this.TR, this.FT, this.CF, this.B, this.R, this.disp?.D, this.disp?.C, this.cflK?.out, ...this.params]) b?.destroy();
+    for (const b of [this.S, this.S0, this.F, this.aux, this.TR, this.FT, this.CF, this.B, this.R, this.disp?.D, this.disp?.C, this.disp?.LB, this.disp?.MODE, this.cflK?.out, this.rzK?.RP, this.rzK?.O, ...this.params]) b?.destroy();
   }
 
   /** Change the time step (all kernels take it from the per-stage uniforms). */
@@ -404,56 +407,90 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return { method: ts ? 'gpu-timestamps' : 'cpu-timing', total: rows.reduce((a, r) => a + r.ms, 0), rows };
   }
 
-  private disp: { pipe: GPUComputePipeline; bind: GPUBindGroup; D: GPUBuffer; C: GPUBuffer } | null = null;
+  private disp: { pipe: GPUComputePipeline; bind: GPUBindGroup; D: GPUBuffer; C: GPUBuffer; LB: GPUBuffer; MODE: GPUBuffer } | null = null;
 
   /**
    * Display data without reading the whole state back: a GPU kernel packs cloud (qc + qi) and
    * precipitation (qr + qs + qg) bytes per cell and per-column extremes; only those, the requested
    * horizontal planes of u, v, theta, pi' and the surface precipitation accumulations are copied.
    */
-  async readDisplay(levels: number[]): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, { u: Float32Array; v: Float32Array; th: Float32Array; pp: Float32Array }>; rain: Float32Array; snow: Float32Array }> {
-    const m = this.cpu, { nx, ny, nz } = m.c, n = nx * ny * nz, dev = this.device, PL = m.plane, SIZE = m.size;
+  /** Display readback. `packed`: per cell cloud byte | channel-2 byte << 8 (channel 2: precipitation, or
+   *  with `volMode` 1 updraft w, 2 cyclonic vertical vorticity); `col` (COL values per column): w max, w min,
+   *  condensate max, precipitation max, column-max reflectivity (dBZ), cloud-top height (m), cloud-top
+   *  temperature (K), 2-5 km updraft helicity (m^2/s^2); `planes`: every prognostic field at the requested
+   *  levels (w also at the level above); accumulated rain and snow at level 0. */
+  async readDisplay(levels: number[], volMode = 0): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, DisplayPlanes>; rain: Float32Array; snow: Float32Array }> {
+    const m = this.cpu, { nx, ny, nz, dx, dy } = m.c, n = nx * ny * nz, dev = this.device, PL = m.plane, SIZE = m.size, NFp = this.nf;
     if (!this.disp) {
       const code = `
-const NX: u32 = ${nx}u; const NY: u32 = ${ny}u; const NZ: u32 = ${nz}u; const HH: u32 = ${H}u; const SX: u32 = ${m.sx}u; const PL: u32 = ${PL}u; const SIZE: u32 = ${SIZE}u; const ICE: bool = ${this.nq === 6};
+const NX: u32 = ${nx}u; const NY: u32 = ${ny}u; const NZ: u32 = ${nz}u; const HH: u32 = ${H}u; const SX: u32 = ${m.sx}u; const PL: u32 = ${PL}u; const SIZE: u32 = ${SIZE}u; const ICE: bool = ${this.nq === 6}; const MOIST: bool = ${this.nq > 0};
+const DX: f32 = ${dx}; const DY: f32 = ${dy}; const COL: u32 = ${COL}u;
 @group(0) @binding(0) var<storage, read> S: array<f32>;
 @group(0) @binding(1) var<storage, read_write> D: array<u32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
+@group(0) @binding(3) var<storage, read> LB: array<f32>;     // per level: pi0, rho0, zc, dz
+@group(0) @binding(4) var<uniform> MODE: vec4<u32>;
+fn cs(f: u32, q: u32) -> f32 { return select(0.0, S[f * SIZE + q], MOIST); }
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
   if (t >= NX * NY) { return; }
   let j = t / NX; let i = t % NX;
-  var wmax = 0.0; var wmin = 0.0; var cmax = 0.0; var pmax = 0.0;
+  var wmax = 0.0; var wmin = 0.0; var cmax = 0.0; var pmax = 0.0; var zmax = 0.0; var ctz = 0.0; var ctt = 0.0; var uh = 0.0;
   for (var k = 0u; k < NZ; k++) {
     let q = k * PL + (j + HH) * SX + (i + HH);
-    var cl = S[6u * SIZE + q]; var pr = S[7u * SIZE + q];
-    if (ICE) { cl += S[8u * SIZE + q]; pr += S[9u * SIZE + q] + S[10u * SIZE + q]; }
+    var cl = cs(6u, q); var pr = cs(7u, q);
+    var qs = 0.0; var qg = 0.0;
+    if (ICE) { cl += S[8u * SIZE + q]; qs = max(S[9u * SIZE + q], 0.0); qg = max(S[10u * SIZE + q], 0.0); pr += qs + qg; }
     cl = max(cl, 0.0); pr = max(pr, 0.0);
+    let rho = LB[4u * k + 1u];
+    // reflectivity factor (mm^6 m^-3) from rain, snow and graupel contents (kg m^-3)
+    let zr = 3.63e9 * pow(rho * max(cs(7u, q), 0.0), 1.75) + 9.80e8 * pow(rho * qs, 1.75) + 4.33e10 * pow(rho * qg, 1.75);
+    zmax = max(zmax, zr);
+    let wc = 0.5 * (S[2u * SIZE + q] + S[2u * SIZE + q + PL]);
+    let zeta = 0.25 * ((S[SIZE + q + 1u] + S[SIZE + q + 1u + SX]) - (S[SIZE + q - 1u] + S[SIZE + q - 1u + SX])) / DX
+             - 0.25 * ((S[q + SX] + S[q + SX + 1u]) - (S[q - SX] + S[q - SX + 1u])) / DY;
+    let zc = LB[4u * k + 2u];
+    if (zc >= 2000.0 && zc <= 5000.0) { uh += wc * zeta * LB[4u * k + 3u]; }
+    if (cl > 1e-5) { ctz = zc; ctt = S[3u * SIZE + q] * (LB[4u * k] + S[4u * SIZE + q]); }
     let cb = u32(min(255.0, round(sqrt(cl / 3e-3) * 255.0)));
-    let pb = u32(min(255.0, round(sqrt(pr / 8e-3) * 255.0)));
+    var v2 = sqrt(pr / 8e-3);
+    if (MODE.x == 1u) { v2 = sqrt(max(wc, 0.0) / 40.0); }
+    if (MODE.x == 2u) { v2 = sqrt(max(zeta, 0.0) / 0.05); }
+    let pb = u32(min(255.0, round(v2 * 255.0)));
     D[(k * NY + j) * NX + i] = cb | (pb << 8u);
     let w = S[2u * SIZE + q];
     wmax = max(wmax, w); wmin = min(wmin, w); cmax = max(cmax, cl); pmax = max(pmax, pr);
   }
-  C[4u * t] = wmax; C[4u * t + 1u] = wmin; C[4u * t + 2u] = cmax; C[4u * t + 3u] = pmax;
+  if (ctz == 0.0) { let q0 = (j + HH) * SX + (i + HH); ctt = S[3u * SIZE + q0] * (LB[0] + S[4u * SIZE + q0]); }
+  C[COL * t] = wmax; C[COL * t + 1u] = wmin; C[COL * t + 2u] = cmax; C[COL * t + 3u] = pmax;
+  C[COL * t + 4u] = 10.0 * log(max(zmax, 1e-3)) / log(10.0); C[COL * t + 5u] = ctz; C[COL * t + 6u] = ctt; C[COL * t + 7u] = uh;
 }`;
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
       const D = dev.createBuffer({ size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-      const C = dev.createBuffer({ size: nx * ny * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-      const bind = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: D } }, { binding: 2, resource: { buffer: C } }] });
-      this.disp = { pipe, bind, D, C };
+      const C = dev.createBuffer({ size: nx * ny * COL * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const lb = new Float32Array(4 * nz);
+      for (let k = 0; k < nz; k++) { lb[4 * k] = m.pi0[k]!; lb[4 * k + 1] = m.rho0[k]!; lb[4 * k + 2] = m.zc[k]!; lb[4 * k + 3] = m.c.dz; }
+      const LB = dev.createBuffer({ size: lb.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      dev.queue.writeBuffer(LB, 0, lb);
+      const MODE = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const bind = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: D } }, { binding: 2, resource: { buffer: C } }, { binding: 3, resource: { buffer: LB } }, { binding: 4, resource: { buffer: MODE } }] });
+      this.disp = { pipe, bind, D, C, LB, MODE };
     }
     const d = this.disp, planeBytes = PL * 4;
-    const total = n * 4 + nx * ny * 16 + levels.length * 4 * planeBytes + 2 * planeBytes;
+    dev.queue.writeBuffer(d.MODE, 0, new Uint32Array([volMode, 0, 0, 0]));
+    const perLevel = NFp + 1;
+    const total = n * 4 + nx * ny * COL * 4 + levels.length * perLevel * planeBytes + 2 * planeBytes;
     const st = dev.createBuffer({ size: total, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = dev.createCommandEncoder();
     const pass = enc.beginComputePass(); pass.setPipeline(d.pipe); pass.setBindGroup(0, d.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny / 64)); pass.end();
     let off = 0;
     enc.copyBufferToBuffer(d.D, 0, st, off, n * 4); off += n * 4;
-    enc.copyBufferToBuffer(d.C, 0, st, off, nx * ny * 16); off += nx * ny * 16;
-    const fieldOf = [0, 1, 3, 4];     // u, v, theta, pi'
-    for (const k of levels) for (const f of fieldOf) { enc.copyBufferToBuffer(this.S, (f * SIZE + k * PL) * 4, st, off, planeBytes); off += planeBytes; }
+    enc.copyBufferToBuffer(d.C, 0, st, off, nx * ny * COL * 4); off += nx * ny * COL * 4;
+    for (const k of levels) {
+      for (let f = 0; f < NFp; f++) { enc.copyBufferToBuffer(this.S, (f * SIZE + k * PL) * 4, st, off, planeBytes); off += planeBytes; }
+      enc.copyBufferToBuffer(this.S, (2 * SIZE + (k + 1) * PL) * 4, st, off, planeBytes); off += planeBytes;   // w above
+    }
     enc.copyBufferToBuffer(this.aux, 2 * SIZE * 4, st, off, planeBytes); off += planeBytes;
     enc.copyBufferToBuffer(this.aux, 3 * SIZE * 4, st, off, planeBytes);
     dev.queue.submit([enc.finish()]);
@@ -462,13 +499,119 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     st.unmap(); st.destroy();
     let o = 0;
     const packed = new Uint32Array(buf, o, n); o += n * 4;
-    const col = new Float32Array(buf, o, nx * ny * 4); o += nx * ny * 16;
-    const planes = new Map<number, { u: Float32Array; v: Float32Array; th: Float32Array; pp: Float32Array }>();
-    for (const k of levels) { const g = (): Float32Array => { const a = new Float32Array(buf, o, PL); o += planeBytes; return a; }; planes.set(k, { u: g(), v: g(), th: g(), pp: g() }); }
+    const col = new Float32Array(buf, o, nx * ny * COL); o += nx * ny * COL * 4;
+    const planes = new Map<number, DisplayPlanes>();
+    for (const k of levels) {
+      const g = (): Float32Array => { const a = new Float32Array(buf, o, PL); o += planeBytes; return a; };
+      const f: Float32Array[] = []; for (let i = 0; i < NFp; i++) f.push(g());
+      planes.set(k, { u: f[0]!, v: f[1]!, w: f[2]!, th: f[3]!, pp: f[4]!, sc: f.slice(5), wTop: g() });
+    }
     const rain = new Float32Array(buf, o, PL); o += planeBytes;
     const snow = new Float32Array(buf, o, PL);
     return { packed, col, planes, rain, snow };
   }
+
+  /** Column profiles at grid columns (i, j): per point, per level, the cell-centred u, v, w, theta, pi' and
+   *  moisture species (NF values). For cross-sections and soundings. */
+  async readColumns(points: { i: number; j: number }[]): Promise<Float32Array> {
+    const m = this.cpu, { nx, ny, nz } = m.c, dev = this.device, NF = this.nf, np = Math.max(1, points.length);
+    if (!this.colK) {
+      const code = this.consts + `
+@group(0) @binding(0) var<storage, read> S: array<f32>;
+@group(0) @binding(1) var<storage, read> PTS: array<u32>;
+@group(0) @binding(2) var<storage, read_write> O: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  let np = arrayLength(&PTS) / 2u;
+  if (t >= np * NZ) { return; }
+  let p = t / NZ; let k = t % NZ;
+  let q = ix(min(PTS[2u * p], NX - 1u), min(PTS[2u * p + 1u], NY - 1u), k);
+  let o = (p * NZ + k) * NFLD;
+  O[o] = 0.5 * (S[q] + S[q + 1u]);
+  O[o + 1u] = 0.5 * (S[SIZE + q] + S[SIZE + q + SX]);
+  O[o + 2u] = 0.5 * (S[2u * SIZE + q] + S[2u * SIZE + q + PL]);
+  for (var f = 3u; f < NFLD; f++) { O[o + f] = S[f * SIZE + q]; }
+}`;
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
+      this.colK = { pipe };
+    }
+    const pts = new Uint32Array(2 * np); points.forEach((pt, i) => { pts[2 * i] = Math.max(0, Math.min(nx - 1, pt.i)); pts[2 * i + 1] = Math.max(0, Math.min(ny - 1, pt.j)); });
+    const P = dev.createBuffer({ size: pts.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }); dev.queue.writeBuffer(P, 0, pts);
+    const bytes = np * nz * NF * 4;
+    const O = dev.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const st = dev.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const bind = dev.createBindGroup({ layout: this.colK.pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: P } }, { binding: 2, resource: { buffer: O } }] });
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    pass.setPipeline(this.colK.pipe); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(Math.ceil(np * nz / 64)); pass.end();
+    enc.copyBufferToBuffer(O, 0, st, 0, bytes);
+    dev.queue.submit([enc.finish()]);
+    await st.mapAsync(GPUMapMode.READ);
+    const out = new Float32Array(st.getMappedRange().slice(0));
+    st.unmap(); for (const b of [st, O, P]) b.destroy();
+    return out;
+  }
+  private colK: { pipe: GPUComputePipeline } | null = null;
+
+  /** Azimuthal means about (xc, yc) (m from the domain origin) in nr rings of width dr, per level:
+   *  tangential wind, radial wind, w, theta - theta0, total condensate (5 values per ring and level). */
+  async readRZ(xc: number, yc: number, dr: number, nr: number): Promise<Float32Array> {
+    const m = this.cpu, { nz } = m.c, dev = this.device;
+    if (!this.rzK) {
+      const th0 = Array.from(m.th0).slice(0, nz).map((x) => x.toFixed(6)).join(', ');
+      const code = this.consts + `
+@group(0) @binding(0) var<storage, read> S: array<f32>;
+@group(0) @binding(1) var<uniform> RP: vec4<f32>;          // xc, yc, dr, nr
+@group(0) @binding(2) var<storage, read_write> O: array<f32>;
+const TH0 = array<f32, NZ>(${th0});
+fn cellAt(x: f32, y: f32) -> vec2<i32> {
+  var i = i32(floor(x / DX)); var j = i32(floor(y / DY));
+  if (OPEN) { i = clamp(i, 0, i32(NX) - 1); j = clamp(j, 0, i32(NY) - 1); }
+  else { i = ((i % i32(NX)) + i32(NX)) % i32(NX); j = ((j % i32(NY)) + i32(NY)) % i32(NY); }
+  return vec2<i32>(i, j);
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let nr = u32(RP.w);
+  let t = gid.x;
+  if (t >= nr * NZ) { return; }
+  let ir = t / NZ; let k = t % NZ;
+  let r = (f32(ir) + 0.5) * RP.z;
+  let na = max(16u, min(256u, u32(6.2832 * r / (0.5 * DX))));
+  var vt = 0.0; var vr = 0.0; var ww = 0.0; var tp = 0.0; var cd = 0.0;
+  for (var a = 0u; a < na; a++) {
+    let ang = 6.2831853 * (f32(a) + 0.5) / f32(na);
+    let ca = cos(ang); let sa = sin(ang);
+    let c = cellAt(RP.x + r * ca, RP.y + r * sa);
+    let q = ix(u32(c.x), u32(c.y), k);
+    let uc = 0.5 * (S[q] + S[q + 1u]); let vc = 0.5 * (S[SIZE + q] + S[SIZE + q + SX]);
+    vt += -uc * sa + vc * ca; vr += uc * ca + vc * sa;
+    ww += 0.5 * (S[2u * SIZE + q] + S[2u * SIZE + q + PL]);
+    tp += S[3u * SIZE + q] - TH0[k];
+    if (MOIST) { for (var f = 6u; f < NFLD; f++) { cd += max(S[f * SIZE + q], 0.0); } }
+  }
+  let inv = 1.0 / f32(na), o = 5u * t;
+  O[o] = vt * inv; O[o + 1u] = vr * inv; O[o + 2u] = ww * inv; O[o + 3u] = tp * inv; O[o + 4u] = cd * inv;
+}`;
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
+      const RP = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.rzK = { pipe, RP, O: null };
+    }
+    const k = this.rzK, bytes = nr * nz * 5 * 4;
+    if (!k.O || k.O.size !== bytes) { k.O?.destroy(); k.O = dev.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }); }
+    dev.queue.writeBuffer(k.RP, 0, new Float32Array([xc, yc, dr, nr]));
+    const bind = dev.createBindGroup({ layout: k.pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: k.RP } }, { binding: 2, resource: { buffer: k.O } }] });
+    const st = dev.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    pass.setPipeline(k.pipe); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(Math.ceil(nr * nz / 64)); pass.end();
+    enc.copyBufferToBuffer(k.O, 0, st, 0, bytes);
+    dev.queue.submit([enc.finish()]);
+    await st.mapAsync(GPUMapMode.READ);
+    const out = new Float32Array(st.getMappedRange().slice(0));
+    st.unmap(); st.destroy();
+    return out;
+  }
+  private rzK: { pipe: GPUComputePipeline; RP: GPUBuffer; O: GPUBuffer | null } | null = null;
 
   /** Accumulated frozen precipitation (snow + graupel + ice) at level 0, same layout as readRain. */
   async readSnow(): Promise<Float32Array> { const b = this.cpu.size * 4; const all = await this.readBuffer(this.aux, 4 * b); return all.slice(3 * this.cpu.size, 4 * this.cpu.size); }

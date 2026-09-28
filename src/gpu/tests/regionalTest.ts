@@ -3,7 +3,7 @@ import { RegionalModel } from '../../regional/core.js';
 import { KesslerMicrophysics, weismanKlemp, QV, QC, QR } from '../../regional/kessler.js';
 import { RegionalPhysics } from '../../regional/physics.js';
 import { tropicalSounding, insertVortex } from '../../regional/tropical.js';
-import { GpuRegional } from '../regionalGpu.js';
+import { GpuRegional, COL } from '../regionalGpu.js';
 import { gcheck, getDevice } from './harness.js';
 import { nestFromGlobal, GlobalSnapshot } from '../../regional/nest.js';
 import { IceMicrophysics, QI, QS, QG } from '../../regional/ice.js';
@@ -198,7 +198,7 @@ export async function regionalAdaptiveTest(): Promise<void> {
     }
     const d = await g.readDisplay([0]);
     let wmax = 0, cmax = 0, rain = 0;
-    for (let c = 0; c < nx * nx; c++) { wmax = Math.max(wmax, d.col[4 * c]!); cmax = Math.max(cmax, d.col[4 * c + 2]!); }
+    for (let c = 0; c < nx * nx; c++) { wmax = Math.max(wmax, d.col[COL * c]!); cmax = Math.max(cmax, d.col[COL * c + 2]!); }
     for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) rain += d.rain[m.idx(i, j, 0)]!;
     const out = { wmax, cmax, rain, steps: g.steps, dtEnd: g.dt };
     g.destroy();
@@ -257,7 +257,7 @@ export async function regionalRefineTest(): Promise<void> {
   }
   const stats = async (g: GpuRegional, nx: number): Promise<{ w: number; c: number }> => {
     const d = await g.readDisplay([0]); let w = 0, c = 0;
-    for (let i = 0; i < nx * nx; i++) { w = Math.max(w, d.col[4 * i]!); c = Math.max(c, d.col[4 * i + 2]!); }
+    for (let i = 0; i < nx * nx; i++) { w = Math.max(w, d.col[COL * i]!); c = Math.max(c, d.col[COL * i + 2]!); }
     return { w, c };
   };
   const gc = new GpuRegional(device, mc, { moist: true, physics: null, ice: true });

@@ -5,7 +5,7 @@ import { weismanKlemp } from '../../regional/kessler.js';
 import { IceMicrophysics, QV, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { RegionalPhysics } from '../../regional/physics.js';
 import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../../regional/tropical.js';
-import { GpuRegional } from '../../gpu/regionalGpu.js';
+import { GpuRegional, COL } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { refineInto } from '../../regional/refine.js';
@@ -461,7 +461,7 @@ async function sendFrame(): Promise<void> {
     const tNow = gpu.time, sNow = gpu.steps;
     if (running) { gpu.step(gpuBatch); rateSteps += gpuBatch; }
     for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; }
-    for (let c = 0; c < nx * ny; c++) { wmax = Math.max(wmax, d.col[4 * c]!); wmin = Math.min(wmin, d.col[4 * c + 1]!); qcmax = Math.max(qcmax, d.col[4 * c + 2]!); qrmax = Math.max(qrmax, d.col[4 * c + 3]!); }
+    for (let c = 0; c < nx * ny; c++) { wmax = Math.max(wmax, d.col[COL * c]!); wmin = Math.min(wmin, d.col[COL * c + 1]!); qcmax = Math.max(qcmax, d.col[COL * c + 2]!); qrmax = Math.max(qrmax, d.col[COL * c + 3]!); }
     for (const [k, pl] of d.planes) { const o = k * m.plane; m.u.set(pl.u, o); m.v.set(pl.v, o); m.th.set(pl.th, o); m.pp.set(pl.pp, o); }
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = m.idx(i, j, 0); mp.rainAcc[j * nx + i] = d.rain[q]!; mp.snowAcc[j * nx + i] = d.snow[q]!; }
     m.time = tNow; m.steps = sNow;
