@@ -195,6 +195,37 @@ before a 3-D run. Tests: rest stays at rest, a balanced vortex stays steady for 
 with mixing), an axisymmetric warm bubble grows into a raining deep updraft (`node dist/tests/axisym.js`).
 Sweeps: `node dist/tools/runAxisym.js days=6 sweep=vmin:1,3,5`（每個 CPU 核心一組 / one run per CPU core）.
 
+### 4.3c 雨帶與雙眼牆：軸對稱篩選 / Rainbands and concentric eyewalls: axisymmetric screening
+`node dist/tools/runAxisym.js days=8 dr=4000 cases='base|vmin:4|radc:1|rh12:0.6|radc:1.5+vmin:4|radc:2+vmin:4'`
+（CSV 另有核心 < 60 km 與外圍 100–300 km 的平均降雨率、外圍雨環數 / the CSV also has core and outer mean rain rates and the number of outer rain rings）
+
+成熟期（最大風首次 ≥ 40 m/s 之後）的平均 / Means over the mature stage (after Vmax first reaches 40 m/s):
+
+| 設定 / Setting (Δr 4 km) | 外圍雨量 / Outer rain (mm/h) | 外圍雨環 / Outer rings | 核心雨量 / Core rain (mm/h) | RMW (km) |
+|---|---|---|---|---|
+| 基準 / baseline（vmin 1、向探空鬆弛 / relaxation） | 0.03–0.05 | 3–4 | 23–25 | 20–25 |
+| vmin 4 m/s | 0.25 | 7 | 18 | 20 |
+| 固定冷卻 / constant cooling 1 K/day | 0.30 | 3 | 17 | 14 |
+| 12 km RH 0.6 | 0.02 | 2–3 | 28 | 21 |
+| vmin 4 ＋ 冷卻 / cooling 1.5 K/day | 0.24 | 5 | 6 | 7 |
+| vmin 4 ＋ 冷卻 / cooling 2 K/day | 0.32 | 6 | 2 | 5 |
+| vmin 4，Δr 2 km，10 天 / 10 days | 0.01 | 6 | 16 | 11 |
+
+- 軸對稱模式裡，成熟颱風外圍幾乎不下雨；最小陣風 4 m/s 或固定冷卻能保留一些外圍雨（0.25–0.3 mm/h），但固定冷卻會讓
+  眼牆一路收縮到軸心附近（RMW 5–7 km、核心雨量掉到 2–6 mm/h），是軸對稱模式的已知弱點；中層較濕沒有幫助。
+  解析度加倍（Δr 2 km）後，vmin 4 的外圍雨又掉回 0.01 mm/h，所以軸對稱的外圍雨是很弱、依賴解析度的訊號：
+  雨帶本質上是非軸對稱的，要以 3D 結果為準（下一節）。
+- 雙眼牆：Δr 2 km（vmin 4）、Δr 4 km 海溫 30 °C、Δr 4 km 緯度 30°，各積分 10 天，全部只有單一眼牆，收縮到半徑 9–12 km 後維持
+  （最大風 67–75 m/s）；沒有出現次眼牆。軸對稱模式沒有外圍雨帶（上表），缺少次眼牆最常見的來源，所以雙眼牆要靠 3D 3 km（GPU）。
+- In the axisymmetric model a mature storm has almost no outer rain; a 4 m/s minimum wind or constant cooling keeps some
+  (0.25–0.3 mm/h), but constant cooling lets the eyewall contract nearly to the axis (RMW 5–7 km, core rain down to 2–6 mm/h), a known
+  weakness of axisymmetric models; a moister mid troposphere does not help. At twice the resolution (Δr 2 km) the vmin-4 outer rain drops
+  back to 0.01 mm/h, so the axisymmetric outer rain is a weak, resolution-dependent signal: rainbands are inherently asymmetric, and the
+  3-D runs decide (next section).
+- Concentric eyewalls: Δr 2 km (vmin 4), Δr 4 km with a 30 °C sea, and Δr 4 km at 30° latitude, ten days each, all keep a single eyewall
+  that contracts to 9–12 km and stays there (67–75 m/s); no secondary eyewall forms. Without outer rainbands (above), the axisymmetric
+  model lacks the usual source of a secondary eyewall, so concentric eyewalls are left to the 3-D 3 km run (GPU).
+
 ### 4.4 單向巢狀：全球模式中的區域預報 / One-way nest inside the Earth model
 `node dist/tools/runNest.js results/EARTH_T21 auto 30 24 20`
 
@@ -243,6 +274,26 @@ lifecycle of about 20–25 minutes produced by the equations alone. The former W
 two hours. At 500 m the vortex is only a few cells wide; at 250 m (GPU) it should be narrower and stronger.
 
 ![3 km vorticity at 90 min](results/tornado_strongLLS_vort3km_90.svg)
+
+### 4.6 區域模式圖表範例 / Chart examples
+網頁「區域模式」主畫面的圖表（本環境用 CPU 先跑出成熟狀態存檔，再匯入頁面截圖）。
+Charts on the regional page (mature states computed on the CPU here, saved, and loaded into the page for the screenshots).
+
+超大胞（WK82 環境、2 km、45 分鐘）：地面氣塊斜溫圖（CAPE/CIN 陰影、風標）與風徑圖（Bunkers 右移胞、0–1 / 0–3 km SRH）；
+沿風暴畫的雷達回波剖面（白線雲邊界、藍虛線 0 °C、剖面內風向量）。
+Supercell (WK82 environment, 2 km, 45 min): skew-T with the surface parcel (CAPE/CIN shading, barbs) and hodograph (Bunkers right
+mover, 0–1 / 0–3 km SRH); a reflectivity cross-section through the storm (cloud edge, 0 °C line, in-plane wind).
+
+![sounding](results/charts_supercell_sounding.png)
+![section](results/charts_supercell_section.png)
+
+軸對稱颱風（28 °C、Δr 4 km，約 131 小時，最大風 71–76 m/s、RMW 10 km）：通過中心的雷達回波剖面（眼、眼牆、0 °C 融解層、
+15 km 外流）與方位平均切向風（白線：上升速度每 2 m/s）。
+Axisymmetric tropical cyclone (28 °C, Δr 4 km, about 131 h, 71–76 m/s, RMW 10 km): reflectivity through the centre (eye, eyewall,
+melting level, 15 km outflow) and the azimuthal-mean tangential wind (white: vertical velocity every 2 m/s).
+
+![tc section](results/charts_axisym_section.png)
+![tc r-z](results/charts_axisym_rz.png)
 
 ## 5. 尚未達成 / Not yet achieved
 

@@ -7,7 +7,7 @@ import { AxisymModel, HA, type AxisymConfig } from '../../regional/axisym.js';
 import { IceMicrophysics, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { tropicalSounding, eyewallPeaks } from '../../regional/tropical.js';
 import { SECTION_VARS, sectionValues, parcelAscent, pressure, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
-import type { ChartData, ChartRequest, GroundField, RegionalFrame } from './protocol.js';
+import type { ChartData, ChartRequest, GroundField, RegionalFrame, TcRain } from './protocol.js';
 
 /** User-adjustable parameters of the axisymmetric experiment. */
 export interface AxiParams {
@@ -33,6 +33,9 @@ export class AxiDriver {
   /** display grid: N x N cells of size dxv over [0, 2 D] (centre at (D, D)) */
   readonly N = 160; readonly D: number; readonly dxv: number;
   private prevRain: { t: number; acc: Float64Array } | null = null;
+  /** core / outer precipitation rates over the last completed model hour (as the 3-D experiments) */
+  private hourRain: { t: number; acc: Float64Array } | null = null;
+  private tcRain: TcRain | null = null;
   private rate: Float64Array | null = null;
 
   constructor(readonly p: AxiParams) {
@@ -148,6 +151,18 @@ export class AxiDriver {
     const acc = Float64Array.from(this.mp.rainAcc);
     if (this.prevRain && ax.time > this.prevRain.t + 1e-6) { const f = 3600 / (ax.time - this.prevRain.t); this.rate = acc.map((a, i) => Math.max(0, (a - this.prevRain!.acc[i]!) * f)); }
     if (!this.prevRain || ax.time > this.prevRain.t + 1e-6 || ax.time < this.prevRain.t) this.prevRain = { t: ax.time, acc };
+    if (!this.hourRain || ax.time < this.hourRain.t) { this.hourRain = { t: ax.time, acc }; this.tcRain = null; }
+    else if (ax.time - this.hourRain.t >= 3600 - 1e-6) {
+      // area-weighted (r dr) means over the core (< 60 km) and the outer region (100-300 km); outer area fraction above 1 mm/h
+      const f = 3600 / (ax.time - this.hourRain.t);
+      let sc = 0, wc = 0, so = 0, wo = 0, wet = 0;
+      for (let i = 0; i < nr; i++) {
+        const r = ax.rc[i + HA]!, rate = Math.max(0, acc[i]! - this.hourRain.acc[i]!) * f;
+        if (r < 60000) { sc += rate * r; wc += r; } else if (r >= 100000 && r < 300000) { so += rate * r; wo += r; if (rate > 1) wet += r; }
+      }
+      this.tcRain = { core: wc ? sc / wc : 0, outer: wo ? so / wo : 0, wet: wo ? wet / wo : 0 };
+      this.hourRain = { t: ax.time, acc };
+    }
     // per radius and level: cloud byte and channel-2 byte, revolved into the 3-D volume
     const cb = new Uint8Array(nr * nz), pb = new Uint8Array(nr * nz);
     const zetaL: (Float64Array | null)[] = volMode === 2 ? Array.from({ length: nz }, (_, k) => this.zeta(k)) : [];
@@ -191,7 +206,7 @@ export class AxiDriver {
     const msg: RegionalFrame = {
       type: 'frame', time: ax.time, nx: N, ny: N, nz, dx: this.dxv, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
       stats: { wmax, wmin: col.wmin, qcmax, qrmax, rainmax, vmax: mt.vmax, dp: mt.dp, rmw: mt.rmw, eyewalls: eyewallPeaks(rr, vt), zetaMax, vGround: mt.vmax, dbzMax, uhMax, uhMin: 0, capeMax,
-        storm: { x: origin.x + this.D, y: origin.y + this.D }, vtProfile: { dr, vt }, tornado: null },
+        storm: { x: origin.x + this.D, y: origin.y + this.D }, vtProfile: { dr, vt }, tornado: null, tcRain: this.tcRain },
       origin, charts, tracers: null, stepsPerSecond, dt: ax.a.dt,
     };
     return { msg, transfer };
@@ -300,5 +315,6 @@ export class AxiDriver {
     ax.scalars.forEach((a, i) => a.set(need(`s${i}`)));
     this.mp.rainAcc.set(need('rain')); this.mp.snowAcc.set(need('snow'));
     ax.time = time; ax.steps = steps;
+    this.prevRain = null; this.hourRain = null; this.tcRain = null;
   }
 }

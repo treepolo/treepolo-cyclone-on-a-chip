@@ -158,7 +158,7 @@ export function drawContours(ctx: CanvasRenderingContext2D, ni: number, nj: numb
       const P = [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]] as const, pts: [number, number][] = [];
       for (let e = 0; e < 4; e++) {
         const a = P[e]!, b = P[(e + 1) % 4]!, va = value(a[0], a[1]), vb = value(b[0], b[1]);
-        if ((va - L) * (vb - L) < 0) { const t = (L - va) / (vb - va); pts.push([X(a[0]) + t * (X(b[0]) - X(a[0])), Y(a[1]) + t * (Y(b[1]) - Y(a[1]))]); }
+        if ((va >= L) !== (vb >= L)) { const t = (L - va) / (vb - va); pts.push([X(a[0]) + t * (X(b[0]) - X(a[0])), Y(a[1]) + t * (Y(b[1]) - Y(a[1]))]); }
       }
       if (pts.length >= 2) { ctx.moveTo(pts[0]![0], pts[0]![1]); ctx.lineTo(pts[1]![0], pts[1]![1]); }
       if (pts.length === 4) { ctx.moveTo(pts[2]![0], pts[2]![1]); ctx.lineTo(pts[3]![0], pts[3]![1]); }

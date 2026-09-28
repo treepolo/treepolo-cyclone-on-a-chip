@@ -3,6 +3,7 @@ import type { MapVar, SliceVar, SectionVar, RzVar } from '../../regional/diagnos
 
 export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'tc_3' | 'nest' | 'tornado' | 'tornado_c' | 'tc_axi';
 /** tropical-cyclone experiments (radius-height charts, Hovmoller) */
+export interface TcRain { core: number; outer: number; wet: number }
 export const isTcExperiment = (e: RegionalExperiment): boolean => e === 'tc' || e === 'tc_hr' || e === 'tc_3' || e === 'tc_axi';
 /** coarse-to-fine refinement: each coarse spin-up experiment and the finer experiment it continues as */
 export const REFINE_TO: Partial<Record<RegionalExperiment, RegionalExperiment>> = { supercell: 'supercell_hr', tc: 'tc_hr', tc_hr: 'tc_3', tornado_c: 'tornado' };
@@ -97,6 +98,9 @@ export interface RegionalFrame {
     uhMin: number;
     /** strongest storm column (max UH, or max w before rotation): ground-relative position (m), or null */
     storm: { x: number; y: number } | null;
+    /** tropical cyclones: mean precipitation rates (mm/h) in the core (< 60 km) and the outer region (100-300 km) over the last
+     *  completed model hour, and the outer area fraction raining more than 1 mm/h (rainband diagnostics) */
+    tcRain?: TcRain | null;
     /** tropical cyclones: azimuthal-mean tangential wind at 1.5 km, rings of width dr from the centre */
     vtProfile: { dr: number; vt: number[] } | null;
     /** tornado-like vortex at the lowest level (grids of 500 m or finer): vertical vorticity >= 0.1 s^-1 with a

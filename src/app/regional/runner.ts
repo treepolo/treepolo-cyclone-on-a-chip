@@ -25,7 +25,7 @@ export interface RunHooks {
   log(s: string): void; status(s: string): void;
 }
 
-const KEYS = ['t', 'wmax', 'wmin', 'qcmax', 'qrmax', 'rainmax', 'vmax', 'dp', 'rmw', 'zeta', 'vground', 'ew1r', 'ew1v', 'ew2r', 'ew2v', 'ew3r', 'ew3v', 'dbzmax', 'uhmax', 'capemax', 'stormx', 'stormy', 'tor_ef', 'tor_v', 'tor_zeta'] as const;
+const KEYS = ['t', 'wmax', 'wmin', 'qcmax', 'qrmax', 'rainmax', 'vmax', 'dp', 'rmw', 'zeta', 'vground', 'ew1r', 'ew1v', 'ew2r', 'ew2v', 'ew3r', 'ew3v', 'dbzmax', 'uhmax', 'capemax', 'stormx', 'stormy', 'tor_ef', 'tor_v', 'tor_zeta', 'rain_core', 'rain_outer', 'wet_outer'] as const;
 
 export class UnattendedRun {
   private active = false;
@@ -62,6 +62,7 @@ export class UnattendedRun {
       zeta: s.zetaMax, vground: s.vGround, ew1r: ew[0]?.r ?? null, ew1v: ew[0]?.v ?? null, ew2r: ew[1]?.r ?? null, ew2v: ew[1]?.v ?? null, ew3r: ew[2]?.r ?? null, ew3v: ew[2]?.v ?? null,
       dbzmax: s.dbzMax, uhmax: s.uhMax, capemax: s.capeMax, stormx: s.storm?.x ?? null, stormy: s.storm?.y ?? null,
       tor_ef: s.tornado?.ef ?? null, tor_v: s.tornado?.v ?? null, tor_zeta: s.tornado?.zeta ?? null,
+      rain_core: s.tcRain?.core ?? null, rain_outer: s.tcRain?.outer ?? null, wet_outer: s.tcRain?.wet ?? null,
     };
     const ts = this.series.t!;
     if (ts.length && f.time <= (ts[ts.length - 1] as number) + 1e-6) return;     // duplicate frame

@@ -14,7 +14,7 @@ import { AxiDriver, AXI_DEFAULTS, type AxiParams } from './axiDriver.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { tornadoExperiment, StormTracker, TORNADO_DEFAULT, TORNADO_WK82, type TornadoEnv } from '../../regional/supercell.js';
-import { REFINE_TO, type ChartData, type ChartRequest, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
+import { REFINE_TO, type ChartData, type ChartRequest, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
 let m: RegionalModel | null = null;
@@ -62,11 +62,13 @@ let chartReq: ChartRequest | null = null, volMode = 0;
 // ground-relative position of the domain origin: advances with the frame velocity, jumps with rolls and refinement
 let origin = { x: 0, y: 0 }, originT = 0;
 function advanceOrigin(): void { const t = modelNow(); origin.x += frameVel.u * (t - originT); origin.y += frameVel.v * (t - originT); originT = t; }
-function resetOrigin(x = 0, y = 0): void { origin = { x, y }; originT = modelNow(); prevAcc = null; }
+function resetOrigin(x = 0, y = 0): void { origin = { x, y }; originT = modelNow(); prevAcc = null; tcAcc = null; tcRain = null; }
 // precipitation rate from the change of the accumulation between frames
 let prevAcc: { t: number; rain: Float32Array } | null = null, lastRate: Float32Array | null = null;
 const currentGpu = (): GpuRegional | null => gpu;
-const isTc = (): boolean => experiment === 'tc' || experiment === 'tc_hr';
+const isTc = (): boolean => experiment === 'tc' || experiment === 'tc_hr' || experiment === 'tc_3';
+// tropical cyclones: mean precipitation rate in the core and the outer region over the last completed hour
+let tcAcc: { t: number; rain: Float32Array } | null = null, tcRain: TcRain | null = null;
 // tracer particles (3-D view): seeded in the lowest 2 km, half of them near the storm
 let tracers: Tracers | null = null, tracerN = 0, trSeed = 1, stormDomain: { x: number; y: number } | null = null;
 function tracerParams(): TracerParams {
@@ -757,6 +759,7 @@ async function sendFrame(): Promise<void> {
   let storm: { x: number; y: number } | null = null;
   if (isTc()) {
     const r = tcMetrics(m); dp = r.pmin - dpEnv; rmw = r.rmw;
+    tcRainUpdate(r.ic, r.jc);
     const ew = eyewallProfile(m); eyewalls = ew.peaks;
     vtProfile = { dr: dx, vt: ew.vt.map((x) => +x.toFixed(2)) };
     storm = { x: origin.x + (r.ic + 0.5) * dx, y: origin.y + (r.jc + 0.5) * m.c.dy };
@@ -799,8 +802,25 @@ async function sendFrame(): Promise<void> {
   if (trOut) transfer.add(trOut.buffer as ArrayBuffer);
   stormDomain = storm ? { x: storm.x - origin.x, y: storm.y - origin.y } : stormDomain;
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
-    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, uhMin, capeMax, storm, vtProfile, tornado },
+    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, uhMin, capeMax, storm, vtProfile, tornado, tcRain: isTc() ? tcRain : null },
     origin: { ...origin }, charts, tracers: trOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
+}
+
+/** Core (< 60 km) and outer (100-300 km) mean precipitation rates around the centre (ic, jc) of the periodic domain, and the
+ *  outer area fraction above 1 mm/h, over each completed model hour (as in runTropicalCyclone.js). */
+function tcRainUpdate(ic: number, jc: number): void {
+  const mm = m!, acc = mp!.rainAcc, t = modelNow(), { nx, ny, dx, dy } = mm.c, Lx = nx * dx, Ly = ny * dy;
+  if (!tcAcc || tcAcc.rain.length !== acc.length || t < tcAcc.t) { tcAcc = { t, rain: Float32Array.from(acc) }; tcRain = null; return; }
+  if (t - tcAcc.t < 3600 - 1e-6) return;
+  const f = 3600 / (t - tcAcc.t);
+  let sc = 0, nc = 0, so = 0, no = 0, wet = 0;
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    let x = (i - ic) * dx, y = (j - jc) * dy; x -= Math.round(x / Lx) * Lx; y -= Math.round(y / Ly) * Ly;
+    const r = Math.hypot(x, y), c = j * nx + i, rate = Math.max(0, acc[c]! - tcAcc.rain[c]!) * f;
+    if (r < 60000) { sc += rate; nc++; } else if (r >= 100000 && r < 300000) { so += rate; no++; if (rate > 1) wet++; }
+  }
+  tcRain = { core: nc ? sc / nc : 0, outer: no ? so / no : 0, wet: no ? wet / no : 0 };
+  tcAcc = { t, rain: Float32Array.from(acc) };
 }
 
 function chartArrays(c: ChartData): Float32Array[] {
