@@ -59,6 +59,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('legend').textContent = `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); }
   else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
+  else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; }
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
 };
 function sync(): void { $('run').textContent = running ? '暫停 / Pause' : '執行 / Run'; send({ type: 'run', running }); }
@@ -109,3 +110,17 @@ mountSavesPanel($('saves'), 'regional',
   }),
   (_meta, data) => { running = false; sync(); send({ type: 'load', buffer: data.slice(0), backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' }); },
   log);
+// ---------------- pacing
+$('pace').onchange = (): void => send({ type: 'pace', target: Number($<HTMLSelectElement>('pace').value) });
+$('frames').onchange = (): void => {
+  const v = $<HTMLSelectElement>('frames').value;
+  send(v.startsWith('model:') ? { type: 'frames', kind: 'model', every: Number(v.slice(6)) } : { type: 'frames', kind: v as 'wall' | 'fast' });
+};
+$('step1').onclick = (): void => { if (!running) send({ type: 'step1' }); };
+$('untilGo').onclick = (): void => {
+  const h = Number($<HTMLInputElement>('untilH').value);
+  if (!(h > 0)) return;
+  send({ type: 'runUntil', hours: h });
+  running = true; sync();
+  log(`執行 ${h} 模式小時後自動暫停 / running for ${h} model hours`);
+};

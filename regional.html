@@ -46,7 +46,14 @@ a{color:#8fc1ff}
 <div id="desc" class="muted"></div>
 <p><button id="run">執行 / Run</button> <button id="refine" disabled>細化 / Refine</button></p>
 <div class="muted">先粗後細：用粗網格快速跑到有趣的階段，再按「細化」接著用細網格算（15 km → 5 km 颱風、2 km → 1 km 超大胞、1 km → 250 m 龍捲盒子，自動對準風暴）。/ Coarse to fine: spin up quickly on the coarse grid, then press Refine to continue on the finer grid (the 250 m tornado box is centred on the storm).</div>
-<label for="speed">每輪步數 / Steps per tick</label><input id="speed" type="range" min="1" max="12" value="1" />
+<div class="controls"><button id="step1">單步 / Step</button></div>
+<label for="pace">目標速度 / Target speed</label>
+<select id="pace"><option value="0">全速 / Full speed</option><option value="1">×1 真實時間 / real time</option><option value="10">×10</option><option value="60">×60（1 模式分/秒 / 1 model-min/s）</option><option value="600">×600（10 模式分/秒）</option><option value="3600">×3600（1 模式小時/秒 / 1 model-h/s）</option></select>
+<label for="untilH">跑到指定時間後自動暫停 / Pause after</label>
+<div class="controls"><input id="untilH" type="number" min="0" step="0.5" value="1" style="width:6em" /><span style="align-self:center">模式小時 / model hours</span><button id="untilGo">執行並在時間到暫停 / Run, then pause</button></div>
+<label for="frames">畫面更新 / Display updates</label>
+<select id="frames"><option value="wall">每 0.5 秒 / every 0.5 s</option><option value="model:60">每 1 模式分鐘 / every model minute</option><option value="model:600">每 10 模式分鐘 / every 10 model minutes</option><option value="fast">快轉：每 5 秒 / fast-forward: every 5 s</option></select>
+<label for="speed">每輪計算量 / Work per tick</label><input id="speed" type="range" min="1" max="12" value="1" />
 <label><input id="adaptive" type="checkbox" checked /> 自動時間步長（依風速調整 Δt，GPU）/ Adaptive time step (Δt from the Courant number, GPU)</label>
 <label for="ground">地面場 / Ground field</label>
 <select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="wind">地面風速 / Surface wind speed</option><option value="theta">地面位溫擾動（冷池）/ Surface θ′ (cold pool)</option><option value="snow">累積降雪與霰（水當量）/ Accumulated snow + graupel (water equivalent)</option></select>

@@ -70,7 +70,12 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <label for="backendSel">計算後端 / Compute backend</label>
 <select id="backendSel"><option value="auto">自動：可用時用 WebGPU / Auto: WebGPU when available</option><option value="cpu">CPU Float64（參考解 / reference）</option></select>
 <div class="controls"><button id="run">執行 / Run</button><button id="resetAvg">重設平均 / Reset average</button></div>
-<label for="speed">每輪步數（速度）/ Steps per tick (speed)</label>
+<div class="controls"><button id="step1">單步 / Step</button></div>
+<label for="pace">目標速度 / Target speed</label>
+<select id="pace"><option value="0">全速 / Full speed</option><option value="3600">1 模式小時/秒 / 1 model hour per second</option><option value="21600">6 模式小時/秒 / 6 model hours per second</option><option value="86400">1 模式日/秒 / 1 model day per second</option><option value="864000">10 模式日/秒 / 10 model days per second</option></select>
+<label for="untilD">跑到指定時間後自動暫停 / Pause after</label>
+<div class="controls"><input id="untilD" type="number" min="0" step="0.5" value="5" style="width:6em" /><span style="align-self:center">模式日 / model days</span><button id="untilGo">執行並在時間到暫停 / Run, then pause</button></div>
+<label for="speed">每輪計算量 / Work per tick</label>
 <input id="speed" type="range" min="1" max="24" value="6" />
 
 <h2>存檔 / Saved simulations</h2>

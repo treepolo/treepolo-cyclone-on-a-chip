@@ -8,6 +8,11 @@ export type ToWorker =
   | { type: 'init'; preset: string; backend: 'auto' | 'cpu'; spinup?: boolean; state?: ArrayBuffer }
   /** capture the current state as a save (answered with saveData) */
   | { type: 'save' }
+  /** target speed in model seconds per wall second (0 = full speed) */
+  | { type: 'pace'; target: number }
+  /** pause after this many model days from now (0 clears) */
+  | { type: 'runUntil'; days: number }
+  | { type: 'step1' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
   | { type: 'view'; field: FieldId; level: number }
@@ -56,5 +61,6 @@ export type FromWorker =
   | ZonalMessage
   | { type: 'snapshot'; payload: NestPayload }
   | { type: 'saveData'; meta: import('./saves.js').SaveMeta; buffer: ArrayBuffer }
+  | { type: 'paused'; reason: string }
   | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number; moist: boolean; lat: Float64Array; land: Uint8Array | null; backend: 'cpu' | 'gpu'; note: string }
   | { type: 'error'; message: string };

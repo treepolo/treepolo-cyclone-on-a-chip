@@ -5,6 +5,8 @@ import { DAY, EARTH } from '../core/constants.js';
 import { Dycore, GridState } from '../model/dycore.js';
 import { applySpinup, encodeSpinup } from '../model/spinup.js';
 import { packSave, unpackSave } from './saves.js';
+import { Pacer } from './pacer.js';
+const pacer = new Pacer();
 import { HS_PRESETS, AQUA_PRESETS, EARTH_PRESETS, OBSERVED_QFLUX_SUFFIX, createHeldSuarez, createAquaplanet, createEarth, EarthData, MonthlyLatLon } from '../model/presets.js';
 import type { GrayPhysics } from '../model/moist/aquaplanet.js';
 import { ZonalMeanAccumulator } from '../model/diagnostics.js';
@@ -255,6 +257,18 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
       await sendFrame();
     } else if (m.type === 'run') {
       running = m.running;
+      if (running && backend) pacer.reset(backend.time());
+    } else if (m.type === 'pace') {
+      pacer.target = Math.max(0, m.target); if (backend) pacer.reset(backend.time());
+    } else if (m.type === 'runUntil') {
+      pacer.until = m.days > 0 && backend ? backend.time() + m.days * DAY : null;
+    } else if (m.type === 'step1') {
+      if (!backend || running) return;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try { await backend.advance(1); } catch (e) { post({ type: 'error', message: String(e) }); }
+      busy = false;
+      await sendFrame();
     } else if (m.type === 'speed') {
       stepsPerTick = Math.max(1, m.stepsPerTick | 0);
     } else if (m.type === 'view') {
@@ -303,9 +317,15 @@ async function loop(): Promise<void> {
       try {
         const b = backend, dt = b.model.dt;
         const sampleEvery = Math.max(1, Math.round(6 * 3600 / dt));
-        const n = b.kind === 'gpu' ? stepsPerTick * 4 : stepsPerTick;
+        const n = pacer.allow(b.time(), dt, b.kind === 'gpu' ? stepsPerTick * 4 : stepsPerTick);
+        if (n === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
         await b.advance(n);
         rateSteps += n;
+        if (pacer.reached(b.time())) {
+          running = false;
+          await sendFrame();
+          post({ type: 'paused', reason: `已到達設定時間，自動暫停 / reached the stop time (day ${(b.time() / DAY).toFixed(2)})` });
+        }
         if (b.steps() - lastSampleStep >= sampleEvery) {
           lastSampleStep = b.steps();
           const s = await b.snapshot();

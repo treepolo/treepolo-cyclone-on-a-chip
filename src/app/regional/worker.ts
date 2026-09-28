@@ -10,6 +10,7 @@ import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { refineInto } from '../../regional/refine.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
+import { Pacer } from '../pacer.js';
 import { tornadoExperiment, StormTracker } from '../../regional/supercell.js';
 import { REFINE_TO, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
 
@@ -30,6 +31,18 @@ let tracker: StormTracker | null = null, lastTrack = 0;
 let nestSpec: NestSpec | null = null;
 /** how the current model was built (needed to rebuild it from a save) */
 let builtGpu = false;
+// pacing and display cadence
+const pacer = new Pacer();
+let frameMode: { kind: 'wall' | 'model' | 'fast'; every: number } = { kind: 'wall', every: 0 };
+let lastFrameModel = 0;
+const modelNow = (): number => (gpu ? gpu.time : m ? m.time : 0);
+const dtNow = (): number => (gpu ? gpu.dt : m ? m.c.dt : 1);
+function frameDue(): boolean {
+  const el = performance.now() - lastFrame;
+  if (frameMode.kind === 'fast') return el > 5000;
+  if (frameMode.kind === 'model') return el > 250 && modelNow() - lastFrameModel >= frameMode.every - 1e-6;
+  return el > (gpu ? 500 : 300);
+}
 let nestSource: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
 const EXP_LABEL: Record<RegionalExperiment, string> = {
   supercell: '超大胞 2 km / supercell 2 km', supercell_hr: '超大胞 1 km / supercell 1 km', tc: '熱帶氣旋 15 km / tropical cyclone 15 km',
@@ -208,7 +221,22 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land, refineTo: null });
       await sendFrame();
     }
-    else if (msg.type === 'run') running = msg.running;
+    else if (msg.type === 'run') { running = msg.running; if (running) pacer.reset(modelNow()); }
+    else if (msg.type === 'pace') { pacer.target = Math.max(0, msg.target); pacer.reset(modelNow()); }
+    else if (msg.type === 'runUntil') { pacer.until = msg.hours > 0 ? modelNow() + msg.hours * 3600 : null; }
+    else if (msg.type === 'frames') { frameMode = { kind: msg.kind, every: msg.every ?? 0 }; }
+    else if (msg.type === 'step1') {
+      if (running || !m || !mp) return;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        if (gpu) { gpu.step(1); await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); }
+        else { m.step(); mp.apply(m.c.dt); }
+        busy = false;
+        await sendFrame();
+      } catch (e) { post({ type: 'error', message: String(e) }); }
+      busy = false;
+    }
     else if (msg.type === 'speed') stepsPerTick = Math.max(1, msg.stepsPerTick | 0);
     else if (msg.type === 'ground') { ground = msg.field; sendFrame(); }
     else if (msg.type === 'save') {
@@ -357,7 +385,9 @@ async function loop(): Promise<void> {
           // adaptive batch: about 60 ms x speed setting of GPU work between checks
           const t0 = performance.now();
           // with adaptive stepping, re-check the Courant number at least every 300 model seconds
-          const nb = adaptive ? Math.max(1, Math.min(gpuBatch, Math.ceil(300 / gpu.dt))) : gpuBatch;
+          const nb0 = adaptive ? Math.max(1, Math.min(gpuBatch, Math.ceil(300 / gpu.dt))) : gpuBatch;
+          const nb = pacer.allow(gpu.time, gpu.dt, nb0);
+          if (nb === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
           gpu.step(nb); rateSteps += nb;
           await gpu.device.queue.onSubmittedWorkDone();
           await adaptDt();
@@ -366,9 +396,18 @@ async function loop(): Promise<void> {
           const perStep = Math.max(el, 1) / nb;
           gpuBatch = Math.max(1, Math.min(2000, Math.round(Math.min(2 * gpuBatch, Math.max(0.5 * gpuBatch, target / perStep)))));
         }
-        else for (let s = 0; s < stepsPerTick; s++) { m.step(); mp.apply(m.c.dt); rateSteps++; }
+        else {
+          const ns = pacer.allow(m.time, m.c.dt, stepsPerTick);
+          if (ns === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
+          for (let s = 0; s < ns; s++) { m.step(); mp.apply(m.c.dt); rateSteps++; }
+        }
+        if (pacer.reached(modelNow())) {
+          running = false;
+          await sendFrame();
+          post({ type: 'paused', reason: `已到達設定時間，自動暫停 / reached the stop time (t = ${(modelNow() / 3600).toFixed(2)} h)` });
+        }
         if (tracker && m.time - lastTrack >= 600) { lastTrack = m.time; await followStorm(); }
-        if (performance.now() - lastFrame > (gpu ? 500 : 300)) { const tf = performance.now(); await sendFrame(); if (DEBUG) console.log(`DBG frame ${(performance.now() - tf).toFixed(0)} ms`); }
+        if (running && frameDue()) { const tf = performance.now(); await sendFrame(); if (DEBUG) console.log(`DBG frame ${(performance.now() - tf).toFixed(0)} ms`); }
       } catch (e) { running = false; post({ type: 'error', message: String(e) }); }
       busy = false;
     }
@@ -410,7 +449,7 @@ async function syncFromGpu(): Promise<void> {
 
 async function sendFrame(): Promise<void> {
   if (!m || !mp) return;
-  lastFrame = performance.now();
+  lastFrame = performance.now(); lastFrameModel = modelNow();
   const { nx, ny, nz, dx, dz } = m.c, n = nx * ny * nz;
   const cloud = new Uint8Array(n), rain = new Uint8Array(n);
   let wmax = 0, wmin = 0, qcmax = 0, qrmax = 0;

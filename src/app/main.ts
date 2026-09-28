@@ -188,6 +188,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
     $('psdrift').textContent = m.psDrift.toExponential(2);
     $('season').textContent = m.declinationDeg === null ? '—' : `${dateFromEquinox(m.day)} · 太陽赤緯 / declination ${m.declinationDeg.toFixed(1)}°`;
     $('levelLabel').textContent = `σ = ${m.sigma[m.level]!.toFixed(3)} (≈ ${(m.sigma[m.level]! * 1000).toFixed(0)} hPa)`;
+  } else if (m.type === 'paused') {
+    log(m.reason); running = false; $('run').textContent = '執行 / Run';
   } else if (m.type === 'saveData') {
     pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null;
   } else if (m.type === 'snapshot') {
@@ -320,6 +322,15 @@ $('nestClose').onclick = (): void => {
 $('nestSize').onchange = (): void => { if (pick) globe.setMarker(pick.lat, pick.lon, nestHalf()); };
 $('resetAvg').onclick = (): void => { send({ type: 'resetAverage' }); log('重設緯向平均 / Zonal average reset'); };
 $('preset').onchange = (): void => init();
+$('pace').onchange = (): void => send({ type: 'pace', target: Number($<HTMLSelectElement>('pace').value) });
+$('step1').onclick = (): void => { if (!running) send({ type: 'step1' }); };
+$('untilGo').onclick = (): void => {
+  const d = Number($<HTMLInputElement>('untilD').value);
+  if (!(d > 0)) return;
+  send({ type: 'runUntil', days: d });
+  running = true; syncRun();
+  log(`執行 ${d} 模式日後自動暫停 / running for ${d} model days`);
+};
 // ---------------- saved simulations
 // the regional overlay asks this page to offer its exports (the artifact's download capability is here)
 addEventListener('message', async (ev: MessageEvent) => {

@@ -35,6 +35,13 @@ export type ToRegionalWorker =
   /** continue the running simulation on the finer grid of REFINE_TO[experiment] */
   | { type: 'refine' }
   | { type: 'save' }
+  /** target speed in model seconds per wall second (0 = full speed) */
+  | { type: 'pace'; target: number }
+  /** pause after this many model hours from now (0 clears) */
+  | { type: 'runUntil'; hours: number }
+  | { type: 'step1' }
+  /** display cadence: every 0.5 s, every `every` model seconds, or rarely (fast-forward) */
+  | { type: 'frames'; kind: 'wall' | 'model' | 'fast'; every?: number }
   | { type: 'load'; buffer: ArrayBuffer; backend: 'auto' | 'cpu' };
 
 export interface RegionalFrame {
@@ -57,5 +64,6 @@ export type FromRegionalWorker =
   | RegionalFrame
   | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null; refineTo: RegionalExperiment | null }
   | { type: 'profile'; text: string }
+  | { type: 'paused'; reason: string }
   | { type: 'saveData'; meta: import('../saves.js').SaveMeta; buffer: ArrayBuffer }
   | { type: 'error'; message: string };
