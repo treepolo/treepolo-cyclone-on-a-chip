@@ -17,7 +17,8 @@ import type { GrayPhysics } from './moist/aquaplanet.js';
 import type { SpectralField } from '../spectral/transform.js';
 import { DRY_AIR } from '../core/constants.js';
 
-export function encodeSpinup(model: Dycore, physics: GrayPhysics): ArrayBuffer {
+/** Works for dry models too (physics null / no moisture: those parts are written as zeros). */
+export function encodeSpinup(model: Dycore, physics: GrayPhysics | null): ArrayBuffer {
   const tr = model.tr, K = model.K, ng = model.ng, ns = tr.nspec;
   const s = model.exportState(), half = (s.data.length - (model.moist ? K * ng : 0)) / 2;
   const n = 8 + tr.nlat + half + K * ng + 4 * ng;
@@ -27,12 +28,11 @@ export function encodeSpinup(model: Dycore, physics: GrayPhysics): ArrayBuffer {
   out.set(tr.lat, o); o += tr.nlat;
   out.set(s.data.subarray(half, 2 * half), o); o += half;               // current time level
   if (half !== (3 * K + 1) * 2 * ns) throw new Error('unexpected state layout');
-  out.set(s.data.subarray(2 * half), o); o += K * ng;                   // q
+  if (model.moist) out.set(s.data.subarray(2 * half), o);
+  o += K * ng;                                                           // q
   const phis = new Float64Array(ng); model.surfaceGeopotentialGrid(phis);
   out.set(phis, o); o += ng;
-  out.set(physics.f.sst, o); o += ng;
-  out.set(physics.f.bucket, o); o += ng;
-  out.set(physics.f.ice, o);
+  if (physics) { out.set(physics.f.sst, o); out.set(physics.f.bucket, o + ng); out.set(physics.f.ice, o + 2 * ng); }
   return out.buffer;
 }
 
@@ -52,7 +52,7 @@ function regrid(src: ArrayLike<number>, lat: ArrayLike<number>, nlon: number, ds
   }
 }
 
-export function applySpinup(model: Dycore, physics: GrayPhysics, buf: ArrayBuffer): void {
+export function applySpinup(model: Dycore, physics: GrayPhysics | null, buf: ArrayBuffer): void {
   const f = new Float32Array(buf);
   if (f[0] !== 1) throw new Error('unknown spin-up file version');
   const T0 = f[1]!, nlat0 = f[2]!, nlon0 = f[3]!, K = f[4]!, time = f[5]!, steps = f[6]!;
@@ -100,6 +100,7 @@ export function applySpinup(model: Dycore, physics: GrayPhysics, buf: ArrayBuffe
   model.importState({ time, steps, data });
   model.massTarget = model.meanSurfacePressure();
   // surface: regrid, then keep land / ocean values consistent with the model's own mask
+  if (!physics) return;
   const tmp = new Float64Array(ng);
   regrid(sst0, lat0, nlon0, tr.lat, tr.nlon, tmp); physics.f.sst.set(tmp);
   regrid(bucket0, lat0, nlon0, tr.lat, tr.nlon, tmp);

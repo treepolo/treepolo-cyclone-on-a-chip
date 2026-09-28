@@ -14,6 +14,11 @@ h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:16px 0 6px;color:#b8c6
 .muted{color:var(--muted);font-size:12px;line-height:1.5}
 .row{display:flex;justify-content:space-between;gap:10px;line-height:1.7}.row span:last-child{text-align:right;font-variant-numeric:tabular-nums}
 button,select,input{font:inherit;background:#101821;color:var(--fg);border:1px solid #334354;padding:5px 8px;border-radius:4px}
+.filebtn{display:inline-block;background:#101821;border:1px solid #334354;padding:5px 8px;border-radius:4px;cursor:pointer}
+.saves{display:flex;flex-direction:column;gap:6px;margin-top:6px;font-size:12px}
+.saverow{border:1px solid var(--line);border-radius:4px;padding:6px 8px}
+.saverow .controls{margin:4px 0 0}
+.savetitle{font-weight:600;overflow-wrap:anywhere}
 label{display:block;margin:6px 0 2px;color:#b8c6d4}
 select,input[type=range]{width:100%;box-sizing:border-box}
 .controls{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
@@ -67,6 +72,9 @@ canvas.sec{width:100%;height:150px;display:block;margin:4px 0 8px;background:#07
 <div class="controls"><button id="run">執行 / Run</button><button id="resetAvg">重設平均 / Reset average</button></div>
 <label for="speed">每輪步數（速度）/ Steps per tick (speed)</label>
 <input id="speed" type="range" min="1" max="24" value="6" />
+
+<h2>存檔 / Saved simulations</h2>
+<div id="saves"></div>
 
 <h2>放大區域 / Zoom into a region</h2>
 <div class="muted">在地球上點一下選擇地點（黃框為區域範圍），再開啟區域非靜力模式：以目前的全球場為初始與側邊界條件（單向巢狀），解析對流、颮線與氣旋內部結構。 / Click the globe to choose a point (yellow box: the domain), then open the regional non-hydrostatic model there, initialised and driven at its boundaries by the current global fields (one-way nesting), to resolve convection, squall lines and storm structure.</div>

@@ -14,6 +14,12 @@ h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:16px 0 6px;color:#b8c6
 .muted{color:var(--muted);font-size:12px;line-height:1.5}
 .row{display:flex;justify-content:space-between;gap:10px;line-height:1.7}.row span:last-child{text-align:right;font-variant-numeric:tabular-nums}
 button,select,input{font:inherit;background:#101821;color:var(--fg);border:1px solid #334354;padding:5px 8px;border-radius:4px}
+.controls{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.filebtn{display:inline-block;background:#101821;border:1px solid #334354;padding:5px 8px;border-radius:4px;cursor:pointer}
+.saves{display:flex;flex-direction:column;gap:6px;margin-top:6px;font-size:12px}
+.saverow{border:1px solid var(--line);border-radius:4px;padding:6px 8px}
+.saverow .controls{margin:4px 0 0}
+.savetitle{font-weight:600;overflow-wrap:anywhere}
 label{display:block;margin:6px 0 2px;color:#b8c6d4} select,input[type=range]{width:100%;box-sizing:border-box}
 .log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:var(--bg);padding:8px;border:1px solid #1d2833;max-height:120px;overflow:auto}
 a{color:#8fc1ff}
@@ -59,6 +65,8 @@ a{color:#8fc1ff}
 <div class="row"><span>中心氣壓降 / Central pressure deficit</span><span id="dp">—</span></div>
 <div class="row"><span>眼牆（1.5 km 切向風極大）/ Eyewalls (1.5 km vt maxima)</span><span id="eyewalls">—</span></div>
 <div class="row"><span>近地面最大渦度・對地風速 / Near-surface max vorticity · ground-relative wind</span><span id="zeta">—</span></div>
+<h2>存檔 / Saved simulations</h2>
+<div id="saves"></div>
 <h2>效能分析 / Profiling</h2>
 <p><button id="profile">分析各 GPU 程式耗時 / Time each GPU kernel</button></p>
 <div class="muted">跑 3 步並量測每個 GPU 程式的時間（模式會前進 3 步）。結果可以複製給開發者。/ Runs 3 steps and times every GPU kernel (the model advances 3 steps). The result can be copied for the developer.</div>

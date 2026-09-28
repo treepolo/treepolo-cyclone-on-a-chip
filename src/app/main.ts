@@ -1,6 +1,7 @@
 // UI thread: controls, globe rendering, wind tracers, zonal-mean sections.
 
 import { Globe } from './globe.js';
+import { mountSavesPanel, offerDownload, type SaveMeta } from './saves.js';
 import { diverging, sequential } from './colormap.js';
 import { drawSection } from './section.js';
 import type { FieldId, FrameMessage, FromWorker, ToWorker, ZonalMessage } from './protocol.js';
@@ -187,6 +188,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>): void => {
     $('psdrift').textContent = m.psDrift.toExponential(2);
     $('season').textContent = m.declinationDeg === null ? '—' : `${dateFromEquinox(m.day)} · 太陽赤緯 / declination ${m.declinationDeg.toFixed(1)}°`;
     $('levelLabel').textContent = `σ = ${m.sigma[m.level]!.toFixed(3)} (≈ ${(m.sigma[m.level]! * 1000).toFixed(0)} hPa)`;
+  } else if (m.type === 'saveData') {
+    pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null;
   } else if (m.type === 'snapshot') {
     const purpose = snapQueue.shift() ?? 'window';
     if (purpose === 'window') { pendingNest = m.payload; deliverNest(); }
@@ -317,9 +320,31 @@ $('nestClose').onclick = (): void => {
 $('nestSize').onchange = (): void => { if (pick) globe.setMarker(pick.lat, pick.lon, nestHalf()); };
 $('resetAvg').onclick = (): void => { send({ type: 'resetAverage' }); log('重設緯向平均 / Zonal average reset'); };
 $('preset').onchange = (): void => init();
+// ---------------- saved simulations
+// the regional overlay asks this page to offer its exports (the artifact's download capability is here)
+addEventListener('message', async (ev: MessageEvent) => {
+  if (!nestWin || ev.source !== nestWin || ev.data?.type !== 'export-save') return;
+  let result: string | null = null;
+  try { result = await offerDownload(String(ev.data.filename), ev.data.data as Blob); } catch (e) { result = String((e as Error).message ?? e); }
+  nestWin.postMessage({ type: 'export-save-done', id: ev.data.id, result }, '*');
+});
+let pendingSave: ((r: { meta: SaveMeta; data: ArrayBuffer }) => void) | null = null;
+mountSavesPanel($('saves'), 'global',
+  () => new Promise((resolve, reject) => {
+    if (pendingSave) { reject(new Error('存檔進行中 / a save is already in progress')); return; }
+    pendingSave = resolve; send({ type: 'save' });
+    setTimeout(() => { if (pendingSave === resolve) { pendingSave = null; reject(new Error('逾時 / timed out')); } }, 120000);
+  }),
+  (meta, data) => {
+    const sel = $<HTMLSelectElement>('preset'), preset = String(meta.preset);
+    if (!Array.from(sel.options).some((o) => o.value === preset)) { log(`這個版本沒有「${preset}」情境 / preset not available: ${preset}`); return; }
+    sel.value = preset;
+    init(data.slice(0));
+  },
+  log);
 $('backendSel').onchange = (): void => init();
 $('spinup').onchange = (): void => init();
-function init(): void {
+function init(state?: ArrayBuffer): void {
   stopEmbed();
   running = false; syncRun();
   const preset = $<HTMLSelectElement>('preset').value, p = preset.replace(/_Q$/, '');
@@ -339,7 +364,7 @@ function init(): void {
     log('斜壓波：第 6–10 日可見氣旋加深與鋒面 / Baroclinic wave: cyclones deepen and fronts form around days 6–10');
   }
   log(`建立模式中 / Building model: ${preset}`);
-  send({ type: 'init', preset, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu', spinup: $<HTMLInputElement>('spinup').checked });
+  send({ type: 'init', preset, backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu', spinup: $<HTMLInputElement>('spinup').checked, ...(state ? { state } : {}) });
   send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 }
 init();

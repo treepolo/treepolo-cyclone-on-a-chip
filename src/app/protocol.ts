@@ -5,7 +5,9 @@ export type FieldId = 'T' | 'u' | 'v' | 'speed' | 'vor' | 'ps' | 'div' | 'precip
 
 export type ToWorker =
   /** spinup: Earth presets with ocean heat transport start from the spun-up July state (data/spinup_earth_t42q.bin) */
-  | { type: 'init'; preset: string; backend: 'auto' | 'cpu'; spinup?: boolean }
+  | { type: 'init'; preset: string; backend: 'auto' | 'cpu'; spinup?: boolean; state?: ArrayBuffer }
+  /** capture the current state as a save (answered with saveData) */
+  | { type: 'save' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
   | { type: 'view'; field: FieldId; level: number }
@@ -53,5 +55,6 @@ export type FromWorker =
   | FrameMessage
   | ZonalMessage
   | { type: 'snapshot'; payload: NestPayload }
+  | { type: 'saveData'; meta: import('./saves.js').SaveMeta; buffer: ArrayBuffer }
   | { type: 'ready'; preset: string; trunc: number; nlat: number; nlon: number; K: number; dt: number; moist: boolean; lat: Float64Array; land: Uint8Array | null; backend: 'cpu' | 'gpu'; note: string }
   | { type: 'error'; message: string };

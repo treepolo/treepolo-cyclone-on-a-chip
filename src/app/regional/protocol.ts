@@ -33,7 +33,9 @@ export type ToRegionalWorker =
   | { type: 'profile' }
   | { type: 'adaptive'; on: boolean }
   /** continue the running simulation on the finer grid of REFINE_TO[experiment] */
-  | { type: 'refine' };
+  | { type: 'refine' }
+  | { type: 'save' }
+  | { type: 'load'; buffer: ArrayBuffer; backend: 'auto' | 'cpu' };
 
 export interface RegionalFrame {
   type: 'frame';
@@ -55,4 +57,5 @@ export type FromRegionalWorker =
   | RegionalFrame
   | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null; refineTo: RegionalExperiment | null }
   | { type: 'profile'; text: string }
+  | { type: 'saveData'; meta: import('../saves.js').SaveMeta; buffer: ArrayBuffer }
   | { type: 'error'; message: string };

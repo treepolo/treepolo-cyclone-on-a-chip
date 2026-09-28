@@ -3,7 +3,8 @@
 
 import { DAY, EARTH } from '../core/constants.js';
 import { Dycore, GridState } from '../model/dycore.js';
-import { applySpinup } from '../model/spinup.js';
+import { applySpinup, encodeSpinup } from '../model/spinup.js';
+import { packSave, unpackSave } from './saves.js';
 import { HS_PRESETS, AQUA_PRESETS, EARTH_PRESETS, OBSERVED_QFLUX_SUFFIX, createHeldSuarez, createAquaplanet, createEarth, EarthData, MonthlyLatLon } from '../model/presets.js';
 import type { GrayPhysics } from '../model/moist/aquaplanet.js';
 import { ZonalMeanAccumulator } from '../model/diagnostics.js';
@@ -29,6 +30,8 @@ interface Backend {
   steps(): number;
   advance(n: number): Promise<void>;
   snapshot(): Promise<Snapshot>;
+  /** bring the CPU model and physics up to date with the backend's state (for saving) */
+  download(): Promise<void>;
 }
 
 class CpuBackend implements Backend {
@@ -37,6 +40,7 @@ class CpuBackend implements Backend {
   time(): number { return this.model.time; }
   steps(): number { return this.model.steps; }
   async advance(n: number): Promise<void> { for (let i = 0; i < n; i++) this.model.step(); }
+  async download(): Promise<void> { /* the CPU model is the state */ }
   async snapshot(): Promise<Snapshot> {
     const m = this.model, g = m.refreshGrid(), ng = m.ng, K = m.K;
     const vor = new Float32Array(K * ng), div = new Float32Array(K * ng), tmp = new Float64Array(ng);
@@ -65,6 +69,22 @@ class GpuBackend implements Backend {
   async advance(n: number): Promise<void> {
     this.gd.step(n);
     await this.device.queue.onSubmittedWorkDone();
+  }
+  /** Current spectral state, moisture and surface state from the GPU into the CPU model (old = current
+   *  time level: the leapfrog restarts as after a spin-up load). */
+  async download(): Promise<void> {
+    const m = this.model, K = m.K, ns = m.tr.nspec, ng = m.ng;
+    const spec = await this.gd.readCurrent();
+    const nf = 3 * K + 1, cur = new Float64Array(nf * 2 * ns);
+    for (let f = 0; f < nf; f++) for (let s = 0; s < ns; s++) { cur[f * 2 * ns + s] = spec[(f * ns + s) * 2]!; cur[f * 2 * ns + ns + s] = spec[(f * ns + s) * 2 + 1]!; }
+    const data = new Float64Array(2 * cur.length + (m.moist ? K * ng : 0));
+    data.set(cur, 0); data.set(cur, cur.length);
+    if (m.moist && this.gm) data.set(await this.gm.readQ(), 2 * cur.length);
+    m.importState({ time: this.gd.time, steps: this.gd.steps, data });
+    if (this.gm && this.physics) {
+      const sf = await this.gm.readSurface(), f = this.physics.f;
+      f.sst.set(sf.subarray(SFC.ts * ng, (SFC.ts + 1) * ng)); f.bucket.set(sf.subarray(SFC.bucket * ng, (SFC.bucket + 1) * ng)); f.ice.set(sf.subarray(SFC.ice * ng, (SFC.ice + 1) * ng));
+    }
   }
   async snapshot(): Promise<Snapshot> {
     const m = this.model, K = m.K, ng = m.ng, nlat = m.tr.nlat, nlon = m.tr.nlon;
@@ -164,7 +184,8 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
         }
         const built = createEarth(EARTH_PRESETS[earthName]!, earthData[cfg.trunc >= 85 ? 'earth_512.json' : 'earth_t42.json']!, climate.qflux ? { qflux: false } : {}, climate);
         model = built.model; physics = built.physics;
-        if (m.spinup && climate.qflux) {
+        if (m.state) { /* applied below for every preset */ }
+        else if (m.spinup && climate.qflux) {
           try {
             if (!spinupData) spinupData = await fetchSpinup();
             applySpinup(model, physics, spinupData);
@@ -184,6 +205,13 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
         model = createHeldSuarez(hs);
       }
       let note = spinupNote; spinupNote = '';
+      if (m.state) {
+        const { meta, arrays } = unpackSave(m.state);
+        if (meta.kind !== 'global' || meta.preset !== m.preset) throw new Error('存檔的情境與選擇的不同 / the save belongs to another preset');
+        const st = arrays.state as Uint8Array;
+        applySpinup(model, physics, st.buffer.slice(st.byteOffset, st.byteOffset + st.byteLength));
+        note = `已載入存檔 / save loaded (day ${(model.time / 86400).toFixed(2)})`;
+      }
       const device = m.backend === 'cpu' ? null : await getGpu();
       let gpuBackend: GpuBackend | null = null;
       if (device) {
@@ -233,6 +261,20 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
       field = m.field;
       level = m.level;
       if (!busy) await sendFrame();
+    } else if (m.type === 'save') {
+      if (!backend) return;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        const b = backend;
+        await b.download();
+        const md = b.model, day = md.time / 86400;
+        const state = new Uint8Array(encodeSpinup(md, physics));
+        const meta = { kind: 'global' as const, title: `${currentPreset} · 第 ${day.toFixed(1)} 天 / day ${day.toFixed(1)}`, preset: currentPreset, day, trunc: md.tr.trunc };
+        const buffer = packSave(meta, { state });
+        post({ type: 'saveData', meta, buffer }, [buffer]);
+      } catch (e) { post({ type: 'error', message: `存檔失敗 / save failed: ${String(e)}` }); }
+      busy = false;
     } else if (m.type === 'snapshot') {
       if (!backend) return;
       while (busy) await new Promise((r) => setTimeout(r, 5));

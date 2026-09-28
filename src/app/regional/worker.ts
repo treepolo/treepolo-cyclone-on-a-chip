@@ -9,6 +9,7 @@ import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { refineInto } from '../../regional/refine.js';
+import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { tornadoExperiment, StormTracker } from '../../regional/supercell.js';
 import { REFINE_TO, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
 
@@ -27,6 +28,13 @@ let physCfg: RegionalPhysicsConfig | null = null;
 let frameVel = { u: 0, v: 0 };
 let tracker: StormTracker | null = null, lastTrack = 0;
 let nestSpec: NestSpec | null = null;
+/** how the current model was built (needed to rebuild it from a save) */
+let builtGpu = false;
+let nestSource: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
+const EXP_LABEL: Record<RegionalExperiment, string> = {
+  supercell: '超大胞 2 km / supercell 2 km', supercell_hr: '超大胞 1 km / supercell 1 km', tc: '熱帶氣旋 15 km / tropical cyclone 15 km',
+  tc_hr: '熱帶氣旋 5 km / tropical cyclone 5 km', tornado: '龍捲超大胞 250 m / tornadic supercell 250 m', tornado_c: '龍捲超大胞 1 km / tornadic supercell 1 km', nest: '巢狀區域 / nest',
+};
 
 // Adaptive time step (GPU): dt = min(acoustic limit, CFL_TARGET / max(|u|/dx + |v|/dy + |w|/dz)),
 // between the configured dt0 and 3 dt0; shrinks at once, grows by at most 10 % per check. The
@@ -169,12 +177,13 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
       const device = msg.backend === 'cpu' ? null : await getGpu();
+      gpu?.destroy(); gpu = null;
       let info = build(msg.experiment, !!device);
-      gpu = null;
+      builtGpu = !!device; nestSource = null;
       let note = '';
       if (device) {
         const reason = await tryGpu(device);
-        if (reason) { note = gpuFailNote(reason); info = build(msg.experiment, false); }
+        if (reason) { note = gpuFailNote(reason); info = build(msg.experiment, false); builtGpu = false; }
       } else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr' || msg.experiment === 'tornado')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
       const c = m!.c;
@@ -186,12 +195,13 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
       const device = msg.backend === 'cpu' ? null : await getGpu();
+      gpu?.destroy(); gpu = null;
       let info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, !!device);
-      gpu = null;
+      builtGpu = !!device; nestSource = { payload: msg.payload, lat0: msg.lat0, lon0: msg.lon0, size: msg.size };
       let note = '';
       if (device) {
         const reason = await tryGpu(device);
-        if (reason) { note = gpuFailNote(reason); info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, false); }
+        if (reason) { note = gpuFailNote(reason); info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, false); builtGpu = false; }
       } else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
       dt0 = c.dt;
@@ -201,6 +211,78 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'run') running = msg.running;
     else if (msg.type === 'speed') stepsPerTick = Math.max(1, msg.stepsPerTick | 0);
     else if (msg.type === 'ground') { ground = msg.field; sendFrame(); }
+    else if (msg.type === 'save') {
+      if (!m || !mp) return;
+      const wasRunning = running; running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        await syncFromGpu();
+        const c = m.c, f32 = (a: ArrayLike<number>): Float32Array => Float32Array.from(a);
+        const arrays: SaveArrays = { u: f32(m.u), v: f32(m.v), w: f32(m.w), th: f32(m.th), pp: f32(m.pp), rain: f32(mp.rainAcc), snow: f32(mp.snowAcc) };
+        m.scalars.forEach((a, i) => { arrays[`s${i}`] = f32(a); });
+        let nest: Record<string, unknown> | null = null;
+        if (experiment === 'nest' && nestSource) {
+          const g = nestSource.payload;
+          nest = { lat0: nestSource.lat0, lon0: nestSource.lon0, size: nestSource.size, preset: g.preset, day: g.day, nlat: g.nlat, nlon: g.nlon, K: g.K, hasQ: !!g.q, hasTs: !!g.ts, hasWet: !!g.wet, hasLand: !!g.land };
+          for (const [k, a] of [['lat', g.lat], ['lon', g.lon], ['sigma', g.sigma], ['sigmaHalf', g.sigmaHalf], ['u', g.u], ['v', g.v], ['T', g.T], ['ps', g.ps], ['phis', g.phis], ['q', g.q], ['ts', g.ts], ['wet', g.wet]] as const) if (a) arrays[`p_${k}`] = f32(a);
+          if (g.land) arrays.p_land = Uint8Array.from(g.land);
+        }
+        const t = m.time;
+        const meta = { kind: 'regional' as const, title: `${EXP_LABEL[experiment]} · ${t < 7200 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`}`,
+          experiment, builtGpu, grid: { nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, size: m.size, nsc: m.scalars.length },
+          time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest };
+        const buffer = packSave(meta, arrays);
+        post({ type: 'saveData', meta, buffer }, [buffer]);
+      } catch (e) { post({ type: 'error', message: `存檔失敗 / save failed: ${String(e)}` }); }
+      busy = false; running = wasRunning;
+    }
+    else if (msg.type === 'load') {
+      running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        const { meta, arrays } = unpackSave(msg.buffer);
+        const M = meta as unknown as { experiment: RegionalExperiment; builtGpu: boolean; grid: { nx: number; ny: number; nz: number; size: number; nsc: number }; time: number; steps: number; dt: number; frameVel: { u: number; v: number }; dpEnv: number; nest: Record<string, unknown> | null };
+        if (meta.kind !== 'regional') throw new Error('不是區域模式存檔 / not a regional save');
+        const device = msg.backend === 'cpu' ? null : await getGpu();
+        gpu?.destroy(); gpu = null;
+        let info: { dt: number; description: string; land?: Uint8Array | null };
+        if (M.nest) {
+          const n = M.nest as { lat0: number; lon0: number; size: NestSize; preset: string; day: number; nlat: number; nlon: number; K: number };
+          const g = (k: string): Float32Array | null => (arrays[`p_${k}`] as Float32Array | undefined) ?? null;
+          const payload: NestPayload = { preset: n.preset, day: n.day, nlat: n.nlat, nlon: n.nlon, K: n.K, lat: Float64Array.from(g('lat')!), lon: Float64Array.from(g('lon')!),
+            sigma: Float64Array.from(g('sigma')!), sigmaHalf: Float64Array.from(g('sigmaHalf')!), u: g('u')!, v: g('v')!, T: g('T')!, ps: g('ps')!, q: g('q'), phis: g('phis')!, ts: g('ts'), wet: g('wet'),
+            land: (arrays.p_land as Uint8Array | undefined) ?? null };
+          info = buildNest(payload, n.lat0, n.lon0, n.size, M.builtGpu);
+          nestSource = { payload, lat0: n.lat0, lon0: n.lon0, size: n.size };
+        } else { info = build(M.experiment, M.builtGpu); nestSource = null; }
+        builtGpu = M.builtGpu;
+        const mm = m!, mpp = mp!;
+        if (mm.size !== M.grid.size || mm.scalars.length !== M.grid.nsc) throw new Error('存檔網格與目前版本不符 / the saved grid does not match this version');
+        if (tracker && (M.frameVel.u !== frameVel.u || M.frameVel.v !== frameVel.v)) {
+          mm.shiftFrame(M.frameVel.u - frameVel.u, M.frameVel.v - frameVel.v);
+          frameVel = { ...M.frameVel }; if (physCfg) physCfg.frameVel = frameVel;
+        }
+        for (const [k, a] of [['u', mm.u], ['v', mm.v], ['w', mm.w], ['th', mm.th], ['pp', mm.pp]] as const) a.set(arrays[k] as Float32Array);
+        mm.scalars.forEach((a, i) => a.set(arrays[`s${i}`] as Float32Array));
+        mpp.rainAcc.set(arrays.rain as Float32Array); mpp.snowAcc.set(arrays.snow as Float32Array);
+        mm.time = M.time; mm.steps = M.steps;
+        if (M.dpEnv) dpEnv = M.dpEnv;
+        let note = `已載入存檔 / save loaded (t = ${(M.time / 3600).toFixed(2)} h)`;
+        if (device) {
+          const reason = await tryGpu(device);
+          if (reason) note += ' · ' + gpuFailNote(reason);
+          else if (gpu) (gpu as GpuRegional).setDt(M.dt);
+        } else if (M.builtGpu) note += ' · 此存檔是 GPU 網格，在 CPU 上會很慢 / GPU-sized grid: very slow on the CPU';
+        dt0 = mm.c.dt;
+        const c = mm.c;
+        post({ type: 'ready', experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land ?? null, refineTo: REFINE_TO[experiment] ?? null });
+        busy = false;
+        await sendFrame();
+      } catch (e) { post({ type: 'error', message: `載入失敗 / load failed: ${String((e as Error).message ?? e)}` }); }
+      busy = false;
+    }
     else if (msg.type === 'refine') {
       const target = REFINE_TO[experiment];
       if (!target || !m || !mp) return;
@@ -213,6 +295,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         const device = gpu ? gpu.device : null;
         gpu?.destroy(); gpu = null;
         const info = build(target, !!device);
+        builtGpu = !!device;
         const mf = m!;
         // moving-frame experiments: bring the fine model into the coarse model's current frame
         if (tracker && (frameC.u !== frameVel.u || frameC.v !== frameVel.v)) {

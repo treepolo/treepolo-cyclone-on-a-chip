@@ -1,6 +1,7 @@
 // Regional-model page: controls, 3-D volume view, statistics.
 import { VolumeView } from './volume.js';
 import { sequential, diverging } from '../colormap.js';
+import { mountSavesPanel, type SaveMeta } from '../saves.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tornado: '250 m' };
@@ -57,6 +58,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('zeta').textContent = `${s.zetaMax.toFixed(3)} s⁻¹ · ${s.vGround.toFixed(1)} m/s`;
     $('legend').textContent = `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); }
+  else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
 };
 function sync(): void { $('run').textContent = running ? '暫停 / Pause' : '執行 / Run'; send({ type: 'run', running }); }
@@ -97,3 +99,13 @@ function tick(): void { view.render(Number($<HTMLInputElement>('cloudK').value),
 requestAnimationFrame(tick);
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
 $('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
+// ---------------- saved simulations
+let pendingSave: ((r: { meta: SaveMeta; data: ArrayBuffer }) => void) | null = null;
+mountSavesPanel($('saves'), 'regional',
+  () => new Promise((resolve, reject) => {
+    if (pendingSave) { reject(new Error('存檔進行中 / a save is already in progress')); return; }
+    pendingSave = resolve; send({ type: 'save' });
+    setTimeout(() => { if (pendingSave === resolve) { pendingSave = null; reject(new Error('逾時 / timed out')); } }, 120000);
+  }),
+  (_meta, data) => { running = false; sync(); send({ type: 'load', buffer: data.slice(0), backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' }); },
+  log);
