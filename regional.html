@@ -27,7 +27,7 @@ button,select,input{font:inherit;background:#101821;color:var(--fg);border:1px s
 .saverow .controls{margin:4px 0 0}
 .savetitle{font-weight:600;overflow-wrap:anywhere}
 label{display:block;margin:6px 0 2px;color:#b8c6d4} select,input[type=range]{width:100%;box-sizing:border-box}
-.axgrid{display:grid;grid-template-columns:1fr 7em;gap:4px 8px;align-items:center}.axgrid label{margin:0}.axgrid input,.axgrid select{width:100%;box-sizing:border-box}
+.axgrid{display:grid;grid-template-columns:1fr 8em;gap:4px 8px;align-items:center}.axgrid label{margin:0}.axgrid input,.axgrid select{width:100%;box-sizing:border-box}
 .missions{display:flex;flex-direction:column;gap:6px;margin-top:6px}.mission{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:4px;padding:6px 8px}
 .mission .mark{font-size:15px;line-height:1.2;color:var(--muted)}.mission.done .mark{color:#1baf7a}
 .log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:var(--bg);padding:8px;border:1px solid #1d2833;max-height:120px;overflow:auto}
@@ -80,7 +80,7 @@ a{color:#8fc1ff}
 <label for="axLv" class="axOnly">垂直混合長度 / Vertical mixing length (m)</label><input class="axOnly" id="axLv" type="number" step="10" value="100" />
 <label for="axCk">焓交換係數 / Enthalpy exchange Ck (×10⁻³)</label><input id="axCk" type="number" step="0.1" value="1.2" />
 <label for="axVmin">地面通量最小風速（陣風）/ Minimum wind in surface fluxes (m/s)</label><input id="axVmin" type="number" step="0.5" value="1" />
-<label for="axRadMode">輻射冷卻 / Radiative cooling</label><select id="axRadMode"><option value="relax" selected>向初始探空鬆弛（RE87）/ relax to the sounding (RE87)</option><option value="const">固定晴空冷卻 / constant clear-sky</option></select>
+<label for="axRadMode">輻射冷卻：向初始探空鬆弛（RE87）或固定晴空冷卻 / Radiative cooling: relax to the sounding (RE87) or constant clear-sky</label><select id="axRadMode" title="向初始探空鬆弛（RE87）或固定晴空冷卻 / relax to the sounding (RE87) or constant clear-sky cooling"><option value="relax" selected>鬆弛 / relax</option><option value="const">固定 / constant</option></select>
 <label for="axRad">冷卻率或上限 / Rate or cap (K/day)</label><input id="axRad" type="number" step="0.25" value="2" />
 <label for="axRh">12 km 相對濕度 / RH at 12 km (%)</label><input id="axRh" type="number" step="5" value="40" />
 </div>

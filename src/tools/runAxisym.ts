@@ -18,6 +18,9 @@ import { tropicalSounding, eyewallPeaks } from '../regional/tropical.js';
 
 interface RunSpec { name: string; days: number; sst: number; dr: number; lh: number; lv: number; ck: number; vmin: number; rad: number; radc: number; rh12: number; vmax0: number; lat: number; nz: number; out: string }
 
+/** progress line: printed by the main thread (worker-thread console output is not flushed reliably to files) */
+const say = (line: string): void => { if (isMainThread) console.log(line); else parentPort!.postMessage({ line }); };
+
 function run(p: RunSpec): string {
   const nr = Math.round(800000 / p.dr), nz = p.nz, dz = 25000 / nz, f = 2 * 7.292e-5 * Math.sin(p.lat * Math.PI / 180);
   const m = new AxisymModel({ nr, nz, dr: p.dr, dz, dt: Math.min(20, 7.5 * p.dr / 1000), nsound: 6, f, dampDepth: 6000, dampRate: 1 / 300, spongeWidth: 150000, spongeRate: 1 / 900,
@@ -47,7 +50,7 @@ function run(p: RunSpec): string {
       const rs = rainStats();
       rows.push(`${(m.time / 3600).toFixed(1)},${r.dp.toFixed(2)},${r.vmax.toFixed(2)},${(r.rmw / 1000).toFixed(1)},${rs.core.toFixed(2)},${rs.outer.toFixed(3)},${rs.rings},${ew}`);
       last = `${p.name}: t ${(m.time / 3600).toFixed(0)} h  dp ${r.dp.toFixed(1)} hPa  vmax ${r.vmax.toFixed(1)} m/s  RMW ${(r.rmw / 1000).toFixed(0)} km  rain core ${rs.core.toFixed(1)} outer ${rs.outer.toFixed(2)} mm/h, ${rs.rings} rings  eyewalls ${ew || '-'}  (${((Date.now() - t0) / 1000).toFixed(0)} s)`;
-      console.log(last);
+      say(last);
     }
   }
   mkdirSync(p.out, { recursive: true });
@@ -78,7 +81,7 @@ if (isMainThread) {
     if (next >= specs.length) return;
     const spec = specs[next++]!;
     const w = new Worker(new URL(import.meta.url), { workerData: spec });
-    w.on('message', (s: string) => done.push(s));
+    w.on('message', (msg: string | { line: string }) => { if (typeof msg === 'string') done.push(msg); else console.log(msg.line); });
     w.on('error', (e) => { done.push(`${spec.name}: error ${String(e)}`); launch(); });
     w.on('exit', () => { launch(); if (done.length === specs.length) console.log('\n' + done.join('\n')); });
   };

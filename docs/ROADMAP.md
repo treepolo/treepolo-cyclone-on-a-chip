@@ -67,6 +67,7 @@ refinement for the tornado item).
 - 已做：強低層風切探空為預設（12 m/s 四分之一圓、深 1 km、邊界層 16 g/kg：0–1 km SRH 約 280 m²/s²、CAPE 約 3200 J/kg、
   雲底約 0.9 km），網頁「龍捲環境」面板可調並即時算 SRH／CAPE／LCL；龍捲偵測器（≤ 500 m 網格：最低層 ζ ≥ 0.1 s⁻¹ 且 1.5 km 內
   對地風 ≥ 29 m/s，EF 等級，維持 1 分鐘記一次事件，寫入無人值守報告）；先 1 km 養成熟超大胞再細化到 250 m 跟隨（已有）。
+- 結果：新環境在 500 m（CPU）就在 80–110 分鐘產生類龍捲渦旋（近地面 ζ 約 0.1 s⁻¹、對地風 34–36 m/s，見 RESULTS 4.5b）。
 - 待使用者決定：地面附近垂直加密（約 50 m）。/ Awaiting the user's decision: near-ground vertical refinement (about 50 m).
 - 目前 250 m 從未產生龍捲
 - 地面垂直加密（約 50 m）、先 1 km 養成熟超大胞再切 250 m 跟隨、強低層風切探空、龍捲偵測器

@@ -11,9 +11,9 @@ import { xySvg } from './plot.js';
 
 const a = process.argv.slice(2).map(Number);
 const minutes = a[0] || 90, dx = a[1] || 500, L = a[2] || 40000, nz = a[3] || 40, dz = a[4] || 400, dt = a[5] || 3;
-const outDir = process.argv[9] ?? `results/tornado_${dx}m`;
+const outDir = process.argv[8] ?? `results/tornado_${dx}m`;
 mkdirSync(outDir, { recursive: true });
-const e = tornadoExperiment(dx, L, nz, dz, dt, 6, process.argv[10] === 'wk82' ? TORNADO_WK82 : TORNADO_DEFAULT);
+const e = tornadoExperiment(dx, L, nz, dz, dt, 6, process.argv[9] === 'wk82' ? TORNADO_WK82 : TORNADO_DEFAULT);
 const m = e.model, mp = new IceMicrophysics(m);
 new RegionalPhysics(m, e.physics);
 const { nx, ny } = m.c;

@@ -219,6 +219,31 @@ Sweeps: `node dist/tools/runAxisym.js days=6 sweep=vmin:1,3,5`（每個 CPU 核�
 WK82 探空、四分之一圓風徑圖、地面對數律摩擦。第一版用週期性 30 km 區域：風暴吞回自己的冷外流，約一小時後衰亡，追蹤器也曾誤鎖到遠處的上升氣流。改成向環境鬆弛的開放邊界、追蹤器只在風暴附近搜尋並以伽利略座標平移跟隨後，風暴持續兩小時並停在區域中央：上升氣流 45–55 m/s、雲頂 15 km、3 km 渦度 0.05 s⁻¹（中尺度氣旋）、近地面渦度增加到 0.02 s⁻¹、對地風 16 m/s。500 m 解析不了龍捲；網頁的 250 m GPU 版本才是觀察龍捲是否自然生成的設定（R6）。
 WK82 sounding, quarter-circle hodograph, log-law surface drag. The first version used a periodic 30 km domain: the storm ingested its own cold outflow and died after about an hour, and the tracker once locked onto a distant updraft. With open boundaries relaxing to the environment, and a tracker that searches only near the storm and follows it by a Galilean frame shift, the storm lasts two hours and stays centred: updrafts 45–55 m/s, cloud top 15 km, 3-km vorticity 0.05 s⁻¹ (a mesocyclone), near-surface vorticity growing to 0.02 s⁻¹, ground-relative wind 16 m/s. 500 m cannot resolve a tornado; the app's 250 m GPU version is the set-up for seeing whether one forms (R6).
 
+### 4.5b 強低層風切環境：500 m 就出現類龍捲渦旋 / Strong low-level shear: a tornado-like vortex already at 500 m
+`node dist/tools/runTornado.js 120 500 40000 40 400 3 results/tornado_500m`（新預設環境 / new default environment）
+
+四分之一圓風徑圖改成 12 m/s、深 1 km（0–1 km 風暴相對螺旋度約 280 m²/s²，舊的約 120），邊界層水氣上限 16 g/kg
+（CAPE 約 3200 J/kg、雲底約 0.9 km）。同樣 500 m、40 km 開放邊界、跟隨風暴：
+
+| 時間 / Time (min) | 30 | 60 | 75 | 80 | 85 | 95 | 100 | 110 | 120 |
+|---|---|---|---|---|---|---|---|---|---|
+| 最大上升 / w max (m/s) | 56 | 63 | 48 | 40 | 60 | 65 | 59 | 59 | 57 |
+| 3 km 渦度 / ζ at 3 km (s⁻¹) | 0.042 | 0.035 | 0.044 | 0.046 | 0.073 | 0.083 | 0.074 | 0.059 | 0.049 |
+| 地面渦度 / ζ near the ground (s⁻¹) | 0.004 | 0.013 | 0.026 | 0.068 | 0.098 | 0.104 | 0.092 | 0.062 | 0.075 |
+| 對地風 / ground-relative wind (m/s) | 10.9 | 15.7 | 22.7 | 32.3 | 34.4 | 34.8 | 36.1 | 26.5 | 26.2 |
+
+約 80 分鐘時近地面渦度在 5 分鐘內由 0.026 增到 0.068 s⁻¹，85–100 分鐘維持約 0.1 s⁻¹、對地風 34–36 m/s（EF0 範圍，
+龍捲偵測器的門檻），110 分鐘後減弱：一個約 20–25 分鐘的類龍捲渦旋，完全由方程產生。舊環境（WK82）同樣設定兩小時只到
+0.02 s⁻¹、16 m/s。500 m 仍太粗，渦旋寬度只有幾格；250 m（GPU）應該更強、更窄。
+With the quarter circle changed to 12 m/s over 1 km (0–1 km storm-relative helicity about 280 m²/s², formerly about 120) and a
+16 g/kg boundary layer (CAPE about 3200 J/kg, cloud base about 0.9 km), the same 500 m, 40 km, open-boundary, storm-following run
+produces a tornado-like vortex: near-surface vorticity jumps from 0.026 to 0.068 s⁻¹ within five minutes at about 80 min, stays near
+0.1 s⁻¹ with 34–36 m/s ground-relative winds (EF0 range, the detector's threshold) from 85 to 100 min, and decays after 110 min, a
+lifecycle of about 20–25 minutes produced by the equations alone. The former WK82 environment reached only 0.02 s⁻¹ and 16 m/s in
+two hours. At 500 m the vortex is only a few cells wide; at 250 m (GPU) it should be narrower and stronger.
+
+![3 km vorticity at 90 min](results/tornado_strongLLS_vort3km_90.svg)
+
 ## 5. 尚未達成 / Not yet achieved
 
 - 亞洲季風的季節性（見 2.2）→ R7 非灰體輻射與雲。
