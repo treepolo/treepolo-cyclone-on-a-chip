@@ -4,7 +4,7 @@
 // on the CPU); this module only draws them and accumulates the time series.
 
 import { parcelAscent, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
-import { isTcExperiment, type ChartRequest, type RegionalFrame, type RegionalExperiment } from './protocol.js';
+import { isTcExperiment, type ChartRequest, type RegionalFrame, type RegionalExperiment, type TcRain } from './protocol.js';
 import { INK, SERIES, FONT, FONT_SMALL, type Rect, type Scale, type ScaleKind, colorOf, niceCeil, ticks, fmt, drawField, drawColorbar, drawAxes, drawContours, drawArrow, drawBarb, haloText, tooltip } from './chartDraw.js';
 
 export type ViewKind = '3d' | 'slice' | 'composite' | 'section' | 'rz' | 'sounding' | 'series' | 'hovmoller';
@@ -78,7 +78,7 @@ function scaleFor(name: string, data: ArrayLike<number>): Scale {
   return { kind: vi.scale, lo, hi, gamma: vi.gamma ?? 1, clear: vi.clear ?? null, reverse: !!vi.reverse };
 }
 
-interface Sample { t: number; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null; ew: { r: number; v: number }[] | null }
+interface Sample { t: number; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null; ew: { r: number; v: number }[] | null; tcRain: TcRain | null }
 interface GridInfo { nx: number; ny: number; nz: number; dx: number; dy: number; dz: number; experiment: RegionalExperiment; land: Uint8Array | null }
 type MapFrame = { r: Rect; Lx: number; Ly: number };
 /** what a click or drag on a map does */
@@ -166,7 +166,7 @@ export class RegionalCharts {
   onFrame(f: RegionalFrame): void {
     this.frame = f;
     const s = f.stats;
-    const smp: Sample = { t: f.time, dp: s.dp, vmax: s.vmax, rmw: s.rmw, wmax: s.wmax, zeta: s.zetaMax, uh: s.uhMax, dbz: s.dbzMax, vg: s.vGround, rain: s.rainmax, cape: s.capeMax, storm: s.storm, ew: s.eyewalls };
+    const smp: Sample = { t: f.time, dp: s.dp, vmax: s.vmax, rmw: s.rmw, wmax: s.wmax, zeta: s.zetaMax, uh: s.uhMax, dbz: s.dbzMax, vg: s.vGround, rain: s.rainmax, cape: s.capeMax, storm: s.storm, ew: s.eyewalls, tcRain: s.tcRain ?? null };
     const last = this.samples[this.samples.length - 1];
     if (last && f.time < last.t - 1e-6) { this.samples = []; this.hov = []; }
     if (last && Math.abs(f.time - last.t) < 1e-6) this.samples[this.samples.length - 1] = smp; else this.samples.push(smp);
@@ -182,8 +182,9 @@ export class RegionalCharts {
 
   /** Series as CSV (time in hours). */
   seriesCsv(): string {
-    const rows = ['t_h,dp_hPa,vmax_ms,rmw_km,wmax_ms,zeta_s-1,uh_m2s2,dbz_max,vground_ms,rainmax_mm,cape_max_Jkg,storm_x_km,storm_y_km'];
-    for (const s of this.samples) rows.push([s.t / 3600, s.dp, s.vmax, s.rmw === null ? null : s.rmw / 1000, s.wmax, s.zeta, s.uh, s.dbz, s.vg, s.rain, s.cape, s.storm ? s.storm.x / 1000 : null, s.storm ? s.storm.y / 1000 : null]
+    const rows = ['t_h,dp_hPa,vmax_ms,rmw_km,wmax_ms,zeta_s-1,uh_m2s2,dbz_max,vground_ms,rainmax_mm,cape_max_Jkg,storm_x_km,storm_y_km,rain_core_mmh,rain_outer_mmh,wet_outer'];
+    for (const s of this.samples) rows.push([s.t / 3600, s.dp, s.vmax, s.rmw === null ? null : s.rmw / 1000, s.wmax, s.zeta, s.uh, s.dbz, s.vg, s.rain, s.cape, s.storm ? s.storm.x / 1000 : null, s.storm ? s.storm.y / 1000 : null,
+      s.tcRain?.core ?? null, s.tcRain?.outer ?? null, s.tcRain?.wet ?? null]
       .map((v) => (v === null || v === undefined ? '' : +Number(v).toPrecision(6))).join(','));
     return rows.join('\n');
   }
@@ -741,6 +742,7 @@ export class RegionalCharts {
       { label: '最大地面風 / Max surface wind', unit: 'm/s', get: (s) => s.vmax, digits: 1 },
       { label: '最大風速半徑 / Radius of max wind', unit: 'km', get: (s) => (s.rmw === null ? null : s.rmw / 1000), digits: 0 },
       { label: '最大上升速度 / Max updraft', unit: 'm/s', get: (s) => s.wmax, digits: 1 },
+      { label: '外圍雨量（100–300 km，雨帶）/ Outer rain (rainbands)', unit: 'mm/h', get: (s) => s.tcRain?.outer ?? null, digits: 2 },
     ] : [
       { label: '最大上升速度 / Max updraft', unit: 'm/s', get: (s) => s.wmax, digits: 1 },
       { label: '最大上升氣流螺旋度（2–5 km）/ Max updraft helicity', unit: 'm²/s²', get: (s) => s.uh, digits: 0 },
