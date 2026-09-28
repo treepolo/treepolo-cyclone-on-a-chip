@@ -20,7 +20,10 @@
 // are between species, limited so that no species goes negative: total water is conserved exactly.
 
 import { DRY_AIR } from '../core/constants.js';
-import { RegionalModel } from './core.js';
+import type { RegionalModel } from './core.js';
+
+/** The model members the microphysics uses (the 3-D regional model and the axisymmetric model both have them). */
+export type MicroHost = Pick<RegionalModel, 'c' | 'idx' | 'th' | 'pp' | 'scalars' | 'rho0' | 'pi0'>;
 
 export const QV = 0, QC = 1, QR = 2, QI = 3, QS = 4, QG = 5;
 
@@ -63,7 +66,7 @@ export class IceMicrophysics {
   readonly snowAcc: Float64Array;
   clipped = 0;
 
-  constructor(private readonly m: RegionalModel) {
+  constructor(private readonly m: MicroHost) {
     if (m.scalars.length < 6) throw new Error('IceMicrophysics needs 6 scalars (qv, qc, qr, qi, qs, qg)');
     this.rainAcc = new Float64Array(m.c.nx * m.c.ny);
     this.snowAcc = new Float64Array(m.c.nx * m.c.ny);

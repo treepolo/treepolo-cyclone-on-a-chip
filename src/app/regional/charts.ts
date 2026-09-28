@@ -4,7 +4,7 @@
 // on the CPU); this module only draws them and accumulates the time series.
 
 import { parcelAscent, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
-import type { ChartRequest, RegionalFrame, RegionalExperiment } from './protocol.js';
+import { isTcExperiment, type ChartRequest, type RegionalFrame, type RegionalExperiment } from './protocol.js';
 import { INK, SERIES, FONT, FONT_SMALL, type Rect, type Scale, type ScaleKind, colorOf, niceCeil, ticks, fmt, drawField, drawColorbar, drawAxes, drawContours, drawArrow, drawBarb, haloText, tooltip } from './chartDraw.js';
 
 export type ViewKind = '3d' | 'slice' | 'composite' | 'section' | 'rz' | 'sounding' | 'series' | 'hovmoller';
@@ -381,7 +381,7 @@ export class RegionalCharts {
 
   private underlay(): (i: number, j: number) => [number, number, number] {
     const g = this.grid!, land = g.land, sea: [number, number, number] = [15, 28, 43], ground: [number, number, number] = [26, 34, 26];
-    const allSea = g.experiment === 'tc' || g.experiment === 'tc_hr';
+    const allSea = isTcExperiment(g.experiment);
     return (i, j) => (land ? (land[j * g.nx + i] ? ground : sea) : allSea ? sea : ground);
   }
 
@@ -693,7 +693,7 @@ export class RegionalCharts {
   private drawSeries(area: Rect): void {
     const ctx = this.ctx, S = this.samples;
     if (S.length < 2) { this.centerText('等待資料… / Waiting for data… / 時間序列在模式執行時累積 / series accumulate while the model runs', area); return; }
-    const tc = this.grid && (this.grid.experiment === 'tc' || this.grid.experiment === 'tc_hr');
+    const tc = this.grid && isTcExperiment(this.grid.experiment);
     type P = { label: string; unit: string; get: (s: Sample) => number | null; digits: number };
     const panels: P[] = tc ? [
       { label: '中心氣壓降 / Central pressure deficit', unit: 'hPa', get: (s) => s.dp, digits: 1 },
@@ -770,7 +770,7 @@ export class RegionalCharts {
     if (mark?.storm) { ctx.beginPath(); ctx.arc(X(mark.storm.x), Y(mark.storm.y), 7, 0, 2 * Math.PI); ctx.strokeStyle = '#fafafa'; ctx.lineWidth = 1.5; ctx.stroke(); }
     ctx.restore();
     ctx.font = FONT_SMALL; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-    const tc = this.grid && (this.grid.experiment === 'tc' || this.grid.experiment === 'tc_hr');
+    const tc = this.grid && isTcExperiment(this.grid.experiment);
     ctx.fillText(tc ? '颱風中心路徑 / TC centre track' : '風暴路徑 / Storm track', r.x, r.y - 4);
     ctx.fillStyle = INK.secondary; ctx.textBaseline = 'top';
     ctx.fillText('○ 起點 / start  ● 目前 / now' + (tc ? '' : ' · 位置：最強 UH（無旋轉時為最強上升氣流）/ position: max UH (max updraft before rotation)'), r.x, r.y + r.h + 32, r.w + 40);

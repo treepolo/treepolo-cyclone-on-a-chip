@@ -173,6 +173,28 @@ A 15 m/s vortex over a 28 °C sea gestates for about 3 days, then intensifies ra
 ![w](results/tc15_ice_w_rz_d6.svg)
 ![wind](results/tc15_ice_wind_sfc_d6.svg)
 
+### 4.3b 軸對稱快速版熱帶氣旋 / Axisymmetric tropical cyclone (fast version)
+`src/regional/axisym.ts`：同樣的方程、數值方法與物理，只算半徑–高度（Δr 4 km、半徑 800 km、Δz 1 km、25 km 深）；
+同樣的 28 °C 海面、RE87 初始渦旋、六類冰相、混合長度 1000 / 100 m。本環境（負載中的 CPU）6 天約 11 分鐘。
+Same equations, numerics and physics in radius–height only (Δr 4 km to 800 km, Δz 1 km, 25 km deep), same 28 °C sea,
+RE87 vortex, six-class ice, mixing lengths 1000 / 100 m. Six days took about 11 minutes on this (loaded) machine.
+
+| 時間 / Time | 24 h | 48 h | 72 h | 96 h | 108 h | 120 h | 132 h | 141 h | 144 h |
+|---|---|---|---|---|---|---|---|---|---|
+| 最大地面風 / Vmax (m/s) | 11.1 | 11.9 | 12.2 | 15.9 | 19.4 | 38.5 | 62.2 | 69.1 | 65.4 |
+| 中心氣壓降 / Δp (hPa) | −4.4 | −3.0 | −5.4 | −7.8 | −9.2 | −15.8 | −31.4 | −43.4 | −41.0 |
+| 最大風半徑 / RMW (km) | 166 | 158 | 158 | 18 | 74 | 38 | 22 | 18 | 18 |
+
+醞釀約 4.5 天（比 3D 長，軸對稱模式沒有隨機擾動與非對稱對流），之後 30 小時內由 19 增強到 69 m/s，接近此海溫的潛在強度
+（約 70 m/s）；3D 15 km 受解析度限制只到 40–46 m/s。適合先篩選參數（最小陣風、輻射冷卻、混合長度、海溫），再到 3D 確認。
+測試：靜止大氣保持靜止、平衡渦旋 3 小時不變、角動量守恆（含亂流混合）、軸對稱暖泡長成降雨的深對流（`node dist/tests/axisym.js`）。
+Gestation takes about 4.5 days (longer than in 3-D: no random perturbations or asymmetric convection), then the storm
+intensifies from 19 to 69 m/s within 30 hours, close to the potential intensity for this SST (about 70 m/s), whereas the 3-D
+15 km run is resolution-limited at 40–46 m/s. Use it to screen parameters (gustiness, radiative cooling, mixing lengths, SST)
+before a 3-D run. Tests: rest stays at rest, a balanced vortex stays steady for 3 hours, angular momentum is conserved (also
+with mixing), an axisymmetric warm bubble grows into a raining deep updraft (`node dist/tests/axisym.js`).
+Sweeps: `node dist/tools/runAxisym.js days=6 sweep=vmin:1,3,5`（每個 CPU 核心一組 / one run per CPU core）.
+
 ### 4.4 單向巢狀：全球模式中的區域預報 / One-way nest inside the Earth model
 `node dist/tools/runNest.js results/EARTH_T21 auto 30 24 20`
 

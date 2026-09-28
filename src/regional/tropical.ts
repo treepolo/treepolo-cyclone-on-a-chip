@@ -153,10 +153,17 @@ export function eyewallProfile(m: RegionalModel, z = 1500): { r: number[]; vt: n
   const raw = Array.from(sum, (s, b) => (cnt[b]! > 0 ? s / cnt[b]! : 0));
   const vt = raw.map((_, b) => (raw[Math.max(0, b - 1)]! + 2 * raw[b]! + raw[Math.min(nb - 1, b + 1)]!) / 4);
   const r = vt.map((_, b) => (b + 0.5) * dx);
-  const vmax = Math.max(...vt);
+  const peaks = eyewallPeaks(r, vt);
+  return { r, vt, peaks, concentric: peaks.length >= 2 };
+}
+
+/** Local maxima of a (smoothed) tangential-wind profile vt(r) above 10 m/s and half the maximum, keeping
+ *  only maxima separated by a moat at least 10 % below the weaker neighbouring peak. */
+export function eyewallPeaks(r: ArrayLike<number>, vt: ArrayLike<number>): { r: number; v: number }[] {
+  const nb = vt.length;
+  let vmax = -Infinity; for (let b = 0; b < nb; b++) vmax = Math.max(vmax, vt[b]!);
   const peaks: { r: number; v: number; b: number }[] = [];
   for (let b = 1; b < nb - 1; b++) if (vt[b]! > vt[b - 1]! && vt[b]! >= vt[b + 1]! && vt[b]! > 0.5 * vmax && vt[b]! > 10) peaks.push({ r: r[b]!, v: vt[b]!, b });
-  // keep maxima separated by a moat at least 10 % below the weaker neighbour peak
   const kept: typeof peaks = [];
   for (const p of peaks) {
     const last = kept[kept.length - 1];
@@ -165,5 +172,5 @@ export function eyewallProfile(m: RegionalModel, z = 1500): { r: number[]; vt: n
     if (moat < 0.9 * Math.min(last.v, p.v)) kept.push(p);
     else if (p.v > last.v) kept[kept.length - 1] = p;
   }
-  return { r, vt, peaks: kept.map(({ r: rr, v }) => ({ r: rr, v })), concentric: kept.length >= 2 };
+  return kept.map(({ r: rr, v }) => ({ r: rr, v }));
 }

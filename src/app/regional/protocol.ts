@@ -1,7 +1,9 @@
 // Messages between the regional-model UI and its worker.
 import type { MapVar, SliceVar, SectionVar, RzVar } from '../../regional/diagnostics.js';
 
-export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest' | 'tornado' | 'tornado_c';
+export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest' | 'tornado' | 'tornado_c' | 'tc_axi';
+/** tropical-cyclone experiments (radius-height charts, Hovmoller) */
+export const isTcExperiment = (e: RegionalExperiment): boolean => e === 'tc' || e === 'tc_hr' || e === 'tc_axi';
 /** coarse-to-fine refinement: each coarse spin-up experiment and the finer experiment it continues as */
 export const REFINE_TO: Partial<Record<RegionalExperiment, RegionalExperiment>> = { supercell: 'supercell_hr', tc: 'tc_hr', tornado_c: 'tornado' };
 
@@ -23,7 +25,7 @@ export const NEST_HALF_WIDTH_KM: Record<NestSize, number> = { meso: 600, storm: 
 export type GroundField = 'rain' | 'wind' | 'theta' | 'snow';
 
 export type ToRegionalWorker =
-  | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu' }
+  | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu'; axi?: import('./axiDriver.js').AxiParams }
   | { type: 'initNest'; payload: NestPayload; lat0: number; lon0: number; size: NestSize; backend: 'auto' | 'cpu' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }

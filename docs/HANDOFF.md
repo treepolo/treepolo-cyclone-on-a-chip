@@ -63,5 +63,13 @@
   藍–灰–紅發散；雷達回波用 NWS 色階、紅外雲頂用強化灰階（領域慣例）。
 - 測試方式：在 Node 用 CPU 先跑出成熟狀態寫成存檔（`packSave`），再用 playwright 匯入存檔截圖各圖（本環境 SwiftShader 太慢，跑不出成熟風暴）。
 
+## 軸對稱快速版颱風模式（ROADMAP 3b，已完成）
+- 模式：`src/regional/axisym.ts`（徑向 C 網格，v 用 r² 通量形式以守恆角動量；RK3＋聲波分裂、隱式 w–π′、5 階平流、正定限制器；
+  Smagorinsky 圓柱座標混合、海面通量含最小風速 vmin、Newtonian 冷卻；冰相微物理直接沿用 `IceMicrophysics`（`MicroHost` 型別））。
+- 網頁：實驗「颱風軸對稱快速版」（`axiDriver.ts`）在 worker 內以 CPU 跑，參數面板（海溫、緯度、Δr、初始風、lh、lv、Ck、vmin、輻射冷卻上限）；
+  顯示時把半徑–高度場繞軸旋轉到 160×160 的顯示網格，所以 3D、地圖、切面、剖面、探空都能用；r–z 與 Hovmöller 用原始場。存檔讀檔可用。
+- 命令列：`node dist/tools/runAxisym.js days=6 sweep=vmin:1,3,5`（worker_threads，每核心一組，CSV 在 results/axisym）。
+- 測試：`node dist/tests/axisym.js`（6 項，已加入 `npm test`）。
+
 ## 下一步
-依 ROADMAP 順序：軸對稱快速版颱風模式 → 颱風雨帶（只有眼牆有雲）→ 多重眼牆與置換 → 龍捲 → 互動機制。
+依 ROADMAP 順序：颱風雨帶（只有眼牆有雲；先用軸對稱版篩選 vmin、輻射、混合長度）→ 多重眼牆與置換 → 龍捲 → 互動機制。

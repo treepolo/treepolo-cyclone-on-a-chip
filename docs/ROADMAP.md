@@ -44,6 +44,10 @@ refinement for the tornado item).
 - 超大胞指標（最大上升速度、地面渦度、UH、路徑）；3D 可切換變數、軌跡粒子
 - GPU 上先算好診斷量，只讀回切面；全球模式圖表之後再加
 
+## 3b. 軸對稱快速版颱風模式 / Axisymmetric fast TC model（已完成 / done）
+`src/regional/axisym.ts`（模式）、`src/app/regional/axiDriver.ts`（區域頁面的「颱風軸對稱快速版」，繞軸旋轉成 3D 顯示，所有圖表可用）、
+`src/tools/runAxisym.ts`（命令列、多核心參數掃描）。28 °C、Δr 4 km：約 4.5 天醞釀後 30 小時內增強到 69 m/s（見 RESULTS 4.3b）。
+
 ## 4. 颱風雨帶診斷與修正 / Tropical-cyclone rainbands
 - 現況：只有眼牆有雲
 - 檢查弱風區地面通量（最小陣風 3–5 m/s）、中層濕度、輻射冷卻、水平混合、邊界與範圍

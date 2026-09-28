@@ -10,6 +10,7 @@ import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { refineInto } from '../../regional/refine.js';
 import { Tracers, type TracerParams } from '../../regional/tracers.js';
+import { AxiDriver, AXI_DEFAULTS, type AxiParams } from './axiDriver.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { tornadoExperiment, StormTracker } from '../../regional/supercell.js';
@@ -37,8 +38,10 @@ let builtGpu = false;
 const pacer = new Pacer();
 let frameMode: { kind: 'wall' | 'model' | 'fast'; every: number } = { kind: 'wall', every: 0 };
 let lastFrameModel = 0;
-const modelNow = (): number => (gpu ? gpu.time : m ? m.time : 0);
-const dtNow = (): number => (gpu ? gpu.dt : m ? m.c.dt : 1);
+// the axisymmetric tropical-cyclone experiment runs through its own driver (CPU, revolved for display)
+let axi: AxiDriver | null = null;
+const modelNow = (): number => (axi ? axi.time : gpu ? gpu.time : m ? m.time : 0);
+const dtNow = (): number => (axi ? axi.dt : gpu ? gpu.dt : m ? m.c.dt : 1);
 function frameDue(): boolean {
   const el = performance.now() - lastFrame;
   if (frameMode.kind === 'fast') return el > 5000;
@@ -77,7 +80,7 @@ function advectTracers(dt: number, nsteps: number): void {
   else tracers.advect(dt, nsub);
 }
 async function refreshFrame(): Promise<void> {
-  if (running || !m) return;
+  if (running || (!m && !axi)) return;
   while (busy) await new Promise((r) => setTimeout(r, 5));
   busy = true;
   try { await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
@@ -85,7 +88,7 @@ async function refreshFrame(): Promise<void> {
 }
 const EXP_LABEL: Record<RegionalExperiment, string> = {
   supercell: '超大胞 2 km / supercell 2 km', supercell_hr: '超大胞 1 km / supercell 1 km', tc: '熱帶氣旋 15 km / tropical cyclone 15 km',
-  tc_hr: '熱帶氣旋 5 km / tropical cyclone 5 km', tornado: '龍捲超大胞 250 m / tornadic supercell 250 m', tornado_c: '龍捲超大胞 1 km / tornadic supercell 1 km', nest: '巢狀區域 / nest',
+  tc_hr: '熱帶氣旋 5 km / tropical cyclone 5 km', tornado: '龍捲超大胞 250 m / tornadic supercell 250 m', tornado_c: '龍捲超大胞 1 km / tornadic supercell 1 km', nest: '巢狀區域 / nest', tc_axi: '軸對稱颱風 / axisymmetric TC',
 };
 
 // Adaptive time step (GPU): dt = min(acoustic limit, CFL_TARGET / max(|u|/dx + |v|/dy + |w|/dz)),
@@ -225,11 +228,26 @@ function buildNest(g: NestPayload, lat0: number, lon0: number, size: NestSize, g
 self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
   const msg = ev.data;
   try {
-    if (msg.type === 'init') {
+    if (msg.type === 'init' && msg.experiment === 'tc_axi') {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
       busy = true;
       try {
+        gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
+        experiment = 'tc_axi'; frameVel = { u: 0, v: 0 };
+        axi = new AxiDriver({ ...AXI_DEFAULTS, ...(msg.axi ?? {}) });
+        resetOrigin(); stormDomain = null; tracers = null;
+        post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu',
+          note: '軸對稱模式在 CPU 上執行（很快）；3D 畫面是把半徑–高度場繞軸旋轉 / the axisymmetric model runs on the CPU (fast); the 3-D view revolves the radius-height fields', refineTo: null });
+        await sendFrame();
+      } finally { busy = false; }
+    }
+    else if (msg.type === 'init') {
+      running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+      axi = null;
       const device = msg.backend === 'cpu' ? null : await getGpu();
       gpu?.destroy(); gpu = null;
       let info = build(msg.experiment, !!device);
@@ -251,6 +269,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       while (busy) await new Promise((r) => setTimeout(r, 5));
       busy = true;
       try {
+      axi = null;
       const device = msg.backend === 'cpu' ? null : await getGpu();
       gpu?.destroy(); gpu = null;
       let info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, !!device);
@@ -270,6 +289,13 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'pace') { pacer.target = Math.max(0, msg.target); pacer.reset(modelNow()); }
     else if (msg.type === 'runUntil') { pacer.until = msg.hours > 0 ? modelNow() + msg.hours * 3600 : null; }
     else if (msg.type === 'frames') { frameMode = { kind: msg.kind, every: msg.every ?? 0 }; }
+    else if (msg.type === 'step1' && axi) {
+      if (running) return;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try { axi.step(1); await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
+      busy = false;
+    }
     else if (msg.type === 'step1') {
       if (running || !m || !mp) return;
       while (busy) await new Promise((r) => setTimeout(r, 5));
@@ -289,6 +315,19 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'tracers') {
       while (busy) await new Promise((r) => setTimeout(r, 5));
       tracerN = Math.max(0, Math.min(65536, msg.n | 0)); setupTracers(); await refreshFrame();
+    }
+    else if (msg.type === 'save' && axi) {
+      const wasRunning = running; running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        const a = axi.ax, t = a.time;
+        const meta = { kind: 'regional' as const, title: `${EXP_LABEL.tc_axi} · ${(t / 3600).toFixed(1)} h`, experiment: 'tc_axi', builtGpu: false, axi: axi.p,
+          grid: { nx: a.a.nr, ny: 1, nz: a.a.nz, dx: a.a.dr, dz: a.a.dz, size: a.size, nsc: a.scalars.length }, time: t, steps: a.steps, dt: a.a.dt, frameVel, dpEnv: 0, adaptive: false, nest: null, origin };
+        const buffer = packSave(meta, axi.arrays());
+        post({ type: 'saveData', meta, buffer }, [buffer]);
+      } catch (e) { post({ type: 'error', message: `存檔失敗 / save failed: ${String(e)}` }); }
+      busy = false; running = wasRunning;
     }
     else if (msg.type === 'save') {
       if (!m || !mp) return;
@@ -324,6 +363,17 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         const { meta, arrays } = unpackSave(msg.buffer);
         const M = meta as unknown as { experiment: RegionalExperiment; builtGpu: boolean; grid: { nx: number; ny: number; nz: number; size: number; nsc: number }; time: number; steps: number; dt: number; frameVel: { u: number; v: number }; dpEnv: number; nest: Record<string, unknown> | null; origin?: { x: number; y: number } };
         if (meta.kind !== 'regional') throw new Error('不是區域模式存檔 / not a regional save');
+        if (M.experiment === 'tc_axi') {
+          gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null; experiment = 'tc_axi'; frameVel = { u: 0, v: 0 };
+          axi = new AxiDriver({ ...AXI_DEFAULTS, ...((meta as unknown as { axi?: AxiParams }).axi ?? {}) });
+          axi.restore(arrays as Record<string, Float32Array>, M.time, M.steps);
+          resetOrigin(); stormDomain = null; tracers = null;
+          post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu', note: `已載入存檔 / save loaded (t = ${(M.time / 3600).toFixed(2)} h)`, refineTo: null });
+          busy = false;
+          await sendFrame();
+          return;
+        }
+        axi = null;
         const device = msg.backend === 'cpu' ? null : await getGpu();
         gpu?.destroy(); gpu = null;
         let info: { dt: number; description: string; land?: Uint8Array | null };
@@ -432,7 +482,24 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
 
 async function loop(): Promise<void> {
   for (;;) {
-    if (m && mp && running && !busy) {
+    if (axi && running && !busy) {
+      busy = true;
+      try {
+        // steps for about 40 ms x the work setting, within the pacer's allowance
+        const t0 = performance.now(), want = pacer.allow(axi.time, axi.dt, 400 * stepsPerTick);
+        let n = 0;
+        while (n < want && performance.now() - t0 < 40 * stepsPerTick) { axi.step(1); n++; rateSteps++; }
+        if (n === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
+        if (pacer.reached(modelNow())) {
+          running = false;
+          await sendFrame();
+          post({ type: 'paused', reason: `已到達設定時間，自動暫停 / reached the stop time (t = ${(modelNow() / 3600).toFixed(2)} h)` });
+        }
+        if (running && frameDue()) await sendFrame();
+      } catch (e) { running = false; post({ type: 'error', message: String(e) }); }
+      busy = false;
+    }
+    else if (m && mp && running && !busy) {
       busy = true;
       try {
         if (gpu) {
@@ -515,6 +582,12 @@ async function syncFromGpu(): Promise<void> {
 }
 
 async function sendFrame(): Promise<void> {
+  if (axi) {
+    lastFrame = performance.now(); lastFrameModel = modelNow();
+    const { msg, transfer } = axi.frame(chartReq, ground, volMode, rate, { ...origin });
+    post(msg, transfer);
+    return;
+  }
   if (!m || !mp) return;
   lastFrame = performance.now(); lastFrameModel = modelNow();
   const { nx, ny, nz, dx, dz } = m.c, n = nx * ny * nz;
