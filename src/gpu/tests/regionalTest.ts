@@ -69,6 +69,23 @@ export async function regionalTests(): Promise<void> {
     gcheck('regional TC physics, 5 steps: theta rel L2 < 1e-5', dth < 1e-5, dth);
     gcheck('regional TC physics, 5 steps: qv rel L2 < 1e-3', dq < 1e-3, dq);
   }
+  // ---- the same with constant clear-sky cooling and a 4 m/s minimum wind in the surface fluxes
+  {
+    const nx = 16, nz = 16, dx = 20000, dz = 1250, f = 5e-5;
+    const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: 60, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 5000, dampRate: 1 / 300, kdiff2: 0 }, tropicalSounding(301.15, 200, 0.6), 3);
+    const mp = new KesslerMicrophysics(m);
+    const cfg = { lh: 4000, lv: 100, sst: 301.15, ck: 1.2e-3, radTau: 12 * 3600, radMax: 2 / 86400, vmin: 4, radConst: 1.5 / 86400 };
+    new RegionalPhysics(m, cfg);
+    insertVortex(m, f, 15);
+    for (let s = 0; s < 30; s++) { m.step(); mp.apply(60); }
+    const g = new GpuRegional(device, m, { moist: true, physics: cfg });
+    g.uploadFrom(m);
+    for (let s = 0; s < 5; s++) { m.step(); mp.apply(60); }
+    g.step(5);
+    const st = await g.readState();
+    const du = cmp(m, st, 0, m.u, nz), dth = cmp(m, st, 3, m.th, nz), dq = cmp(m, st, 5, m.scalars[QV]!, nz);
+    gcheck('regional TC physics with constant cooling and vmin 4 m/s, 5 steps: u < 1e-3, theta < 1e-5, qv < 1e-3', du < 1e-3 && dth < 1e-5 && dq < 1e-3, `${du.toExponential(1)} ${dth.toExponential(1)} ${dq.toExponential(1)}`);
+  }
 }
 
 /** Analytic global state for nesting tests: midlatitude jet with a wave, moist lower troposphere. */

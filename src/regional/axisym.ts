@@ -42,6 +42,9 @@ export interface AxisymConfig {
   vmin: number;
   /** Newtonian cooling time scale (s, 0 = off) and maximum cooling rate (K/s) */
   radTau: number; radMax: number;
+  /** constant clear-sky cooling (K/s) in the troposphere instead of the relaxation (0 = RE87 relaxation);
+   *  the stratosphere (base-state T < 210 K) still relaxes toward the base state */
+  radConst?: number;
 }
 
 const PR = 1 / 3;   // turbulent Prandtl number (scalars mix with K / PR)
@@ -325,9 +328,13 @@ export class AxisymModel {
     const t = this.pc, add = (o: Float64Array, a: Float64Array): void => { for (let i = 0; i < o.length; i++) o[i] = o[i]! + a[i]!; };
     add(this.fu, t.fu); add(this.fv, t.fv); add(this.fw, t.fw); add(this.fth, t.fth);
     for (let s = 0; s < this.fsc.length; s++) add(this.fsc[s]!, t.fsc[s]!);
-    if (this.a.radTau > 0) for (let k = 0; k < nz; k++) for (let i = 0; i < nr; i++) {
-      const q = this.idx(i, 0, k);
-      this.fth[q] = this.fth[q]! + Math.max(-(this.th[q]! - this.th0[k]!) / this.a.radTau, -this.a.radMax / this.pi0[k]!);
+    const rc = this.a.radConst ?? 0;
+    if (this.a.radTau > 0 || rc > 0) for (let k = 0; k < nz; k++) {
+      const trop = rc > 0 && this.th0[k]! * this.pi0[k]! > 210;
+      for (let i = 0; i < nr; i++) {
+        const q = this.idx(i, 0, k);
+        this.fth[q] = this.fth[q]! + (trop ? -rc / this.pi0[k]! : Math.max(-(this.th[q]! - this.th0[k]!) / this.a.radTau, -this.a.radMax / this.pi0[k]!));
+      }
     }
   }
 

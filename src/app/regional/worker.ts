@@ -40,6 +40,8 @@ let frameMode: { kind: 'wall' | 'model' | 'fast'; every: number } = { kind: 'wal
 let lastFrameModel = 0;
 // the axisymmetric tropical-cyclone experiment runs through its own driver (CPU, revolved for display)
 let axi: AxiDriver | null = null;
+/** tropical-cyclone environment chosen on the page (SST, humidity, radiation, gustiness, ...) for the 3-D TC experiments too */
+let tcEnv: Partial<AxiParams> | null = null;
 const modelNow = (): number => (axi ? axi.time : gpu ? gpu.time : m ? m.time : 0);
 const dtNow = (): number => (axi ? axi.dt : gpu ? gpu.dt : m ? m.c.dt : 1);
 function frameDue(): boolean {
@@ -88,7 +90,7 @@ async function refreshFrame(): Promise<void> {
 }
 const EXP_LABEL: Record<RegionalExperiment, string> = {
   supercell: '超大胞 2 km / supercell 2 km', supercell_hr: '超大胞 1 km / supercell 1 km', tc: '熱帶氣旋 15 km / tropical cyclone 15 km',
-  tc_hr: '熱帶氣旋 5 km / tropical cyclone 5 km', tornado: '龍捲超大胞 250 m / tornadic supercell 250 m', tornado_c: '龍捲超大胞 1 km / tornadic supercell 1 km', nest: '巢狀區域 / nest', tc_axi: '軸對稱颱風 / axisymmetric TC',
+  tc_hr: '熱帶氣旋 5 km / tropical cyclone 5 km', tc_3: '熱帶氣旋 3 km / tropical cyclone 3 km', tornado: '龍捲超大胞 250 m / tornadic supercell 250 m', tornado_c: '龍捲超大胞 1 km / tornadic supercell 1 km', nest: '巢狀區域 / nest', tc_axi: '軸對稱颱風 / axisymmetric TC',
 };
 
 // Adaptive time step (GPU): dt = min(acoustic limit, CFL_TARGET / max(|u|/dx + |v|/dy + |w|/dz)),
@@ -186,15 +188,19 @@ function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; descripti
     }
     return { dt: dtm, description: `Weisman–Klemp (1982) 超大胞 / supercell（Δx ${dx / 1000} km）：暖泡在 30 m/s 低層垂直風切中觸發 / warm bubble in 30 m/s low-level shear` };
   } else {
-    const hr = exp === 'tc_hr';
-    const L = 1200000, dx = hr ? 5000 : 15000, nx = L / dx, nz = hr ? 50 : 25, dz = hr ? 500 : 1000, f = 5e-5, sst = 301.15, dtm = hr ? 30 : 60;
-    m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: dtm, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, tropicalSounding(sst), 6);
+    const hr = exp === 'tc_hr' || exp === 'tc_3', P = { ...AXI_DEFAULTS, ...(tcEnv ?? {}) };
+    // 3 km needs a discrete GPU; without one the 3 km experiment runs on the 5 km grid
+    const L = 1200000, dx = exp === 'tc_3' && gpuOk ? 3000 : hr ? 5000 : 15000, nx = L / dx, nz = hr ? 50 : 25, dz = hr ? 500 : 1000, f = P.f, sst = P.sst, dtm = dx === 3000 ? 18 : hr ? 30 : 60;
+    m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: dtm, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, tropicalSounding(sst, 200, P.rhTop), 6);
     mp = new IceMicrophysics(m);
-    physCfg = { lh: hr ? 1000 : 0.2 * dx, lv: 100, sst, ck: 1.2e-3, radTau: 12 * 3600, radMax: 2 / 86400 };
+    // the mixing lengths stay those of the 3-D set-up (the panel's lh / lv apply to the axisymmetric version)
+    physCfg = { lh: 0.2 * dx, lv: 100, sst, ck: P.ck, radTau: 12 * 3600, radMax: P.radMax / 86400, vmin: P.vmin, radConst: P.radConst / 86400 };
     new RegionalPhysics(m, physCfg);
-    insertVortex(m, f, 15);
+    insertVortex(m, f, P.vmax0);
     dpEnv = 1e5 * Math.pow(m.pi0[0]!, 1004.5 / 287.05) / 100;
-    return { dt: dtm, description: `熱帶氣旋 / tropical cyclone：28°C 海面上的弱渦旋（f 平面，Δx ${dx / 1000} km）/ weak vortex over a 28 °C sea (f-plane)` };
+    const env = `${(sst - 273.15).toFixed(1)}°C、${P.radConst ? `固定冷卻 ${P.radConst} K/day` : 'RE87 輻射鬆弛'}、最小風速 ${P.vmin} m/s、12 km RH ${Math.round(100 * P.rhTop)}%`;
+    const envEn = `${(sst - 273.15).toFixed(1)} °C, ${P.radConst ? `constant cooling ${P.radConst} K/day` : 'RE87 radiative relaxation'}, minimum wind ${P.vmin} m/s, RH ${Math.round(100 * P.rhTop)}% at 12 km`;
+    return { dt: dtm, description: `熱帶氣旋 / tropical cyclone：海面上的弱渦旋（f 平面，Δx ${dx / 1000} km；${env}）/ weak vortex over the sea (f-plane; ${envEn})` };
   }
 }
 
@@ -250,6 +256,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       axi = null;
       const device = msg.backend === 'cpu' ? null : await getGpu();
       gpu?.destroy(); gpu = null;
+      if (msg.experiment === 'tc' || msg.experiment === 'tc_hr' || msg.experiment === 'tc_3') tcEnv = msg.axi ?? tcEnv;
       let info = build(msg.experiment, !!device);
       builtGpu = !!device; nestSource = null;
       let note = '';
@@ -257,7 +264,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         const reason = await tryGpu(device);
         if (reason) { note = gpuFailNote(reason); info = build(msg.experiment, false); builtGpu = false; }
       } else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
-      if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr' || msg.experiment === 'tornado')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
+      if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'tc_3' || msg.experiment === 'supercell_hr' || msg.experiment === 'tornado')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
       const c = m!.c;
       dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers();
       post({ type: 'ready', land: null, experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, refineTo: REFINE_TO[msg.experiment] ?? null });
@@ -349,7 +356,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         const t = m.time;
         const meta = { kind: 'regional' as const, title: `${EXP_LABEL[experiment]} · ${t < 7200 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`}`,
           experiment, builtGpu, grid: { nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, size: m.size, nsc: m.scalars.length },
-          time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest, origin };
+          time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest, origin, tcEnv };
         const buffer = packSave(meta, arrays);
         post({ type: 'saveData', meta, buffer }, [buffer]);
       } catch (e) { post({ type: 'error', message: `存檔失敗 / save failed: ${String(e)}` }); }
@@ -385,7 +392,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
             land: (arrays.p_land as Uint8Array | undefined) ?? null };
           info = buildNest(payload, n.lat0, n.lon0, n.size, M.builtGpu);
           nestSource = { payload, lat0: n.lat0, lon0: n.lon0, size: n.size };
-        } else { info = build(M.experiment, M.builtGpu); nestSource = null; }
+        } else { tcEnv = (meta as unknown as { tcEnv?: Partial<AxiParams> | null }).tcEnv ?? null; info = build(M.experiment, M.builtGpu); nestSource = null; }
         builtGpu = M.builtGpu;
         const mm = m!, mpp = mp!;
         if (mm.size !== M.grid.size || mm.scalars.length !== M.grid.nsc) throw new Error('存檔網格與目前版本不符 / the saved grid does not match this version');

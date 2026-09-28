@@ -46,6 +46,7 @@ a{color:#8fc1ff}
 <option value="tc_axi">颱風軸對稱快速版（半徑–高度，數天只要幾分鐘）/ Axisymmetric TC (fast: days in minutes)</option>
 <option value="supercell_hr">超大胞 1 km（需 GPU）/ Supercell 1 km (GPU)</option>
 <option value="tc_hr">熱帶氣旋 5 km（需 GPU）/ Tropical cyclone 5 km (GPU)</option>
+<option value="tc_3">熱帶氣旋 3 km（需獨立顯卡；雙眼牆與眼牆置換）/ Tropical cyclone 3 km (discrete GPU; concentric eyewalls)</option>
 <option value="tornado">龍捲尺度超大胞 250 m（需高階 GPU）/ Tornado-scale supercell 250 m (fast GPU)</option>
 <option value="tornado_c">龍捲超大胞：1 km 快速起轉，可細化到 250 m / Tornadic supercell: 1 km spin-up, refine to 250 m</option>
 </select>
@@ -53,19 +54,22 @@ a{color:#8fc1ff}
 <select id="backendSel"><option value="auto">自動：可用時用 WebGPU / Auto: WebGPU when available</option><option value="cpu">CPU Float64</option></select>
 <div id="desc" class="muted"></div>
 <div id="axiPanel" hidden>
-<h2>軸對稱實驗參數 / Axisymmetric experiment</h2>
-<div class="muted">只算半徑與高度（假設颱風左右對稱），同樣的方程與物理，快上百倍：先用它篩選參數，再到 3D 確認。改完按「套用並重新開始」。/ Radius and height only (the storm is assumed symmetric about its axis), same equations and physics, about a hundred times faster: screen parameters here, then confirm in 3-D. Press Apply to restart with the new values.</div>
+<h2>颱風環境與參數 / Tropical-cyclone environment</h2>
+<div class="muted axOnly">只算半徑與高度（假設颱風左右對稱），同樣的方程與物理，快上百倍：先用它篩選參數，再到 3D 確認。改完按「套用並重新開始」。/ Radius and height only (the storm is assumed symmetric about its axis), same equations and physics, about a hundred times faster: screen parameters here, then confirm in 3-D. Press Apply to restart with the new values.</div>
 <div class="axgrid">
 <label for="axSst">海面溫度 / SST (°C)</label><input id="axSst" type="number" step="0.5" value="28" />
 <label for="axLat">緯度 / Latitude (°)</label><input id="axLat" type="number" step="1" value="20" />
-<label for="axDr">徑向格距 / Radial spacing</label><select id="axDr"><option value="4000" selected>4 km（最快 / fastest）</option><option value="2000">2 km</option><option value="1000">1 km（最細、較慢 / finest, slower）</option></select>
+<label for="axDr" class="axOnly">徑向格距 / Radial spacing</label><select class="axOnly" id="axDr"><option value="4000" selected>4 km（最快 / fastest）</option><option value="2000">2 km</option><option value="1000">1 km（最細、較慢 / finest, slower）</option></select>
 <label for="axV0">初始渦旋最大風 / Initial vortex (m/s)</label><input id="axV0" type="number" step="1" value="15" />
-<label for="axLh">水平混合長度 / Radial mixing length (m)</label><input id="axLh" type="number" step="100" value="1000" />
-<label for="axLv">垂直混合長度 / Vertical mixing length (m)</label><input id="axLv" type="number" step="10" value="100" />
+<label for="axLh" class="axOnly">水平混合長度 / Radial mixing length (m)</label><input class="axOnly" id="axLh" type="number" step="100" value="1000" />
+<label for="axLv" class="axOnly">垂直混合長度 / Vertical mixing length (m)</label><input class="axOnly" id="axLv" type="number" step="10" value="100" />
 <label for="axCk">焓交換係數 / Enthalpy exchange Ck (×10⁻³)</label><input id="axCk" type="number" step="0.1" value="1.2" />
 <label for="axVmin">地面通量最小風速（陣風）/ Minimum wind in surface fluxes (m/s)</label><input id="axVmin" type="number" step="0.5" value="1" />
-<label for="axRad">輻射冷卻上限 / Radiative cooling cap (K/day)</label><input id="axRad" type="number" step="0.5" value="2" />
+<label for="axRadMode">輻射冷卻 / Radiative cooling</label><select id="axRadMode"><option value="relax" selected>向初始探空鬆弛（RE87）/ relax to the sounding (RE87)</option><option value="const">固定晴空冷卻 / constant clear-sky</option></select>
+<label for="axRad">冷卻率或上限 / Rate or cap (K/day)</label><input id="axRad" type="number" step="0.25" value="2" />
+<label for="axRh">12 km 相對濕度 / RH at 12 km (%)</label><input id="axRh" type="number" step="5" value="40" />
 </div>
+<div class="muted">3D 颱風（15 km、5 km）使用同樣的海溫、濕度、輻射、最小風速與初始渦旋；改完按「套用並重新開始」。/ The 3-D tropical cyclones (15 km, 5 km) use the same SST, humidity, radiation, minimum wind and initial vortex; press Apply to restart.</div>
 <div class="controls"><button id="axApply">套用並重新開始 / Apply and restart</button></div>
 </div>
 <p><button id="run">執行 / Run</button> <button id="refine" disabled>細化 / Refine</button></p>

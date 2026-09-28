@@ -1,11 +1,11 @@
 // Messages between the regional-model UI and its worker.
 import type { MapVar, SliceVar, SectionVar, RzVar } from '../../regional/diagnostics.js';
 
-export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest' | 'tornado' | 'tornado_c' | 'tc_axi';
+export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'tc_3' | 'nest' | 'tornado' | 'tornado_c' | 'tc_axi';
 /** tropical-cyclone experiments (radius-height charts, Hovmoller) */
-export const isTcExperiment = (e: RegionalExperiment): boolean => e === 'tc' || e === 'tc_hr' || e === 'tc_axi';
+export const isTcExperiment = (e: RegionalExperiment): boolean => e === 'tc' || e === 'tc_hr' || e === 'tc_3' || e === 'tc_axi';
 /** coarse-to-fine refinement: each coarse spin-up experiment and the finer experiment it continues as */
-export const REFINE_TO: Partial<Record<RegionalExperiment, RegionalExperiment>> = { supercell: 'supercell_hr', tc: 'tc_hr', tornado_c: 'tornado' };
+export const REFINE_TO: Partial<Record<RegionalExperiment, RegionalExperiment>> = { supercell: 'supercell_hr', tc: 'tc_hr', tc_hr: 'tc_3', tornado_c: 'tornado' };
 
 /** Global-model state handed to the regional page for one-way nesting. Grid arrays are [k][lat][lon]. */
 export interface NestPayload {

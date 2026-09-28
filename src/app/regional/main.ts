@@ -7,7 +7,7 @@ import { RegionalCharts } from './charts.js';
 import type { AxiParams } from './axiDriver.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
-const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tornado: '250 m' };
+const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tc_3: '3 km', tornado: '250 m' };
 
 // Opened on its own without the artifact runtime: regional.html redirects to the main page (see the
 // inline script there); stop here instead of starting a model that is about to be unloaded.
@@ -47,7 +47,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     rb.disabled = !m.refineTo;
     rb.textContent = m.refineTo ? `細化到 ${REFINE_LABEL[m.refineTo] ?? ''} / Refine to ${REFINE_LABEL[m.refineTo] ?? ''}` : '細化 / Refine';
     if ((m.experiment as string) !== 'nest') $<HTMLSelectElement>('exp').value = m.experiment;
-    $('axiPanel').hidden = m.experiment !== 'tc_axi';
+    tcPanel(m.experiment);
     charts.setGrid({ nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dy: m.dx, dz: m.dz, experiment: m.experiment, land: m.land }, refining);
     refining = false;
     log(`就緒 / Ready: ${m.description}`);
@@ -95,7 +95,7 @@ const init = (): void => {
     if (!nest) { log('等待全球模式傳送資料… / Waiting for the global model state…'); return; }
     log('建立巢狀區域模式中 / Building the nested regional model…');
     send({ type: 'initNest', payload: nest.payload, lat0: nest.lat0, lon0: nest.lon0, size: nest.size, backend });
-  } else if (exp === 'tc_axi') send({ type: 'init', experiment: exp, backend, axi: axiParams() });
+  } else if (exp === 'tc_axi' || exp === 'tc' || exp === 'tc_hr' || exp === 'tc_3') send({ type: 'init', experiment: exp, backend, axi: axiParams() });
   else send({ type: 'init', experiment: exp, backend });
 };
 /** Parameters of the axisymmetric experiment from the panel. */
@@ -103,10 +103,12 @@ function axiParams(): AxiParams {
   const num = (id: string, d: number): number => { const v = Number($<HTMLInputElement>(id).value); return Number.isFinite(v) ? v : d; };
   const lat = Math.max(1, Math.min(60, Math.abs(num('axLat', 20))));
   return { sst: num('axSst', 28) + 273.15, dr: num('axDr', 2000), lh: Math.max(0, num('axLh', 1000)), lv: Math.max(0, num('axLv', 100)), ck: Math.max(0, num('axCk', 1.2)) * 1e-3,
-    vmin: Math.max(0, num('axVmin', 1)), radMax: Math.max(0, num('axRad', 2)), vmax0: Math.max(1, num('axV0', 15)), f: 2 * 7.292e-5 * Math.sin(lat * Math.PI / 180) };
+    vmin: Math.max(0, num('axVmin', 1)), vmax0: Math.max(1, num('axV0', 15)), f: 2 * 7.292e-5 * Math.sin(lat * Math.PI / 180),
+    radMax: Math.max(0, num('axRad', 2)), radConst: $<HTMLSelectElement>('axRadMode').value === 'const' ? Math.max(0, num('axRad', 1)) : 0, rhTop: Math.max(0.05, Math.min(1, num('axRh', 40) / 100)) };
 }
-$('axApply').onclick = (): void => { if ($<HTMLSelectElement>('exp').value === 'tc_axi') init(); };
-$('exp').onchange = (): void => { $('axiPanel').hidden = $<HTMLSelectElement>('exp').value !== 'tc_axi'; init(); };
+$('axApply').onclick = (): void => { if (/^tc/.test($<HTMLSelectElement>('exp').value)) init(); };
+const tcPanel = (e: string): void => { $('axiPanel').hidden = !/^tc/.test(e); document.querySelectorAll<HTMLElement>('.axOnly').forEach((el) => { el.hidden = e !== 'tc_axi'; }); };
+$('exp').onchange = (): void => { tcPanel($<HTMLSelectElement>('exp').value); init(); };
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });

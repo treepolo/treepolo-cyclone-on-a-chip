@@ -126,6 +126,7 @@ const OPEN: bool = ${open}; const NEST: bool = ${!!bnd}; const HASPP: bool = ${!
 const NRELAX: u32 = ${m.c.relaxCells ?? 5}u; const RTAU: f32 = ${m.c.relaxTau ?? 300};
 const LH2: f32 = ${ph ? ph.lh * ph.lh : 0}; const LV2: f32 = ${ph ? ph.lv * ph.lv : 0};
 const Z0: f32 = ${ph?.z0 ?? 0}; const FRU: f32 = ${ph?.frameVel?.u ?? 0}; const FRV: f32 = ${ph?.frameVel?.v ?? 0}; const PIS: f32 = ${sfc ? sfc.pis : 1}; const PSFC: f32 = ${sfc ? sfc.psfc : 1e5}; const CK: f32 = ${ph ? ph.ck : 0}; const RADTAU: f32 = ${ph ? ph.radTau : 0}; const RADMAX: f32 = ${ph ? ph.radMax : 0};
+const VMIN: f32 = ${ph?.vmin ?? 1}; const RADC: f32 = ${ph?.radConst ?? 0};
 struct P { dts: f32, dtStage: f32, dtBig: f32, pad: f32 };
 fn ix(i: u32, j: u32, k: u32) -> u32 { return k * PL + (j + HH) * SX + (i + HH); }
 fn f5(a0: f32, a1: f32, a2: f32, a3: f32, a4: f32, a5: f32, vel: f32) -> f32 {
@@ -933,7 +934,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var tend = -((fr - fl) / DX + (gr - gl) / DY + (ht - hb) / (r0 * DZ));
     if (s == 0u) {
       tend -= brc(k) * (S[off + q] - bth0(k));
-      if (PHYS && RADTAU > 0.0) { tend += max(-(S[off + q] - bth0(k)) / RADTAU, -RADMAX / bpi0(k)); }
+      if (PHYS && RADC > 0.0 && bth0(k) * bpi0(k) > 210.0) { tend -= RADC / bpi0(k); }
+      else if (PHYS && RADTAU > 0.0) { tend += max(-(S[off + q] - bth0(k)) / RADTAU, -RADMAX / bpi0(k)); }
     }
     F[off + q] = tend;
   }
@@ -1076,16 +1078,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let j = t / NX; let i = t % NX;
   let q = ix(i, j, 0u);
   let ua = 0.5 * (S[q] + S[q + 1u]) + FRU; let va = 0.5 * (S[SIZE + q] + S[SIZE + q + SX]) + FRV;
-  let spd = max(sqrt(ua * ua + va * va), 1.0);
+  let spd = max(sqrt(ua * ua + va * va), VMIN);
   let cd = cdrag(spd);
   let taux = cd * spd * ua; let tauy = cd * spd * va;
   // each u/v face is shared by two columns: apply half of each column's stress to its two faces
   // (atomic-free: every thread only writes its own west/south face with its own and neighbour's share)
   let qw = ix((i + NX - 1u) % NX, j, 0u); let qs = ix(i, (j + NY - 1u) % NY, 0u);
   let uw = 0.5 * (S[qw] + S[qw + 1u]) + FRU; let vw = 0.5 * (S[SIZE + qw] + S[SIZE + qw + SX]) + FRV;
-  let spw = max(sqrt(uw * uw + vw * vw), 1.0); let cdw = cdrag(spw);
+  let spw = max(sqrt(uw * uw + vw * vw), VMIN); let cdw = cdrag(spw);
   let us = 0.5 * (S[qs] + S[qs + 1u]) + FRU; let vs = 0.5 * (S[SIZE + qs] + S[SIZE + qs + SX]) + FRV;
-  let sps = max(sqrt(us * us + vs * vs), 1.0); let cds = cdrag(sps);
+  let sps = max(sqrt(us * us + vs * vs), VMIN); let cds = cdrag(sps);
   var shw = cdw * spw * uw; var shs = cds * sps * vs;
   if (OPEN && i == 0u) { shw = 0.0; }
   if (OPEN && j == 0u) { shs = 0.0; }

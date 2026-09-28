@@ -13,7 +13,7 @@ async function main(): Promise<void> {
     if (!which || which === 'moist') await moistTests();
     if (!which || which === 'earth') await earthTests();
     if (!which || which === 'earth' || which === 'spinup') await spinupGpuTest();
-    if (!which || which === 'regional') await regionalTests();
+    if (!which || which === 'regional' || which === 'rbasic') await regionalTests();
     if (!which || which === 'regional' || which === 'nest') await regionalNestTests();
     if (!which || which === 'regional' || which === 'ice') await regionalIceTests();
     if (which === 'perf') await regionalPerf();

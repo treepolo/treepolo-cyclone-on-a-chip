@@ -15,6 +15,7 @@
 import { DRY_AIR, EARTH } from '../core/constants.js';
 
 export const H = 3; // halo width
+const EMPTY = new Float64Array(0);
 
 export interface RegionalConfig {
   nx: number; ny: number; nz: number;
@@ -53,17 +54,17 @@ export class RegionalModel {
   readonly scalars: Float64Array[];
   time = 0;
   steps = 0;
-  // work
-  private readonly u0: Float64Array; private readonly v0: Float64Array; private readonly w0: Float64Array;
-  private readonly th0s: Float64Array; private readonly pp0: Float64Array;
-  private readonly fu: Float64Array; private readonly fv: Float64Array; private readonly fw: Float64Array;
-  private readonly fth: Float64Array; private readonly fpp: Float64Array;
-  private readonly fxF: Float64Array; private readonly fyF: Float64Array; private readonly fzF: Float64Array; private readonly pdRatio: Float64Array;
-  private readonly sc0: Float64Array[]; private readonly fsc: Float64Array[];
-  private readonly ppOld: Float64Array;
-  private readonly flux: Float64Array;
+  // work arrays: allocated on the first CPU step (a model that only mirrors a GPU run never needs them)
+  private u0 = EMPTY; private v0 = EMPTY; private w0 = EMPTY;
+  private th0s = EMPTY; private pp0 = EMPTY;
+  private fu = EMPTY; private fv = EMPTY; private fw = EMPTY;
+  private fth = EMPTY; private fpp = EMPTY;
+  private fxF = EMPTY; private fyF = EMPTY; private fzF = EMPTY; private pdRatio = EMPTY;
+  private sc0: Float64Array[] = []; private fsc: Float64Array[] = [];
+  private ppOld = EMPTY;
+  private flux = EMPTY;
   /** density potential temperature theta_rho = theta (1 + 0.61 qv - qc - qr) of the current stage */
-  private readonly thr: Float64Array;
+  private thr = EMPTY;
   /** buoyancy / extra slow forcing hook for w and theta (moist physics adds here) */
   buoyancy: ((m: RegionalModel, out: Float64Array) => void) | null = null;
   /** relaxation targets for open lateral boundaries (set by a nesting driver) */
@@ -87,17 +88,23 @@ export class RegionalModel {
     this.buildBaseState(sounding);
     const z = (): Float64Array => new Float64Array(this.size);
     this.u = z(); this.v = z(); this.w = z(); this.th = z(); this.pp = z();
-    this.u0 = z(); this.v0 = z(); this.w0 = z(); this.th0s = z(); this.pp0 = z();
-    this.fu = z(); this.fv = z(); this.fw = z(); this.fth = z(); this.fpp = z();
-    this.fxF = z(); this.fyF = z(); this.fzF = z(); this.pdRatio = z();
-    this.ppOld = z(); this.flux = z(); this.thr = z();
     this.scalars = Array.from({ length: nScalars }, z);
-    this.sc0 = Array.from({ length: nScalars }, z);
-    this.fsc = Array.from({ length: nScalars }, z);
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) this.th[this.idx(i, j, k)] = this.th0[k]!;
   }
 
   idx(i: number, j: number, k: number): number { return k * this.plane + (j + H) * this.sx + (i + H); }
+
+  /** Allocate the time-stepping work arrays (once). */
+  private ensureWork(): void {
+    if (this.thr.length === this.size) return;
+    const z = (): Float64Array => new Float64Array(this.size), n = this.scalars.length;
+    this.u0 = z(); this.v0 = z(); this.w0 = z(); this.th0s = z(); this.pp0 = z();
+    this.fu = z(); this.fv = z(); this.fw = z(); this.fth = z(); this.fpp = z();
+    this.fxF = z(); this.fyF = z(); this.fzF = z(); this.pdRatio = z();
+    this.ppOld = z(); this.flux = z(); this.thr = z();
+    this.sc0 = Array.from({ length: n }, z);
+    this.fsc = Array.from({ length: n }, z);
+  }
 
   /** Hydrostatic base state from theta(z), qv(z) with p_surface = 1000 hPa. */
   private buildBaseState(snd: (z: number) => { theta: number; qv: number }): void {
@@ -507,6 +514,7 @@ export class RegionalModel {
 
   /** Advance one large step with RK3 + acoustic substeps. */
   step(): void {
+    this.ensureWork();
     const { dt, nsound, nz } = this.c;
     this.u0.set(this.u); this.v0.set(this.v); this.w0.set(this.w); this.th0s.set(this.th); this.pp0.set(this.pp);
     for (let s = 0; s < this.scalars.length; s++) this.sc0[s]!.set(this.scalars[s]!);

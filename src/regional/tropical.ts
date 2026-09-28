@@ -12,9 +12,10 @@ const qsat = (T: number, p: number): number => { const e = esat(T); return EPS *
 
 /**
  * Convectively near-neutral tropical sounding: surface T = sst - 1 K, RH 80%, dry adiabat to the LCL,
- * pseudo-adiabat above, isothermal (Ttrop) stratosphere; RH decreasing from 80% to 40% at 12 km.
+ * pseudo-adiabat above, isothermal (Ttrop) stratosphere; RH decreasing linearly from 80% to rhTop at 12 km
+ * (0.4 by default; about 0.6 matches the moist-tropical hurricane-season mean of Dunion 2011).
  */
-export function tropicalSounding(sst = 301.15, Ttrop = 200): (z: number) => { theta: number; qv: number } {
+export function tropicalSounding(sst = 301.15, Ttrop = 200, rhTop = 0.4): (z: number) => { theta: number; qv: number } {
   const dz = 10, n = 3000;
   const th = new Float64Array(n + 1), qv = new Float64Array(n + 1);
   let T = sst - 1, p = 1e5;
@@ -23,7 +24,7 @@ export function tropicalSounding(sst = 301.15, Ttrop = 200): (z: number) => { th
   let saturated = false;
   for (let i = 0; i <= n; i++) {
     const z = i * dz;
-    const rh = z < 12000 ? rh0 - 0.4 * z / 12000 : 0.4 * Math.exp(-(z - 12000) / 3000);
+    const rh = z < 12000 ? rh0 - (rh0 - rhTop) * z / 12000 : rhTop * Math.exp(-(z - 12000) / 3000);
     th[i] = T * Math.pow(1e5 / p, DRY_AIR.kappa);
     qv[i] = Math.min(rh * qsat(T, p), 0.02);
     // lapse rate for the next step

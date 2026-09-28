@@ -28,6 +28,11 @@ export interface RegionalPhysicsConfig {
   /** ground-relative velocity of the model frame (m/s) when the domain translates with a storm:
    *  surface drag and fluxes use the ground-relative wind */
   frameVel?: { u: number; v: number };
+  /** minimum wind speed in the surface fluxes (m/s, gustiness; default 1) */
+  vmin?: number;
+  /** constant clear-sky tropospheric cooling (K/s) instead of the relaxation toward the base state (0 or
+   *  undefined: RE87 relaxation); the stratosphere (base-state T < 210 K) still relaxes */
+  radConst?: number;
 }
 
 /** Drag coefficient at the lowest level: neutral log law over land (z0 given) or the Donelan-type
@@ -51,7 +56,8 @@ export function surfaceState(m: RegionalModel, c: RegionalPhysicsConfig): { tsk:
 }
 
 export class RegionalPhysics {
-  readonly Km: Float64Array;   // eddy viscosity at cell centres
+  /** eddy viscosity at cell centres (allocated with the cache on the first CPU step) */
+  Km: Float64Array = new Float64Array(0);
   /** surface enthalpy flux diagnostics (W m^-2), last call */
   readonly shf: Float64Array; readonly lhf: Float64Array;
 
@@ -59,17 +65,21 @@ export class RegionalPhysics {
 
   constructor(private readonly m: RegionalModel, readonly cfg: RegionalPhysicsConfig) {
     this.sfc = surfaceState(m, cfg);
-    this.Km = new Float64Array(m.size);
     this.shf = new Float64Array(m.c.nx * m.c.ny);
     this.lhf = new Float64Array(m.c.nx * m.c.ny);
-    this.cache = { fu: new Float64Array(m.size), fv: new Float64Array(m.size), fw: new Float64Array(m.size), fth: new Float64Array(m.size), fsc: m.scalars.map(() => new Float64Array(m.size)) };
     m.physicsTend = (mm, t, stage): void => this.tendencies(mm, t, stage);
   }
 
-  /** sub-grid turbulence + surface-flux tendencies of the first RK stage, reused in stages 2 and 3 (as in WRF) */
-  private readonly cache: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] };
+  /** sub-grid turbulence + surface-flux tendencies of the first RK stage, reused in stages 2 and 3 (as in WRF);
+   *  allocated on the first CPU step (a model that only mirrors a GPU run never needs it) */
+  private cache: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] } | null = null;
 
   private tendencies(m: RegionalModel, out: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }, stage: number): void {
+    if (!this.cache) {
+      const z = (): Float64Array => new Float64Array(m.size);
+      this.cache = { fu: z(), fv: z(), fw: z(), fth: z(), fsc: m.scalars.map(z) };
+      this.Km = z();
+    }
     const t = this.cache;
     if (stage === 0) {
       for (const a of [t.fu, t.fv, t.fw, t.fth, ...t.fsc]) a.fill(0);
@@ -144,7 +154,7 @@ export class RegionalPhysics {
         const thS = tsk / sf.pis;
         // ground-relative wind (the model frame may translate with a storm at frameVel)
         const ua = 0.5 * (u[q]! + u[q + 1]!) + (c.frameVel?.u ?? 0), va = 0.5 * (v[q]! + v[q + sx]!) + (c.frameVel?.v ?? 0);
-        const spd = Math.max(Math.hypot(ua, va), 1);
+        const spd = Math.max(Math.hypot(ua, va), c.vmin ?? 1);
         // drag coefficient: 1e-3 (1 + 0.07 U) capped at 2.4e-3 (Donelan-type saturation)
         const cd = dragCoefficient(c, 0.5 * dz, spd);
         const taux = cd * spd * ua, tauy = cd * spd * va;
@@ -166,15 +176,14 @@ export class RegionalPhysics {
 
   /** Newtonian radiative relaxation, capped cooling (every stage) */
   private radiation(m: RegionalModel, t: { fth: Float64Array }): void {
-    const { nx, ny, nz } = m.c, c = this.cfg, th = m.th;
-    if (c.radTau > 0) {
+    const { nx, ny, nz } = m.c, c = this.cfg, th = m.th, rc = c.radConst ?? 0;
+    if (c.radTau > 0 || rc > 0) {
       for (let k = 0; k < nz; k++) {
-        const pi = m.pi0[k]!;
+        const pi = m.pi0[k]!, trop = rc > 0 && m.th0[k]! * pi > 210;
+        if (!trop && !(c.radTau > 0)) continue;
         for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
           const q = m.idx(i, j, k);
-          let r = -(th[q]! - m.th0[k]!) / c.radTau;
-          r = Math.max(r, -c.radMax / pi);
-          t.fth[q] = t.fth[q]! + r;
+          t.fth[q] = t.fth[q]! + (trop ? -rc / pi : Math.max(-(th[q]! - m.th0[k]!) / c.radTau, -c.radMax / pi));
         }
       }
     }

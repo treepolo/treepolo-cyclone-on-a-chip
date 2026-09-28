@@ -71,5 +71,13 @@
 - 命令列：`node dist/tools/runAxisym.js days=6 sweep=vmin:1,3,5`（worker_threads，每核心一組，CSV 在 results/axisym）。
 - 測試：`node dist/tests/axisym.js`（6 項，已加入 `npm test`）。
 
+## 颱風雨帶（ROADMAP 第 4 節，進行中）
+- 選項：`RegionalPhysicsConfig.vmin`（地面通量最小風速）、`radConst`（固定對流層冷卻 K/s，平流層仍鬆弛），GPU 常數 `VMIN`、`RADC`；
+  `tropicalSounding(sst, Ttrop, rhTop)`。worker 的 `tcEnv`（頁面面板送來、存檔裡保存）套用到 tc／tc_hr／tc_3。
+- 工具：`runAxisym.js ... cases='base|vmin:4|radc:1.5+vmin:4'`（CSV 有核心／外圍雨量與雨環數）；
+  `runTropicalCyclone.js 8 15000 1200000 out ice vmin=4 radc=1.5 rh12=0.6`（每 3 小時印核心／外圍雨量與外圍降雨面積比）。
+- 結果見 ROADMAP 第 4 節；3D 15 km 三組對照（A 基準、B vmin 4、C vmin 4＋冷卻 1.5）在 scratchpad 背景跑（下個 session 需重跑）。
+- 3 km 颱風（tc_3）：CPU 端 RegionalModel／RegionalPhysics 的工作陣列改成第一次 CPU 步進時才配置（GPU 跑時只保留狀態陣列）。
+
 ## 下一步
 依 ROADMAP 順序：颱風雨帶（只有眼牆有雲；先用軸對稱版篩選 vmin、輻射、混合長度）→ 多重眼牆與置換 → 龍捲 → 互動機制。

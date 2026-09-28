@@ -78,7 +78,7 @@ function scaleFor(name: string, data: ArrayLike<number>): Scale {
   return { kind: vi.scale, lo, hi, gamma: vi.gamma ?? 1, clear: vi.clear ?? null, reverse: !!vi.reverse };
 }
 
-interface Sample { t: number; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null }
+interface Sample { t: number; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null; ew: { r: number; v: number }[] | null }
 interface GridInfo { nx: number; ny: number; nz: number; dx: number; dy: number; dz: number; experiment: RegionalExperiment; land: Uint8Array | null }
 type MapFrame = { r: Rect; Lx: number; Ly: number };
 
@@ -146,7 +146,7 @@ export class RegionalCharts {
   onFrame(f: RegionalFrame): void {
     this.frame = f;
     const s = f.stats;
-    const smp: Sample = { t: f.time, dp: s.dp, vmax: s.vmax, rmw: s.rmw, wmax: s.wmax, zeta: s.zetaMax, uh: s.uhMax, dbz: s.dbzMax, vg: s.vGround, rain: s.rainmax, cape: s.capeMax, storm: s.storm };
+    const smp: Sample = { t: f.time, dp: s.dp, vmax: s.vmax, rmw: s.rmw, wmax: s.wmax, zeta: s.zetaMax, uh: s.uhMax, dbz: s.dbzMax, vg: s.vGround, rain: s.rainmax, cape: s.capeMax, storm: s.storm, ew: s.eyewalls };
     const last = this.samples[this.samples.length - 1];
     if (last && f.time < last.t - 1e-6) { this.samples = []; this.hov = []; }
     if (last && Math.abs(f.time - last.t) < 1e-6) this.samples[this.samples.length - 1] = smp; else this.samples.push(smp);
@@ -806,12 +806,23 @@ export class RegionalCharts {
       S.forEach((s, i) => { const x = r.x + Math.min(1, s.rmw! / 1000 / R) * r.w, y = r.y + r.h - (s.t / 3600 - t0) / ((t1 - t0) || 1) * r.h; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
       ctx.stroke();
     }
+    // eyewalls: local maxima of the 1.5 km tangential wind (two or more at a time = concentric eyewalls)
+    const E = this.samples.filter((s) => s.ew && s.ew.length && s.t / 3600 >= t0 - 1e-9);
+    const stride = Math.max(1, Math.ceil(E.length / 400));
+    for (let n = 0; n < E.length; n += stride) {
+      const s = E[n]!, y = r.y + r.h - (s.t / 3600 - t0) / ((t1 - t0) || 1) * r.h;
+      s.ew!.forEach((e, k) => {
+        const x = r.x + Math.min(1, e.r / 1000 / R) * r.w;
+        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI);
+        ctx.fillStyle = k === 0 ? '#fafafa' : '#c98500'; ctx.fill();
+      });
+    }
     drawAxes(ctx, r, { lo: 0, hi: R, label: '半徑 / radius (km)' }, { lo: t0, hi: t1, label: '模式時間 / model time (h)' });
     drawColorbar(ctx, { x: r.x + r.w + 12, y: r.y + 14, w: 12, h: r.h - 14 }, sc, 'm/s', 1);
     ctx.font = FONT; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
     ctx.fillText('1.5 km 方位平均切向風 / 1.5 km azimuthal-mean tangential wind', r.x, r.y - 8);
     ctx.font = FONT_SMALL; ctx.fillStyle = INK.secondary; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
-    ctx.fillText('白線：地面最大風速半徑 / white line: surface radius of maximum wind', r.x + r.w, area.y + area.h - 2);
+    ctx.fillText('白線：地面最大風半徑；點：眼牆（白：最內圈、橘：外圈）/ line: surface RMW; dots: eyewalls (white: innermost, orange: outer)', r.x + r.w, area.y + area.h - 2, r.w);
     const h = this.hover;
     if (h && h.x >= r.x && h.x <= r.x + r.w && h.y >= r.y && h.y <= r.y + r.h) {
       const i = Math.min(nrs - 1, Math.floor((h.x - r.x) / r.w * nrs)), y = Math.min(rows - 1, Math.floor((r.y + r.h - h.y) / r.h * rows)), row = Hv[rowOf[y]!]!;

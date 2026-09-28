@@ -48,12 +48,19 @@ refinement for the tornado item).
 `src/regional/axisym.ts`（模式）、`src/app/regional/axiDriver.ts`（區域頁面的「颱風軸對稱快速版」，繞軸旋轉成 3D 顯示，所有圖表可用）、
 `src/tools/runAxisym.ts`（命令列、多核心參數掃描）。28 °C、Δr 4 km：約 4.5 天醞釀後 30 小時內增強到 69 m/s（見 RESULTS 4.3b）。
 
-## 4. 颱風雨帶診斷與修正 / Tropical-cyclone rainbands
+## 4. 颱風雨帶診斷與修正 / Tropical-cyclone rainbands（進行中 / in progress）
+- 已加入選項（3D CPU／GPU 與軸對稱，網頁「颱風環境與參數」面板）：地面通量最小風速（陣風）、固定晴空冷卻（取代向初始探空鬆弛）、
+  探空 12 km 相對濕度。預設不變。/ Options added (3-D CPU/GPU and axisymmetric; page panel): minimum wind in the surface fluxes,
+  constant clear-sky cooling instead of the relaxation, RH at 12 km. Defaults unchanged.
+- 軸對稱篩選（4 km，6–8 天）：成熟後外圍（100–300 km）雨量幾乎為零（基準 0.02–0.05 mm/h）；最小風速 4 m/s 保留最多外圍雨
+  （0.15–0.5 mm/h、6 圈雨環）；固定冷卻 1.5–2 K/day 在軸對稱模式裡使渦旋塌縮到軸心（RMW 2–6 km，軸對稱模式的已知弱點），
+  需要 3D 確認；中層較濕單獨無效。3D 15 km 對照實驗（基準／vmin 4／vmin 4＋冷卻 1.5 K/day）進行中。
 - 現況：只有眼牆有雲
 - 檢查弱風區地面通量（最小陣風 3–5 m/s）、中層濕度、輻射冷卻、水平混合、邊界與範圍
 - 雨帶是多重眼牆的前提
 
-## 5. 多重眼牆與眼牆置換 / Multiple eyewalls and eyewall replacement
+## 5. 多重眼牆與眼牆置換 / Multiple eyewalls and eyewall replacement（準備中 / preparing）
+- 已加入 3 km 颱風實驗（1200 km 週期區域、400×400×50，從 5 km「細化」接續；不用移動巢狀）與 Hovmöller 上的眼牆點（白：最內圈、橘：外圈）。
 - 雙眼牆、可能三重以上，以及置換循環；約 2–3 km，建議移動巢狀；用 Hovmöller 圖驗證
 
 ## 6. 龍捲 / Tornadoes
