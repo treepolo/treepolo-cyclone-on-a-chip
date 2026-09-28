@@ -98,6 +98,16 @@ let currentPreset = '';
 let physics: GrayPhysics | null = null;
 const earthData: Record<string, EarthData> = {};
 let spinupData: ArrayBuffer | null = null, spinupNote = '';
+/** The spun-up state: the binary file, or its base64 text copy where binary files are not served. */
+async function fetchSpinup(): Promise<ArrayBuffer> {
+  const bin = await fetch(new URL('../../data/spinup_earth_t42q.bin', import.meta.url)).catch(() => null);
+  if (bin && bin.ok && !(bin.headers.get('content-type') ?? '').includes('html')) return bin.arrayBuffer();
+  const txt = await fetch(new URL('../../data/spinup_earth_t42q.b64.txt', import.meta.url));
+  if (!txt.ok) throw new Error(`spin-up state not found (${txt.status})`);
+  const b = atob((await txt.text()).trim()), out = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) out[i] = b.charCodeAt(i);
+  return out.buffer;
+}
 let qfluxData: MonthlyLatLon | null = null;
 let gpuDevice: GPUDevice | null = null;
 let acc: ZonalMeanAccumulator | null = null;
@@ -156,7 +166,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>): Promise<void> => {
         model = built.model; physics = built.physics;
         if (m.spinup && climate.qflux) {
           try {
-            if (!spinupData) spinupData = await (await fetch(new URL('../../data/spinup_earth_t42q.bin', import.meta.url))).arrayBuffer();
+            if (!spinupData) spinupData = await fetchSpinup();
             applySpinup(model, physics, spinupData);
           } catch (e) { spinupNote = `無法載入起轉狀態，從頭開始 / could not load the spun-up state, starting from rest: ${String(e).slice(0, 120)}`; }
         }
