@@ -52,16 +52,21 @@ refinement for the tornado item).
 - 已加入選項（3D CPU／GPU 與軸對稱，網頁「颱風環境與參數」面板）：地面通量最小風速（陣風）、固定晴空冷卻（取代向初始探空鬆弛）、
   探空 12 km 相對濕度。預設不變。/ Options added (3-D CPU/GPU and axisymmetric; page panel): minimum wind in the surface fluxes,
   constant clear-sky cooling instead of the relaxation, RH at 12 km. Defaults unchanged.
-- 軸對稱篩選（4 km，6–8 天）：成熟後外圍（100–300 km）雨量幾乎為零（基準 0.02–0.05 mm/h）；最小風速 4 m/s 保留最多外圍雨
-  （0.15–0.5 mm/h、6 圈雨環）；固定冷卻 1.5–2 K/day 在軸對稱模式裡使渦旋塌縮到軸心（RMW 2–6 km，軸對稱模式的已知弱點），
-  需要 3D 確認；中層較濕單獨無效。3D 15 km 對照實驗（基準／vmin 4／vmin 4＋冷卻 1.5 K/day）進行中。
-- 現況：只有眼牆有雲
+- 軸對稱篩選（4 km，6–8 天；RESULTS 4.3c）：成熟後外圍（100–300 km）雨量幾乎為零（基準 0.03–0.05 mm/h）；最小風速 4 m/s
+  或固定冷卻保留一些（0.25–0.3 mm/h），但固定冷卻使眼牆收縮到軸心附近；中層較濕無效；2 km 時 vmin 4 的外圍雨又掉回 0.01 mm/h。
+- 3D 15 km 對照（基準／vmin 4／vmin 4＋冷卻 1.5 K/day，RESULTS 4.3d）：成熟期三組外圍雨都只有 0.02–0.07 mm/h、外圍降雨面積
+  0–1%；外圍只有零星的單格對流（15 km 網格上的格點尺度對流），組織不成雨帶。15 km 沒有積雲參數化、水平混合長度 3 km，
+  解析不了雨帶；週期區域只有 1200 km，眼牆外流的下沉增溫遍及整個區域也可能壓抑外圍對流。預設維持不變。
+- 下一步（使用者的 GPU）：5 km（tc_hr）或 3 km 比較預設與 vmin 4，看時間序列的「外圍雨量」與無人值守報告的 rain_outer／wet_outer。
 - 檢查弱風區地面通量（最小陣風 3–5 m/s）、中層濕度、輻射冷卻、水平混合、邊界與範圍
 - 雨帶是多重眼牆的前提
 
 ## 5. 多重眼牆與眼牆置換 / Multiple eyewalls and eyewall replacement（準備中 / preparing）
 - 已加入 3 km 颱風實驗（1200 km 週期區域、400×400×50，從 5 km「細化」接續；不用移動巢狀）與 Hovmöller 上的眼牆點（白：最內圈、橘：外圈）。
-- 雙眼牆、可能三重以上，以及置換循環；約 2–3 km，建議移動巢狀；用 Hovmöller 圖驗證
+  3 km 實驗之前漏算中心氣壓、RMW 與眼牆（已修正）。
+- 軸對稱 10 天（Δr 2 km；Δr 4 km 海溫 30 °C；Δr 4 km 緯度 30°）都只有單一眼牆，收縮到 9–12 km 後維持，沒有次眼牆
+  （RESULTS 4.3c）：軸對稱模式沒有外圍雨帶，缺少次眼牆最常見的來源。雙眼牆要靠 3D 3 km（使用者的 GPU）。
+- 雙眼牆、可能三重以上，以及置換循環；約 2–3 km（不用移動巢狀）；用 Hovmöller 圖驗證
 
 ## 6. 龍捲 / Tornadoes（部分完成 / partly done）
 - 已做：強低層風切探空為預設（12 m/s 四分之一圓、深 1 km、邊界層 16 g/kg：0–1 km SRH 約 280 m²/s²、CAPE 約 3200 J/kg、

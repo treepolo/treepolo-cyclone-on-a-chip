@@ -106,6 +106,9 @@ export interface ChartsHooks {
   camera(mode: 'orbit' | 'fly'): void;
 }
 
+/** The Chinese half of a bilingual label ('中文 / English', also '中文（…）/ English'). */
+const zh = (label: string): string => label.split(/\s*\/\s+/)[0]!;
+
 export class RegionalCharts {
   view: ViewKind = '3d';
   private sel = { slice: 'dbz' as SliceVar, composite: 'dbzMax' as MapVar, section: 'dbz' as SecVar, rz: 'vt' as RzVar };
@@ -490,7 +493,7 @@ export class RegionalCharts {
     const mf = this.drawPlan(area, name, data, `${info.label} · z = ${(s.z / 1000).toFixed(2)} km · ${this.timeLabel()}`);
     if (this.show.arrows && s.vars.u && s.vars.v) this.drawWind(mf, s.vars.u, s.vars.v);
     this.drawMarks(mf);
-    this.mapReadout(mf, (i, j) => [`${info.label.split(' / ')[0]}: ${fmt(data[j * this.grid!.nx + i]!, info.digits)} ${info.unit}`,
+    this.mapReadout(mf, (i, j) => [`${zh(info.label)}: ${fmt(data[j * this.grid!.nx + i]!, info.digits)} ${info.unit}`,
       ...(s.vars.u && s.vars.v ? [`風 / wind: ${fmt(Math.hypot(s.vars.u[j * this.grid!.nx + i]!, s.vars.v[j * this.grid!.nx + i]!), 1)} m/s`] : [])]);
   }
 
@@ -511,13 +514,13 @@ export class RegionalCharts {
     }
     if (this.show.sfcWind && mp.sfcU && mp.sfcV) this.drawWind(mf, mp.sfcU, mp.sfcV);
     this.drawMarks(mf);
-    this.mapReadout(mf, (i, j) => [`${info.label.split(' / ')[0]}: ${fmt(data[j * g.nx + i]!, info.digits)} ${info.unit}`, ...(slp ? [`SLP ${fmt(slp[j * g.nx + i]!, 1)} hPa`] : [])]);
+    this.mapReadout(mf, (i, j) => [`${zh(info.label)}: ${fmt(data[j * g.nx + i]!, info.digits)} ${info.unit}`, ...(slp ? [`SLP ${fmt(slp[j * g.nx + i]!, 1)} hPa`] : [])]);
   }
 
   private waiting(r: Rect, more = ''): void { this.centerText('等待資料… / Waiting for data…' + (more ? ` / ${more}` : ''), r); }
   /** Centred bilingual message: each ' / '-separated part on its own line. */
   private centerText(t: string, r: Rect): void {
-    const ctx = this.ctx, parts = t.split(' / ');
+    const ctx = this.ctx, parts = t.split(/\s*\/\s+/);
     ctx.fillStyle = INK.secondary; ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     parts.forEach((l, i) => ctx.fillText(l, r.x + r.w / 2, r.y + r.h / 2 + (i - (parts.length - 1) / 2) * 18, r.w - 16));
   }
@@ -572,7 +575,7 @@ export class RegionalCharts {
     const h = this.hover;
     if (h && !this.drag && h.x >= r.x && h.x <= r.x + r.w && h.y >= r.y && h.y <= r.y + r.h) {
       const p = Math.min(np - 1, Math.floor((h.x - r.x) / r.w * np)), k = Math.min(nz - 1, Math.floor((r.y + r.h - h.y) / r.h * nz));
-      tooltip(ctx, [`s ${(p / Math.max(1, np - 1) * L / 1000).toFixed(1)} km, z ${((k + 0.5) * g.dz / 1000).toFixed(2)} km`, `${info.label.split(' / ')[0]}: ${fmt(val(name, p, k), info.digits)} ${info.unit}`,
+      tooltip(ctx, [`s ${(p / Math.max(1, np - 1) * L / 1000).toFixed(1)} km, z ${((k + 0.5) * g.dz / 1000).toFixed(2)} km`, `${zh(info.label)}: ${fmt(val(name, p, k), info.digits)} ${info.unit}`,
         `T ${fmt(sec.vars.T[k * np + p]!, 1)} °C · w ${fmt(sec.vars.w[k * np + p]!, 1)} m/s`], h.x, h.y, this.canvas.clientWidth, this.canvas.clientHeight);
     }
   }
@@ -776,7 +779,9 @@ export class RegionalCharts {
       ctx.stroke();
       const lastV = pn.get(S[S.length - 1]!);
       ctx.font = FONT_SMALL; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-      ctx.fillText(`${pn.label}（${pn.unit}）${lastV === null ? '' : ' · ' + fmt(lastV, pn.digits)}`, r.x, r.y - 3);
+      // narrow screens: drop the English half of the title when the full one does not fit
+      const tail = `（${pn.unit}）${lastV === null ? '' : ' · ' + fmt(lastV, pn.digits)}`, full = pn.label + tail;
+      ctx.fillText(ctx.measureText(full).width <= area.x + area.w - r.x - 4 ? full : zh(pn.label) + tail, r.x, r.y - 3);
       if (hover && hover.x >= r.x && hover.x <= r.x + r.w && hover.y >= area.y && hover.y <= area.y + area.h) {
         const th = t0 + (hover.x - r.x) / r.w * (t1 - t0);
         if (hi < 0) { let best = 0; for (let i = 1; i < S.length; i++) if (Math.abs(S[i]!.t / 3600 - th) < Math.abs(S[best]!.t / 3600 - th)) best = i; hi = best; }
@@ -788,7 +793,7 @@ export class RegionalCharts {
         const x = r.x + (s.t / 3600 - t0) / (t1 - t0) * r.w;
         ctx.fillStyle = INK.secondary; ctx.fillRect(x, r.y, 1, r.h);
       });
-      tooltip(ctx, [`t = ${(s.t / 3600).toFixed(2)} h`, ...panels.map((pn) => { const v = pn.get(s); return `${pn.label.split(' / ')[0]}: ${v === null ? '—' : fmt(v, pn.digits)} ${pn.unit}`; })], hover!.x, hover!.y, this.canvas.clientWidth, this.canvas.clientHeight);
+      tooltip(ctx, [`t = ${(s.t / 3600).toFixed(2)} h`, ...panels.map((pn) => { const v = pn.get(s); return `${zh(pn.label)}: ${v === null ? '—' : fmt(v, pn.digits)} ${pn.unit}`; })], hover!.x, hover!.y, this.canvas.clientWidth, this.canvas.clientHeight);
     }
     this.plotF = { r: rects[0]!, kind: 'series', x0: t0, x1: t1, y0: 0, y1: 1, panels: rects };
     if (trackR) this.drawTrack(trackR, hi >= 0 ? S[hi]! : null);

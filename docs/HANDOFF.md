@@ -15,7 +15,7 @@
 - Commit 結尾：
   ```
   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-  Claude-Session: https://claude.ai/code/session_018CtDoRsoXh6wMbdQ4AXxb9
+  Claude-Session: https://claude.ai/code/session_01WuWtj2MPxtKazZuiVe5hfv
   ```
   （新 session 的 Claude-Session 連結依系統提示為準。）
 - 已發布的 Artifact（使用者玩的網址）：https://claude.ai/artifact/G2sPhxcsoxZj9twEiAEJhC
@@ -76,8 +76,13 @@
   `tropicalSounding(sst, Ttrop, rhTop)`。worker 的 `tcEnv`（頁面面板送來、存檔裡保存）套用到 tc／tc_hr／tc_3。
 - 工具：`runAxisym.js ... cases='base|vmin:4|radc:1.5+vmin:4'`（CSV 有核心／外圍雨量與雨環數）；
   `runTropicalCyclone.js 8 15000 1200000 out ice vmin=4 radc=1.5 rh12=0.6`（每 3 小時印核心／外圍雨量與外圍降雨面積比）。
-- 結果見 ROADMAP 第 4 節；3D 15 km 三組對照（A 基準、B vmin 4、C vmin 4＋冷卻 1.5）在 scratchpad 背景跑（下個 session 需重跑）。
+- 結果：軸對稱篩選與雙眼牆見 RESULTS 4.3c，3D 15 km 三組對照見 RESULTS 4.3d。結論：15 km 在成熟期三種設定都沒有雨帶
+  （外圍只有零星單格對流），預設不變；要在 5 km／3 km（使用者的 GPU）確認。
+- 雨帶統計：颱風實驗的每個畫面帶 `stats.tcRain`（上一個模式小時的核心 < 60 km／外圍 100–300 km 平均降雨率、外圍 > 1 mm/h
+  面積比；3D 在 worker 的 `tcRainUpdate`，軸對稱在 `AxiDriver.frame`）；頁面資訊列、時間序列「外圍雨量」、CSV、
+  無人值守報告（`rain_core`、`rain_outer`、`wet_outer`）都有。
 - 3 km 颱風（tc_3）：CPU 端 RegionalModel／RegionalPhysics 的工作陣列改成第一次 CPU 步進時才配置（GPU 跑時只保留狀態陣列）。
+  worker 的 `isTc()` 之前漏了 tc_3（沒有中心氣壓、RMW、眼牆），已修正。
 
 ## 龍捲與互動（ROADMAP 第 6、7 節）
 - `supercell.ts`：`TornadoEnv`（R、depth、U6、qvMax）、`TORNADO_DEFAULT`（新的強低層風切預設）、`TORNADO_WK82`（舊預設，
@@ -87,7 +92,13 @@
   `environment`（改完重建 GPU，因為阻尼層風與邊界目標在 GPU 表內）。圖表的滑鼠工具在 `charts.ts`（`MapTool`）。
 - 自由飛行：`VolumeView.setCamera('fly')`。挑戰任務：`missions.ts`（localStorage 記完成，try/catch）。
 
+## 文件截圖
+- `docs/results/charts_*.png`（RESULTS 4.6）：在 Node 用 CPU 跑出成熟狀態存檔（超大胞 `packSave`；軸對稱用 `AxiDriver`＋`packSave`），
+  再用 playwright 匯入頁面、切換圖表、只截 `#stage` 區域。
+
 ## 下一步
-- 颱風雨帶：等 3D 15 km 三組對照結果（A 基準、B vmin 4、C vmin 4＋冷卻 1.5），決定預設要不要改；用 5 km／3 km GPU 讓使用者確認。
-- 多重眼牆：3 km 實驗與軸對稱 1–2 km 長時間積分，用 Hovmöller（眼牆點）判斷。
-- 要問使用者：龍捲的地面附近垂直加密；「放山」需要地形座標（大改動）。
+- 等使用者在 GPU 上的結果（用 ArtifactData 讀 `runs` 集合）：
+  1. 雨帶：5 km（tc_hr）預設 vs vmin 4（「颱風環境與參數」面板），看 `rain_outer`／`wet_outer`。
+  2. 雙眼牆：tc → 細化 tc_hr → 細化 tc_3，成熟後跑 2–3 天，看 `ew2r`（第二眼牆）與 Hovmöller。
+- 若 5 km 仍沒有雨帶：可試較大的區域（1800–2400 km，週期區域的外流下沉）或較小的水平混合長度（目前 0.2·Δx）。
+- 要問使用者：龍捲的地面附近垂直加密（約 50 m）；「放山」需要地形座標（大改動）；颱風預設要不要改（目前建議不改）。
