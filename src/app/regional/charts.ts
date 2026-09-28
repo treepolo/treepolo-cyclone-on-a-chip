@@ -81,6 +81,17 @@ function scaleFor(name: string, data: ArrayLike<number>): Scale {
 interface Sample { t: number; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null; ew: { r: number; v: number }[] | null }
 interface GridInfo { nx: number; ny: number; nz: number; dx: number; dy: number; dz: number; experiment: RegionalExperiment; land: Uint8Array | null }
 type MapFrame = { r: Rect; Lx: number; Ly: number };
+/** what a click or drag on a map does */
+export type MapTool = 'inspect' | 'warm' | 'cold' | 'warmer' | 'cooler' | 'land' | 'sea';
+const TOOLS: { v: MapTool; label: string }[] = [
+  { v: 'inspect', label: '滑鼠：剖面線與探空點 / Mouse: section line & sounding' },
+  { v: 'warm', label: '點一下放暖泡（+3 K）/ Click: warm bubble (+3 K)' },
+  { v: 'cold', label: '點一下放冷池（−6 K）/ Click: cold pool (−6 K)' },
+  { v: 'warmer', label: '塗暖海溫 +2 °C / Paint warmer sea' },
+  { v: 'cooler', label: '塗冷海溫 −2 °C / Paint cooler sea' },
+  { v: 'land', label: '塗陸地（乾地面）/ Paint land (dry ground)' },
+  { v: 'sea', label: '塗回海洋 / Paint sea' },
+];
 
 export interface ChartsHooks {
   /** chart data wanted in each frame (sent to the worker) */
@@ -89,6 +100,10 @@ export interface ChartsHooks {
   view(v: ViewKind): void;
   /** tracer particles in the 3-D view (count, 0 = off) */
   tracers(n: number): void;
+  /** interaction on a map: place a bubble or cold pool, or paint the surface (domain coordinates, m) */
+  interact(kind: MapTool, x: number, y: number, radius: number): void;
+  /** 3-D camera mode */
+  camera(mode: 'orbit' | 'fly'): void;
 }
 
 export class RegionalCharts {
@@ -111,6 +126,11 @@ export class RegionalCharts {
   private lastReq = '';
   private volMode = 0;
   private tracerN = 0;
+  private tool: MapTool = 'inspect';
+  private cam: 'orbit' | 'fly' = 'orbit';
+  private lastPaint: { x: number; y: number } | null = null;
+  /** paint brush radius (m): 3 cells or a twentieth of the domain, whichever is larger */
+  private get brush(): number { const g = this.grid!; return Math.max(3 * g.dx, Math.min(g.nx * g.dx, g.ny * g.dy) / 20); }
   private noteText = '';
   private noteTimer = 0;
   private set note(t: string) { this.noteText = t; clearTimeout(this.noteTimer); if (t) this.noteTimer = window.setTimeout(() => { this.noteText = ''; this.redraw(); }, 5000); }
@@ -245,7 +265,9 @@ export class RegionalCharts {
         String(this.volMode), (v) => { this.volMode = Number(v); this.hooks.volMode(this.volMode); }, '3D 第二通道 / 3-D second channel');
       sel([{ v: '0', label: '無軌跡粒子 / No trajectory particles' }, { v: '2000', label: '軌跡粒子 2000 / 2,000 particles' }, { v: '6000', label: '軌跡粒子 6000 / 6,000 particles' }, { v: '16000', label: '軌跡粒子 16000 / 16,000 particles' }],
         String(this.tracerN), (v) => { this.tracerN = Number(v); this.hooks.tracers(this.tracerN); this.buildBar(); }, '軌跡粒子 / Trajectory particles');
+      sel([{ v: 'orbit', label: '相機：環繞 / Camera: orbit' }, { v: 'fly', label: '相機：自由飛行 / Camera: free flight' }], this.cam, (v) => { this.cam = v as 'orbit' | 'fly'; this.hooks.camera(this.cam); this.buildBar(); }, '相機 / Camera');
       if (this.tracerN) hint('粒子：從低層 2 km 內出發，橘 = 低、淡黃 = 高；尾跡為最近幾個畫面 / particles start in the lowest 2 km; orange low, pale yellow high; trails show recent frames');
+      if (this.cam === 'fly') hint('自由飛行：W/S 前後、A/D 左右、Q/E 上下（Shift 加速）、拖曳轉頭、滾輪前進後退 / free flight: W/S forward/back, A/D left/right, Q/E down/up (Shift: faster), drag to look, wheel to move');
     }
     if (vv === 'slice') {
       sel(SLICE_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.slice, (v) => { this.sel.slice = v as SliceVar; this.sendRequest(); this.redraw(); }, '變數 / Variable');
@@ -258,13 +280,15 @@ export class RegionalCharts {
         upd(); b.append(r, lab);
       }
       chk('風向箭頭 / Wind arrows', this.show.arrows, (v) => { this.show.arrows = v; });
-      hint('拖曳畫剖面線、點一下選探空點 / drag: cross-section line · click: sounding point');
+      sel(TOOLS, this.tool, (v) => { this.tool = v as MapTool; this.buildBar(); }, '滑鼠工具 / Mouse tool');
+      hint(this.toolHint());
     }
     if (vv === 'composite') {
       sel(MAP_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.composite, (v) => { this.sel.composite = v as MapVar; this.sendRequest(); this.redraw(); }, '變數 / Variable');
       chk('海平面等壓線 / Isobars', this.show.isobars, (v) => { this.show.isobars = v; });
       chk('地面風箭頭 / Surface wind', this.show.sfcWind, (v) => { this.show.sfcWind = v; });
-      hint('拖曳畫剖面線、點一下選探空點 / drag: cross-section line · click: sounding point');
+      sel(TOOLS, this.tool, (v) => { this.tool = v as MapTool; this.buildBar(); }, '滑鼠工具 / Mouse tool');
+      hint(this.toolHint());
     }
     if (vv === 'section') {
       sel(SECTION_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.section, (v) => { this.sel.section = v as SecVar; this.redraw(); }, '變數 / Variable');
@@ -290,8 +314,15 @@ export class RegionalCharts {
     }
   }
 
+  private toolHint(): string {
+    if (this.tool === 'inspect') return '拖曳畫剖面線、點一下選探空點 / drag: cross-section line · click: sounding point';
+    if (this.tool === 'warm' || this.tool === 'cold') return '只改變條件：點一下就把暖泡或冷池加進目前的大氣，之後怎麼發展由方程決定 / changes the conditions only: a click adds the perturbation, the equations decide what happens next';
+    return `拖曳塗抹（筆刷半徑 ${(this.brush / 1000).toFixed(0)} km），只影響有地面通量的實驗；沒有地形（模式沒有地形座標，放不了山）/ drag to paint (brush radius ${(this.brush / 1000).toFixed(0)} km); affects experiments with surface fluxes; no mountains (the model has no terrain coordinate)`;
+  }
+
   // ---------------------------------------------------------------- pointer
 
+  private isPaint(): boolean { return (this.view === 'slice' || this.view === 'composite') && (this.tool === 'warmer' || this.tool === 'cooler' || this.tool === 'land' || this.tool === 'sea'); }
   private local(e: PointerEvent): { x: number; y: number } { const r = this.canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
   private toDomain(p: { x: number; y: number }): { x: number; y: number } | null {
     const f = this.mapF; if (!f) return null;
@@ -312,6 +343,11 @@ export class RegionalCharts {
       if (Math.hypot(p.x - this.drag.px, p.y - this.drag.py) > 6) this.drag.moved = true;
       const f = this.mapF;
       if (f) { this.drag.x1 = Math.max(0, Math.min(f.Lx, (p.x - f.r.x) / f.r.w * f.Lx)); this.drag.y1 = Math.max(0, Math.min(f.Ly, (f.r.y + f.r.h - p.y) / f.r.h * f.Ly)); }
+      // painting: a stroke every half brush radius along the drag
+      if (this.isPaint() && (!this.lastPaint || Math.hypot(this.drag.x1 - this.lastPaint.x, this.drag.y1 - this.lastPaint.y) > 0.5 * this.brush)) {
+        this.lastPaint = { x: this.drag.x1, y: this.drag.y1 };
+        this.hooks.interact(this.tool, this.drag.x1, this.drag.y1, this.brush);
+      }
     }
     this.redraw();
   }
@@ -319,6 +355,11 @@ export class RegionalCharts {
     const d = this.drag; this.drag = null;
     try { this.canvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
     if (!d) return;
+    if (this.tool !== 'inspect' && (this.view === 'slice' || this.view === 'composite')) {
+      if (this.isPaint()) { if (!this.lastPaint) this.hooks.interact(this.tool, d.x0, d.y0, this.brush); this.lastPaint = null; }
+      else if (!d.moved) this.hooks.interact(this.tool, d.x0, d.y0, 0);
+      return;
+    }
     if (d.moved) {
       this.line = { x0: d.x0, y0: d.y0, x1: d.x1, y1: d.y1 };
       if (this.view !== 'section') this.note = '剖面線已設定：到「垂直剖面」查看 / Line set: see Cross-section';

@@ -122,9 +122,45 @@ export class VolumeView {
     this.vol = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
     attachOrbit(canvas, {
-      rotate: (dx, dy) => { this.yaw -= dx * 0.006; this.pitch = Math.max(0.05, Math.min(1.5, this.pitch + dy * 0.006)); this.dirty = true; },
-      zoom: (f) => { this.dist = Math.max(0.6, Math.min(6, this.dist * f)); this.dirty = true; },
+      rotate: (dx, dy) => {
+        if (this.fly) { this.fly.yaw -= dx * 0.004; this.fly.pitch = Math.max(-1.4, Math.min(1.4, this.fly.pitch - dy * 0.004)); }
+        else { this.yaw -= dx * 0.006; this.pitch = Math.max(0.05, Math.min(1.5, this.pitch + dy * 0.006)); }
+        this.dirty = true;
+      },
+      zoom: (f) => {
+        if (this.fly) this.moveFly(0.8 * (1 - f), 0, 0);   // wheel toward the screen (f < 1) flies forward
+        else this.dist = Math.max(0.6, Math.min(6, this.dist * f));
+        this.dirty = true;
+      },
     });
+    // free-flight keys (ignored while typing in a form field)
+    const typing = (): boolean => { const a = document.activeElement; return !!a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA'); };
+    window.addEventListener('keydown', (e) => { if (this.fly && !typing()) { this.keys.add(e.key.toLowerCase()); if ('wasdqe'.includes(e.key.toLowerCase())) e.preventDefault(); } });
+    window.addEventListener('keyup', (e) => { this.keys.delete(e.key.toLowerCase()); });
+    window.addEventListener('blur', () => this.keys.clear());
+  }
+
+  /** free-flight camera: eye position (box units) and look direction; null = orbit camera */
+  private fly: { eye: [number, number, number]; yaw: number; pitch: number } | null = null;
+  private readonly keys = new Set<string>();
+  private lastT = 0;
+  setCamera(mode: 'orbit' | 'fly'): void {
+    if (mode === 'orbit') { this.fly = null; this.dirty = true; return; }
+    if (this.fly) return;
+    // start where the orbit camera is, looking at the same point
+    const [bx, by, bz] = this.box, c = [bx / 2, by / 2, bz * 0.3];
+    const eye: [number, number, number] = [c[0]! + this.dist * Math.cos(this.pitch) * Math.cos(this.yaw), c[1]! + this.dist * Math.cos(this.pitch) * Math.sin(this.yaw), c[2]! + this.dist * Math.sin(this.pitch)];
+    const d = [c[0]! - eye[0], c[1]! - eye[1], c[2]! - eye[2]], l = Math.hypot(d[0]!, d[1]!, d[2]!);
+    this.fly = { eye, yaw: Math.atan2(d[1]!, d[0]!), pitch: Math.asin(d[2]! / l) };
+    this.dirty = true;
+  }
+  /** move the flying eye: forward along the look direction, right, up (box units) */
+  private moveFly(fwd: number, right: number, up: number): void {
+    const f = this.fly; if (!f) return;
+    const cp = Math.cos(f.pitch), dir = [cp * Math.cos(f.yaw), cp * Math.sin(f.yaw), Math.sin(f.pitch)], rgt = [Math.sin(f.yaw), -Math.cos(f.yaw), 0];
+    for (let i = 0; i < 3; i++) f.eye[i] = f.eye[i]! + fwd * dir[i]! + right * rgt[i]!;
+    f.eye[2] = Math.max(0.002, f.eye[2] + up);
+    this.dirty = true;
   }
 
   /** Upload cloud/rain volume [k][j][i] (bytes) and set the box aspect (x, y normalised to 1). */
@@ -238,6 +274,12 @@ export class VolumeView {
 
   render(cloudK: number, rainK: number): void {
     const gl = this.gl, c = this.canvas;
+    // free flight: move with the pressed keys (0.25 box widths per second, 4x with Shift)
+    const now = performance.now(), dts = Math.min(0.1, (now - (this.lastT || now)) / 1000); this.lastT = now;
+    if (this.fly && this.keys.size) {
+      const k = this.keys, v = 0.25 * dts * (k.has('shift') ? 4 : 1);
+      this.moveFly(((k.has('w') ? 1 : 0) - (k.has('s') ? 1 : 0)) * v, ((k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0)) * v, ((k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0)) * v);
+    }
     // cap the ray-marched pixel count (about 0.9 megapixels): the ray march is the costly part
     const cssW = Math.max(1, c.clientWidth), cssH = Math.max(1, c.clientHeight);
     const scale = Math.min(Math.min(1.5, window.devicePixelRatio || 1), Math.sqrt(9e5 / (cssW * cssH)));
@@ -249,12 +291,17 @@ export class VolumeView {
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);
     const [bx, by, bz] = this.box;
-    const ctr: [number, number, number] = [bx / 2, by / 2, bz * 0.3];
-    const eye: [number, number, number] = [
+    let ctr: [number, number, number] = [bx / 2, by / 2, bz * 0.3];
+    let eye: [number, number, number] = [
       ctr[0] + this.dist * Math.cos(this.pitch) * Math.cos(this.yaw),
       ctr[1] + this.dist * Math.cos(this.pitch) * Math.sin(this.yaw),
       ctr[2] + this.dist * Math.sin(this.pitch),
     ];
+    if (this.fly) {
+      const f = this.fly, cp = Math.cos(f.pitch);
+      eye = [f.eye[0], f.eye[1], f.eye[2]];
+      ctr = [eye[0] + cp * Math.cos(f.yaw), eye[1] + cp * Math.sin(f.yaw), eye[2] + Math.sin(f.pitch)];
+    }
     const vp = viewProj(eye, ctr, w / h);
     const inv = invert4(vp);
     const trOn = this.tracerPass(vp, eye, w, h);

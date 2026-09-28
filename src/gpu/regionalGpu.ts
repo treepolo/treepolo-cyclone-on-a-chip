@@ -182,6 +182,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
       const sd = new Float32Array(2 * nx * ny); sd.set(sfc.tsk); sd.set(sfc.wet, nx * ny);
       sfcBuf = device.createBuffer({ size: sd.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(sfcBuf, 0, sd);
+      this.sfcBuf = sfcBuf;
     }
     // uniform params per stage: [dts, dtStage, dtBig]
     const stages: [number, number][] = [[dt / 3, Math.max(1, Math.round(nsound / 3))], [dt / 2, Math.max(1, Math.round(nsound / 2))], [dt, nsound]];
@@ -257,6 +258,17 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     this.device.queue.writeBuffer(this.B, 0, bd);
   }
 
+  private sfcBuf: GPUBuffer | null = null;
+  /** true when the model has per-column surface fluxes (skin temperature and wetness can be changed) */
+  get hasSurface(): boolean { return !!this.sfcBuf; }
+  /** Replace the per-column skin temperature (K) and wetness ([j][i]). */
+  setSurface(tsk: ArrayLike<number>, wet: ArrayLike<number>): void {
+    if (!this.sfcBuf) return;
+    const n = this.cpu.c.nx * this.cpu.c.ny, sd = new Float32Array(2 * n);
+    sd.set(Array.from(tsk)); sd.set(Array.from(wet), n);
+    this.device.queue.writeBuffer(this.sfcBuf, 0, sd);
+  }
+
   /** Copy the CPU model state to the GPU (optionally with surface precipitation accumulations, [j][i]). */
   uploadFrom(m: RegionalModel, acc?: { rain: ArrayLike<number>; snow: ArrayLike<number> }): void {
     const size = m.size, d = new Float32Array(this.nf * size);
@@ -274,7 +286,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
 
   /** Release GPU buffers. */
   destroy(): void {
-    for (const b of [this.S, this.S0, this.F, this.aux, this.TR, this.FT, this.CF, this.B, this.R, this.disp?.D, this.disp?.C, this.disp?.LB, this.disp?.MODE, this.cflK?.out, this.rzK?.RP, this.rzK?.O, this.trK?.T, this.trK?.P, ...this.params]) b?.destroy();
+    for (const b of [this.S, this.S0, this.F, this.aux, this.TR, this.FT, this.CF, this.B, this.R, this.disp?.D, this.disp?.C, this.disp?.LB, this.disp?.MODE, this.cflK?.out, this.rzK?.RP, this.rzK?.O, this.trK?.T, this.trK?.P, this.sfcBuf, ...this.params]) b?.destroy();
   }
 
   /** Change the time step (all kernels take it from the per-stage uniforms). */

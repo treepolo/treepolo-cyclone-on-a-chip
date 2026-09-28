@@ -79,5 +79,15 @@
 - 結果見 ROADMAP 第 4 節；3D 15 km 三組對照（A 基準、B vmin 4、C vmin 4＋冷卻 1.5）在 scratchpad 背景跑（下個 session 需重跑）。
 - 3 km 颱風（tc_3）：CPU 端 RegionalModel／RegionalPhysics 的工作陣列改成第一次 CPU 步進時才配置（GPU 跑時只保留狀態陣列）。
 
+## 龍捲與互動（ROADMAP 第 6、7 節）
+- `supercell.ts`：`TornadoEnv`（R、depth、U6、qvMax）、`TORNADO_DEFAULT`（新的強低層風切預設）、`TORNADO_WK82`（舊預設，
+  沒有環境紀錄的舊存檔用它）；`kessler.ts` 的 `weismanKlempQ(qvMax)`。`runTornado.js ... env=wk82` 可重現舊結果。
+- 龍捲偵測：worker `stats.tornado`（ζ、V、EF、位置），頁面 `tornadoWatch` 記事件；runner 的 tor_ef／tor_v／tor_zeta。
+- 互動訊息：`perturb`（CPU 改完上傳 GPU）、`paint`（`RegionalPhysics.surface` 與 `GpuRegional.setSurface`，細化後重設）、
+  `environment`（改完重建 GPU，因為阻尼層風與邊界目標在 GPU 表內）。圖表的滑鼠工具在 `charts.ts`（`MapTool`）。
+- 自由飛行：`VolumeView.setCamera('fly')`。挑戰任務：`missions.ts`（localStorage 記完成，try/catch）。
+
 ## 下一步
-依 ROADMAP 順序：颱風雨帶（只有眼牆有雲；先用軸對稱版篩選 vmin、輻射、混合長度）→ 多重眼牆與置換 → 龍捲 → 互動機制。
+- 颱風雨帶：等 3D 15 km 三組對照結果（A 基準、B vmin 4、C vmin 4＋冷卻 1.5），決定預設要不要改；用 5 km／3 km GPU 讓使用者確認。
+- 多重眼牆：3 km 實驗與軸對稱 1–2 km 長時間積分，用 Hovmöller（眼牆點）判斷。
+- 要問使用者：龍捲的地面附近垂直加密；「放山」需要地形座標（大改動）。

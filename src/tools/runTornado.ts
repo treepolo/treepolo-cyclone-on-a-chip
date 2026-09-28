@@ -1,9 +1,10 @@
 // Tornado-scale supercell environment (src/regional/supercell.ts) on the CPU (Node). Usage:
-//   node dist/tools/runTornado.js [minutes=90] [dx=500] [L=30000] [nz=40] [dz=400] [dt=3] [outDir]
+//   node dist/tools/runTornado.js [minutes=90] [dx=500] [L=30000] [nz=40] [dz=400] [dt=3] [outDir] [env=default|wk82]
+// env: the default strong low-level-shear environment, or the former WK82 one (TORNADO_WK82).
 // At 500 m this checks the set-up (a rotating supercell that stays inside the moving domain);
 // tornado-like vortices need ~100-200 m grids (GPU).
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { tornadoExperiment, StormTracker } from '../regional/supercell.js';
+import { tornadoExperiment, StormTracker, TORNADO_DEFAULT, TORNADO_WK82 } from '../regional/supercell.js';
 import { IceMicrophysics, QC, QI } from '../regional/ice.js';
 import { RegionalPhysics } from '../regional/physics.js';
 import { xySvg } from './plot.js';
@@ -12,7 +13,7 @@ const a = process.argv.slice(2).map(Number);
 const minutes = a[0] || 90, dx = a[1] || 500, L = a[2] || 40000, nz = a[3] || 40, dz = a[4] || 400, dt = a[5] || 3;
 const outDir = process.argv[9] ?? `results/tornado_${dx}m`;
 mkdirSync(outDir, { recursive: true });
-const e = tornadoExperiment(dx, L, nz, dz, dt, 6);
+const e = tornadoExperiment(dx, L, nz, dz, dt, 6, process.argv[10] === 'wk82' ? TORNADO_WK82 : TORNADO_DEFAULT);
 const m = e.model, mp = new IceMicrophysics(m);
 new RegionalPhysics(m, e.physics);
 const { nx, ny } = m.c;

@@ -28,6 +28,8 @@ button,select,input{font:inherit;background:#101821;color:var(--fg);border:1px s
 .savetitle{font-weight:600;overflow-wrap:anywhere}
 label{display:block;margin:6px 0 2px;color:#b8c6d4} select,input[type=range]{width:100%;box-sizing:border-box}
 .axgrid{display:grid;grid-template-columns:1fr 7em;gap:4px 8px;align-items:center}.axgrid label{margin:0}.axgrid input,.axgrid select{width:100%;box-sizing:border-box}
+.missions{display:flex;flex-direction:column;gap:6px;margin-top:6px}.mission{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:4px;padding:6px 8px}
+.mission .mark{font-size:15px;line-height:1.2;color:var(--muted)}.mission.done .mark{color:#1baf7a}
 .log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:var(--bg);padding:8px;border:1px solid #1d2833;max-height:120px;overflow:auto}
 a{color:#8fc1ff}
 @media(max-width:820px){body{grid-template-columns:1fr;grid-template-rows:72vh auto}.panel{border-left:0;border-top:1px solid var(--line)}}
@@ -53,6 +55,19 @@ a{color:#8fc1ff}
 <label for="backendSel">計算後端 / Compute backend</label>
 <select id="backendSel"><option value="auto">自動：可用時用 WebGPU / Auto: WebGPU when available</option><option value="cpu">CPU Float64</option></select>
 <div id="desc" class="muted"></div>
+<div id="tornadoPanel" hidden>
+<h2>龍捲環境 / Tornado environment</h2>
+<div class="muted">改變環境（不改結果）：四分之一圓風徑圖的半徑與深度決定低層風切與 0–1 km 螺旋度；邊界層水氣越多，雲底越低、CAPE 越大。/ Change the environment, not the outcome: the quarter-circle hodograph's radius and depth set the low-level shear and 0–1 km helicity; a moister boundary layer lowers the cloud base and raises CAPE.</div>
+<div class="axgrid">
+<label for="toR">風徑圖半徑 / Hodograph radius (m/s)</label><input id="toR" type="number" step="1" value="12" />
+<label for="toDepth">彎曲段深度 / Curved-segment depth (km)</label><input id="toDepth" type="number" step="0.25" value="1" />
+<label for="toU6">6 km 風速 / Wind at 6 km (m/s)</label><input id="toU6" type="number" step="1" value="30" />
+<label for="toQ">邊界層水氣上限 / Boundary-layer vapour cap (g/kg)</label><input id="toQ" type="number" step="0.5" value="16" />
+</div>
+<div class="row"><span>環境 / Environment</span><span id="toInfo">—</span></div>
+<div class="muted">舊版預設（WK82，10 m/s、2 km、14 g/kg）的 0–1 km 螺旋度只有約 120 m²/s²；現在預設 12 m/s、1 km、16 g/kg（約 280 m²/s²、CAPE 約 3200 J/kg、雲底約 0.9 km），是典型的強龍捲環境。/ The former default (WK82, 10 m/s over 2 km, 14 g/kg) has only about 120 m²/s² of 0–1 km helicity; the new default (12 m/s over 1 km, 16 g/kg: about 280 m²/s², CAPE about 3200 J/kg, cloud base about 0.9 km) is a typical significant-tornado environment.</div>
+<div class="controls"><button id="toApply">套用並重新開始 / Apply and restart</button></div>
+</div>
 <div id="axiPanel" hidden>
 <h2>颱風環境與參數 / Tropical-cyclone environment</h2>
 <div class="muted axOnly">只算半徑與高度（假設颱風左右對稱），同樣的方程與物理，快上百倍：先用它篩選參數，再到 3D 確認。改完按「套用並重新開始」。/ Radius and height only (the storm is assumed symmetric about its axis), same equations and physics, about a hundred times faster: screen parameters here, then confirm in 3-D. Press Apply to restart with the new values.</div>
@@ -100,6 +115,17 @@ a{color:#8fc1ff}
 <div class="row"><span>中心氣壓降 / Central pressure deficit</span><span id="dp">—</span></div>
 <div class="row"><span>眼牆（1.5 km 切向風極大）/ Eyewalls (1.5 km vt maxima)</span><span id="eyewalls">—</span></div>
 <div class="row"><span>近地面最大渦度・對地風速 / Near-surface max vorticity · ground-relative wind</span><span id="zeta">—</span></div>
+<div class="row"><span>龍捲偵測（需 ≤ 500 m 網格）/ Tornado detector (grids ≤ 500 m)</span><span id="tornado">—</span></div>
+<h2>互動：只改條件 / Interaction: change the conditions</h2>
+<div class="muted">在「水平切面」或「合成圖」用滑鼠工具放暖泡、冷池，或塗海溫與陸地。這裡可以在模擬進行中突然改變環境的風切與中層濕度；之後怎麼發展完全由方程決定。模式沒有地形座標，所以不能放山。/ In the slice or composite view, use the mouse tool to place warm bubbles or cold pools, or paint sea temperature and land. Here you can change the environmental shear and mid-level humidity during a run; what happens next is up to the equations. The model has no terrain coordinate, so mountains are not possible.</div>
+<div class="axgrid">
+<label for="envDu">6 km 西風增加 / Add westerly wind at 6 km (m/s)</label><input id="envDu" type="number" step="1" value="5" />
+<label for="envRh">1–8 km 水氣倍數 / Multiply 1–8 km vapour by</label><input id="envRh" type="number" step="0.05" value="1.2" />
+</div>
+<div class="controls"><button id="envApply">現在改變環境 / Change the environment now</button></div>
+<h2>挑戰任務 / Challenges</h2>
+<div class="muted">讓風暴自己達成目標：只能改條件（實驗、海溫、濕度、風切、暖泡、冷池、塗海溫或陸地），不能直接改結果。/ Get the storm to reach the goal by itself: change only the conditions (experiment, sea temperature, humidity, shear, bubbles, cold pools, painted sea or land), never the result.</div>
+<div id="missions" class="missions"></div>
 <h2>無人值守實驗 / Unattended run</h2>
 <div class="muted">按一下就讓它自己跑：全速、快轉顯示，每隔固定模式時間記錄風暴統計，結束時自動存檔，報告存到雲端資料庫讓開發者直接讀取。/ Runs by itself at full speed, records the storm statistics at a fixed model-time interval, saves the final state and stores the report for the developer.</div>
 <div class="controls"><input id="runH" type="number" min="0.5" step="0.5" value="24" style="width:5em" /><span style="align-self:center">模式小時 / model hours</span>

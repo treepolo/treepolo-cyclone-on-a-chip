@@ -25,7 +25,7 @@ export const NEST_HALF_WIDTH_KM: Record<NestSize, number> = { meso: 600, storm: 
 export type GroundField = 'rain' | 'wind' | 'theta' | 'snow';
 
 export type ToRegionalWorker =
-  | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu'; axi?: import('./axiDriver.js').AxiParams }
+  | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu'; axi?: import('./axiDriver.js').AxiParams; tornado?: import('../../regional/supercell.js').TornadoEnv }
   | { type: 'initNest'; payload: NestPayload; lat0: number; lon0: number; size: NestSize; backend: 'auto' | 'cpu' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
@@ -51,7 +51,14 @@ export type ToRegionalWorker =
   /** second channel of the 3-D view: 0 precipitation, 1 updraft, 2 cyclonic vertical vorticity */
   | { type: 'volMode'; mode: number }
   /** tracer particles for the 3-D view (0: off) */
-  | { type: 'tracers'; n: number };
+  | { type: 'tracers'; n: number }
+  /** interaction (conditions only): a warm bubble or a cold pool centred at (x, y) m in domain coordinates */
+  | { type: 'perturb'; kind: 'warm' | 'cold'; x: number; y: number }
+  /** paint the surface within `radius` m of (x, y): sea temperature change (K) or land / sea */
+  | { type: 'paint'; kind: 'warmer' | 'cooler' | 'land' | 'sea'; x: number; y: number; radius: number }
+  /** change the environment now: add du6 (m/s) of westerly wind at 6 km (linear from the ground) and multiply
+   *  the 1-8 km water vapour by humidity (capped at saturation) */
+  | { type: 'environment'; du6: number; humidity: number };
 
 /** What the charts need in each frame. Positions in m from the domain origin (lower-left corner). */
 export interface ChartRequest {
@@ -86,10 +93,15 @@ export interface RegionalFrame {
     wmax: number; wmin: number; qcmax: number; qrmax: number; rainmax: number; vmax: number; dp: number | null; rmw: number | null; eyewalls: { r: number; v: number }[] | null; zetaMax: number; vGround: number;
     /** column-max reflectivity (dBZ), 2-5 km updraft helicity (m^2/s^2) and surface-based CAPE (J/kg) maxima */
     dbzMax: number; uhMax: number; capeMax: number;
+    /** most negative 2-5 km updraft helicity (anticyclonic left-moving storms), m^2/s^2 */
+    uhMin: number;
     /** strongest storm column (max UH, or max w before rotation): ground-relative position (m), or null */
     storm: { x: number; y: number } | null;
     /** tropical cyclones: azimuthal-mean tangential wind at 1.5 km, rings of width dr from the centre */
     vtProfile: { dr: number; vt: number[] } | null;
+    /** tornado-like vortex at the lowest level (grids of 500 m or finer): vertical vorticity >= 0.1 s^-1 with a
+     *  ground-relative wind >= 29 m/s within 1.5 km; EF rating from that wind; ground-relative position (m) */
+    tornado: { zeta: number; v: number; ef: number; x: number; y: number } | null;
   };
   /** ground-relative position (m) of the domain origin (moves with the frame of storm-following experiments) */
   origin: { x: number; y: number };
@@ -106,5 +118,6 @@ export type FromRegionalWorker =
   | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null; refineTo: RegionalExperiment | null }
   | { type: 'profile'; text: string }
   | { type: 'paused'; reason: string }
+  | { type: 'log'; text: string }
   | { type: 'saveData'; meta: import('../saves.js').SaveMeta; buffer: ArrayBuffer }
   | { type: 'error'; message: string };

@@ -8,18 +8,31 @@
 //   * initiation: a warm bubble
 
 import { RegionalModel, RegionalConfig } from './core.js';
-import { weismanKlemp } from './kessler.js';
+import { weismanKlempQ } from './kessler.js';
 import { QV } from './ice.js';
 import type { RegionalPhysicsConfig } from './physics.js';
 
-export interface Hodograph { R: number; U6: number }
+/** Hodograph: quarter circle of radius R (m/s) over the lowest `depth` metres (2 km by default), then a straight
+ *  segment to u = U6 at 6 km. A shallower or larger quarter circle means stronger low-level shear and more
+ *  0-1 km storm-relative helicity. */
+export interface Hodograph { R: number; U6: number; depth?: number }
 
 /** Ground-relative environmental wind at height z (m). */
 export function quarterCircleWind(z: number, h: Hodograph = { R: 10, U6: 30 }): { u: number; v: number } {
-  if (z <= 2000) { const a = 0.5 * Math.PI * z / 2000; return { u: h.R * (1 - Math.cos(a)), v: h.R * Math.sin(a) }; }
-  const f = Math.min(1, (z - 2000) / 4000);
+  const d = h.depth ?? 2000;
+  if (z <= d) { const a = 0.5 * Math.PI * z / d; return { u: h.R * (1 - Math.cos(a)), v: h.R * Math.sin(a) }; }
+  const f = Math.min(1, (z - d) / (6000 - d));
   return { u: h.R + f * (h.U6 - h.R), v: h.R };
 }
+
+/** Environment of the tornado experiments: hodograph and boundary-layer moisture cap (kg/kg). */
+export interface TornadoEnv { R: number; U6: number; depth: number; qvMax: number }
+/** Default: strong low-level shear (12 m/s quarter circle over 1 km: 0-1 km SRH about 280 m^2/s^2) and a moist
+ *  boundary layer (16 g/kg: CAPE about 3200 J/kg, cloud base about 0.9 km), a typical significant-tornado environment. */
+export const TORNADO_DEFAULT: TornadoEnv = { R: 12, U6: 30, depth: 1000, qvMax: 0.016 };
+/** The environment used before (WK82 with a 10 m/s quarter circle over 2 km: 0-1 km SRH about 120 m^2/s^2);
+ *  saves made without an environment record were made with it. */
+export const TORNADO_WK82: TornadoEnv = { R: 10, U6: 30, depth: 2000, qvMax: 0.014 };
 
 /** Bunkers et al. (2000) right-moving supercell motion: 0-6 km mean wind plus 7.5 m/s to the right
  *  of the shear vector between the 0-0.5 km and 5.5-6 km layer means. */
@@ -36,14 +49,15 @@ export function bunkersRightMover(wind: (z: number) => { u: number; v: number })
 
 /** Build the experiment: model (6 moisture species for the ice scheme), physics configuration and
  *  the frame velocity. dx is the horizontal grid spacing, L the domain width. */
-export function tornadoExperiment(dx: number, L: number, nz: number, dz: number, dt: number, nsound = 6): { model: RegionalModel; physics: RegionalPhysicsConfig; frame: { u: number; v: number }; description: string } {
+export function tornadoExperiment(dx: number, L: number, nz: number, dz: number, dt: number, nsound = 6, env: TornadoEnv = TORNADO_DEFAULT): { model: RegionalModel; physics: RegionalPhysicsConfig; frame: { u: number; v: number }; description: string } {
   const nx = Math.round(L / dx);
   // open lateral boundaries relaxing toward the undisturbed environment, so the storm's outflow can
   // leave the domain and fresh inflow enters (a periodic domain this small recycles the cold pool)
   const cfg: RegionalConfig = { lateral: 'open', relaxCells: Math.max(6, Math.round(2500 / dx)), relaxTau: 300, nx, ny: nx, nz, dx, dy: dx, dz, dt, nsound, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: Math.min(5000, 0.3 * nz * dz), dampRate: 1 / 300, kdiff2: 0 };
-  const m = new RegionalModel(cfg, weismanKlemp, 6);
-  const frame = bunkersRightMover((z) => quarterCircleWind(z));
-  m.setBaseWind((z) => { const w = quarterCircleWind(z); return { u: w.u - frame.u, v: w.v - frame.v }; });
+  const m = new RegionalModel(cfg, weismanKlempQ(env.qvMax), 6);
+  const hodo: Hodograph = { R: env.R, U6: env.U6, depth: env.depth };
+  const frame = bunkersRightMover((z) => quarterCircleWind(z, hodo));
+  m.setBaseWind((z) => { const w = quarterCircleWind(z, hodo); return { u: w.u - frame.u, v: w.v - frame.v }; });
   for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
   m.boundary = { u: Float64Array.from(m.u), v: Float64Array.from(m.v), th: Float64Array.from(m.th), qv: Float64Array.from(m.scalars[QV]!), pp: new Float64Array(m.size) };
   // warm bubble: 3 K, 5 km horizontal and 1.5 km vertical radius, centred at 1.5 km in the domain's left third
@@ -58,7 +72,7 @@ export function tornadoExperiment(dx: number, L: number, nz: number, dz: number,
   const physics: RegionalPhysicsConfig = { lh: 0.21 * delta, lv: 0.21 * delta, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface: { tsk, wet }, z0: 0.1, frameVel: frame };
   return {
     model: m, physics, frame,
-    description: `龍捲尺度超大胞 / tornado-scale supercell（Δx ${dx} m）：WK82 探空、四分之一圓風徑圖、地面摩擦；區域隨右移胞移動 (${frame.u.toFixed(1)}, ${frame.v.toFixed(1)}) m/s / WK82 sounding, quarter-circle hodograph, surface drag; domain moves with the right-mover`,
+    description: `龍捲尺度超大胞 / tornado-scale supercell（Δx ${dx} m）：WK82 探空（邊界層水氣上限 ${(env.qvMax * 1e3).toFixed(0)} g/kg）、四分之一圓風徑圖（半徑 ${env.R} m/s、深 ${(env.depth / 1000).toFixed(1)} km、6 km 風 ${env.U6} m/s）、地面摩擦；區域隨右移胞移動 (${frame.u.toFixed(1)}, ${frame.v.toFixed(1)}) m/s / WK82 sounding (boundary-layer vapour cap ${(env.qvMax * 1e3).toFixed(0)} g/kg), quarter-circle hodograph (radius ${env.R} m/s over ${(env.depth / 1000).toFixed(1)} km, ${env.U6} m/s at 6 km), surface drag; domain moves with the right-mover`,
   };
 }
 

@@ -84,12 +84,17 @@ export class KesslerMicrophysics {
 }
 
 /** Weisman & Klemp (1982) sounding: theta(z), qv(z) (with the 14 g/kg surface cap used in CM1). */
-export function weismanKlemp(z: number): { theta: number; qv: number } {
-  const theta = wkTheta(z), rh = z <= 12000 ? 1 - 0.75 * Math.pow(z / 12000, 1.25) : 0.25;
-  const pi = wkExner(z), p = DRY_AIR.pRef * Math.pow(pi, 1 / DRY_AIR.kappa);
-  const T = theta * pi;
-  const qvs = 380 / p * Math.exp(17.27 * (T - 273.15) / (T - 35.86));
-  return { theta, qv: Math.min(0.014, rh * qvs) };
+export function weismanKlemp(z: number): { theta: number; qv: number } { return weismanKlempQ(0.014)(z); }
+/** The WK82 sounding with another boundary-layer mixing-ratio cap (kg/kg): a larger cap gives a moister
+ *  boundary layer, a lower cloud base and more CAPE (e.g. 0.016 for a tornadic environment). */
+export function weismanKlempQ(qvMax: number): (z: number) => { theta: number; qv: number } {
+  return (z: number) => {
+    const theta = wkTheta(z), rh = z <= 12000 ? 1 - 0.75 * Math.pow(z / 12000, 1.25) : 0.25;
+    const pi = wkExner(z), p = DRY_AIR.pRef * Math.pow(pi, 1 / DRY_AIR.kappa);
+    const T = theta * pi;
+    const qvs = 380 / p * Math.exp(17.27 * (T - 273.15) / (T - 35.86));
+    return { theta, qv: Math.min(qvMax, rh * qvs) };
+  };
 }
 function wkTheta(z: number): number {
   const ztr = 12000, th0 = 300, thtr = 343, Ttr = 213;

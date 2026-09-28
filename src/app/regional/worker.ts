@@ -13,7 +13,7 @@ import { Tracers, type TracerParams } from '../../regional/tracers.js';
 import { AxiDriver, AXI_DEFAULTS, type AxiParams } from './axiDriver.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
-import { tornadoExperiment, StormTracker } from '../../regional/supercell.js';
+import { tornadoExperiment, StormTracker, TORNADO_DEFAULT, TORNADO_WK82, type TornadoEnv } from '../../regional/supercell.js';
 import { REFINE_TO, type ChartData, type ChartRequest, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
 import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
@@ -29,6 +29,8 @@ let busy = false;
 let gpuBatch = 2;
 const DEBUG = false;
 let physCfg: RegionalPhysicsConfig | null = null;
+/** the CPU physics of the current model (surface state for painting), null without sub-grid / surface physics */
+let phys: RegionalPhysics | null = null;
 let frameVel = { u: 0, v: 0 };
 let tracker: StormTracker | null = null, lastTrack = 0;
 let nestSpec: NestSpec | null = null;
@@ -42,6 +44,10 @@ let lastFrameModel = 0;
 let axi: AxiDriver | null = null;
 /** tropical-cyclone environment chosen on the page (SST, humidity, radiation, gustiness, ...) for the 3-D TC experiments too */
 let tcEnv: Partial<AxiParams> | null = null;
+/** environment of the tornado experiments chosen on the page */
+let tornadoEnv: TornadoEnv = { ...TORNADO_DEFAULT };
+/** EF rating from a ground-relative wind speed (m/s; 3-s gust thresholds of the Enhanced Fujita scale) */
+const efRating = (v: number): number => (v >= 89 ? 5 : v >= 74 ? 4 : v >= 61 ? 3 : v >= 50 ? 2 : v >= 38 ? 1 : 0);
 const modelNow = (): number => (axi ? axi.time : gpu ? gpu.time : m ? m.time : 0);
 const dtNow = (): number => (axi ? axi.dt : gpu ? gpu.dt : m ? m.c.dt : 1);
 function frameDue(): boolean {
@@ -161,17 +167,17 @@ const post = (msg: FromRegionalWorker, tr: Transferable[] = []): void => (self a
 
 function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; description: string } {
   experiment = exp;
-  physCfg = null;
+  physCfg = null; phys = null;
   frameVel = { u: 0, v: 0 };
   tracker = null;
   if (exp === 'tornado' || exp === 'tornado_c') {
     // GPU: 250 m LES over 50 km; CPU: a 500 m preview over 40 km (mesocyclone scale only);
     // tornado_c: 1 km spin-up over 100 km (same environment), refined to the 250 m box later
-    const e = exp === 'tornado_c' ? tornadoExperiment(1000, 100000, 40, 400, 6, 6)
-      : gpuOk ? tornadoExperiment(250, 50000, 64, 250, 2, 8) : tornadoExperiment(500, 40000, 40, 400, 3, 6);
+    const e = exp === 'tornado_c' ? tornadoExperiment(1000, 100000, 40, 400, 6, 6, tornadoEnv)
+      : gpuOk ? tornadoExperiment(250, 50000, 64, 250, 2, 8, tornadoEnv) : tornadoExperiment(500, 40000, 40, 400, 3, 6, tornadoEnv);
     m = e.model; mp = new IceMicrophysics(m); physCfg = e.physics; frameVel = e.frame;
     tracker = new StormTracker(); lastTrack = 0;
-    new RegionalPhysics(m, physCfg);
+    phys = new RegionalPhysics(m, physCfg);
     return { dt: m.c.dt, description: e.description };
   }
   if (exp === 'supercell' || exp === 'supercell_hr') {
@@ -195,7 +201,7 @@ function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; descripti
     mp = new IceMicrophysics(m);
     // the mixing lengths stay those of the 3-D set-up (the panel's lh / lv apply to the axisymmetric version)
     physCfg = { lh: 0.2 * dx, lv: 100, sst, ck: P.ck, radTau: 12 * 3600, radMax: P.radMax / 86400, vmin: P.vmin, radConst: P.radConst / 86400 };
-    new RegionalPhysics(m, physCfg);
+    phys = new RegionalPhysics(m, physCfg);
     insertVortex(m, f, P.vmax0);
     dpEnv = 1e5 * Math.pow(m.pi0[0]!, 1004.5 / 287.05) / 100;
     const env = `${(sst - 273.15).toFixed(1)}°C、${P.radConst ? `固定冷卻 ${P.radConst} K/day` : 'RE87 輻射鬆弛'}、最小風速 ${P.vmin} m/s、12 km RH ${Math.round(100 * P.rhTop)}%`;
@@ -219,7 +225,7 @@ function buildNest(g: NestPayload, lat0: number, lon0: number, size: NestSize, g
   mp = new IceMicrophysics(m);
   const surface = g.ts && g.wet ? { tsk: sampleSurface(g, spec, g.ts), wet: sampleSurface(g, spec, g.wet) } : null;
   physCfg = { lh: 0.2 * spec.dx, lv: 100, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface };
-  new RegionalPhysics(m, physCfg);
+  phys = new RegionalPhysics(m, physCfg);
   let land: Uint8Array | null = null;
   if (g.land) { const lf = sampleSurface(g, spec, g.land); land = Uint8Array.from(lf, (x) => (x > 0.5 ? 1 : 0)); }
   const d = (x: number): string => (x * 180 / Math.PI).toFixed(1);
@@ -257,6 +263,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       const device = msg.backend === 'cpu' ? null : await getGpu();
       gpu?.destroy(); gpu = null;
       if (msg.experiment === 'tc' || msg.experiment === 'tc_hr' || msg.experiment === 'tc_3') tcEnv = msg.axi ?? tcEnv;
+      if ((msg.experiment === 'tornado' || msg.experiment === 'tornado_c') && msg.tornado) tornadoEnv = { ...TORNADO_DEFAULT, ...msg.tornado };
       let info = build(msg.experiment, !!device);
       builtGpu = !!device; nestSource = null;
       let note = '';
@@ -356,7 +363,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         const t = m.time;
         const meta = { kind: 'regional' as const, title: `${EXP_LABEL[experiment]} · ${t < 7200 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`}`,
           experiment, builtGpu, grid: { nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, size: m.size, nsc: m.scalars.length },
-          time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest, origin, tcEnv };
+          time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest, origin, tcEnv, tornadoEnv };
         const buffer = packSave(meta, arrays);
         post({ type: 'saveData', meta, buffer }, [buffer]);
       } catch (e) { post({ type: 'error', message: `存檔失敗 / save failed: ${String(e)}` }); }
@@ -392,7 +399,11 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
             land: (arrays.p_land as Uint8Array | undefined) ?? null };
           info = buildNest(payload, n.lat0, n.lon0, n.size, M.builtGpu);
           nestSource = { payload, lat0: n.lat0, lon0: n.lon0, size: n.size };
-        } else { tcEnv = (meta as unknown as { tcEnv?: Partial<AxiParams> | null }).tcEnv ?? null; info = build(M.experiment, M.builtGpu); nestSource = null; }
+        } else {
+          tcEnv = (meta as unknown as { tcEnv?: Partial<AxiParams> | null }).tcEnv ?? null;
+          tornadoEnv = { ...((meta as unknown as { tornadoEnv?: TornadoEnv }).tornadoEnv ?? TORNADO_WK82) };
+          info = build(M.experiment, M.builtGpu); nestSource = null;
+        }
         builtGpu = M.builtGpu;
         const mm = m!, mpp = mp!;
         if (mm.size !== M.grid.size || mm.scalars.length !== M.grid.nsc) throw new Error('存檔網格與目前版本不符 / the saved grid does not match this version');
@@ -478,6 +489,17 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         m.time = gpu.time; m.steps = gpu.steps;
       } catch (e) { post({ type: 'profile', text: `效能分析失敗 / profiling failed: ${String(e)}` }); }
       busy = false; running = wasRunning;
+    }
+    else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment') {
+      if (!m || !mp) { post({ type: 'error', message: '這個實驗不支援此互動（軸對稱模式請改用參數面板）/ this experiment does not support this interaction (use the panel for the axisymmetric model)' }); return; }
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        const note = await interact(msg);
+        if (note) post({ type: 'log', text: note });
+        if (!running) await sendFrame();
+      } catch (e) { post({ type: 'error', message: String(e) }); }
+      busy = false;
     }
     else if (msg.type === 'boundary' && m && nestSpec && experiment === 'nest') {
       while (busy) await new Promise((r) => setTimeout(r, 5));
@@ -575,6 +597,66 @@ async function followStorm(): Promise<void> {
   }
   if (tp && tracers) { tracers.pos.set(tp); gpu?.initTracers(tp); }
   else if (tp) setupTracers(tp);
+}
+
+/** Interaction: change the conditions (never the outcome). Returns a log line. */
+async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'paint' | 'environment' }>): Promise<string> {
+  const mm = m!, { nx, ny, nz, dx, dy } = mm.c, L = Math.min(nx * dx, ny * dy);
+  if (msg.type === 'paint') {
+    const sf = phys?.surface;
+    if (!sf || !physCfg) return '這個實驗沒有地面通量，不能塗海溫或陸地 / this experiment has no surface fluxes to paint';
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      if (Math.hypot((i + 0.5) * dx - msg.x, (j + 0.5) * dy - msg.y) > msg.radius) continue;
+      const c = j * nx + i;
+      if (msg.kind === 'warmer') sf.tsk[c] = Math.min(310, sf.tsk[c]! + 2);
+      else if (msg.kind === 'cooler') sf.tsk[c] = Math.max(271.35, sf.tsk[c]! - 2);
+      else if (msg.kind === 'land') sf.wet[c] = 0.3;
+      else sf.wet[c] = 1;
+    }
+    // keep the painting when the GPU model is rebuilt (storm following) and in the configuration
+    physCfg.surface = { tsk: sf.tsk, wet: sf.wet };
+    gpu?.setSurface(sf.tsk, sf.wet);
+    return '';
+  }
+  await syncFromGpu();
+  if (msg.type === 'perturb') {
+    // warm bubble (+3 K centred at 1.5 km) or cold pool (-6 K at the ground), horizontal radius 10 km (at least 4 cells, at most L/8)
+    const rh = Math.max(4 * dx, Math.min(10000, L / 8)), warm = msg.kind === 'warm', zc = warm ? 1500 : 0, rz = 1500, amp = warm ? 3 : -6;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const r = Math.sqrt((((i + 0.5) * dx - msg.x) / rh) ** 2 + (((j + 0.5) * dy - msg.y) / rh) ** 2 + ((mm.zc[k]! - zc) / rz) ** 2);
+      if (r < 1) { const q = mm.idx(i, j, k); mm.th[q] = mm.th[q]! + amp * Math.cos(0.5 * Math.PI * r) ** 2; }
+    }
+    if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+    return `${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km`;
+  }
+  // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km
+  const du = (z: number): number => msg.du6 * Math.min(1, z / 6000);
+  const hf = (z: number): number => 1 + (msg.humidity - 1) * Math.max(0, Math.min(1, (z - 500) / 500, (8500 - z) / 500));
+  const qv = mm.scalars[QV]!;
+  for (let k = 0; k < nz; k++) {
+    const d = du(mm.zc[k]!), f = hf(mm.zc[k]!);
+    mm.ub[k] = mm.ub[k]! + d;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const q = mm.idx(i, j, k);
+      mm.u[q] = mm.u[q]! + d;
+      if (f !== 1) {
+        const pi = mm.pi0[k]! + mm.pp[q]!, T = mm.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
+        qv[q] = Math.min(qv[q]! * f, 0.622 * es / Math.max(p - es, 1));
+      }
+      const b = mm.boundary;
+      if (b) { b.u[q] = b.u[q]! + d; if (b.qv) b.qv[q] = b.qv[q]! * f; }
+    }
+  }
+  if (gpu) {
+    // the damping-layer wind and the boundary targets live in the GPU model's tables: rebuild it
+    const device = gpu.device, dtNow = gpu.dt, tp = gpu.tracerCount ? await gpu.readTracers() : null;
+    gpu.destroy();
+    gpu = new GpuRegional(device, mm, { moist: true, physics: physCfg, ice: true });
+    gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+    gpu.setDt(dtNow);
+    if (tp) gpu.initTracers(tp);
+  }
+  return `改變環境 / environment changed: ${msg.du6 >= 0 ? '+' : ''}${msg.du6} m/s westerly at 6 km, 1-8 km humidity x${msg.humidity}`;
 }
 
 /** Copy the GPU state into the CPU model arrays (display and diagnostics reuse the CPU code). */
@@ -680,21 +762,34 @@ async function sendFrame(): Promise<void> {
     storm = { x: origin.x + (r.ic + 0.5) * dx, y: origin.y + (r.jc + 0.5) * m.c.dy };
   }
   // lowest-level vertical vorticity (cell corners) and ground-relative wind
-  let zetaMax = 0, vGround = 0;
+  let zetaMax = 0, vGround = 0, iz = 0, jz = 0;
   for (let j = 1; j < ny; j++) for (let i = 1; i < nx; i++) {
     const q = m.idx(i, j, 0);
     const zeta = (m.v[q]! - m.v[q - 1]!) / dx - (m.u[q]! - m.u[q - m.sx]!) / m.c.dy;
-    zetaMax = Math.max(zetaMax, zeta);
+    if (zeta > zetaMax) { zetaMax = zeta; iz = i; jz = j; }
     vGround = Math.max(vGround, Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!) + frameVel.u, 0.5 * (m.v[q]! + m.v[q + m.sx]!) + frameVel.v));
   }
+  // tornado detector (grids of 500 m or finer): strongest near-surface vortex and the ground-relative wind around it
+  let tornado: { zeta: number; v: number; ef: number; x: number; y: number } | null = null;
+  if (dx <= 500 && zetaMax >= 0.1) {
+    const rc = Math.max(1, Math.ceil(1500 / dx));
+    let vt = 0;
+    for (let j = Math.max(0, jz - rc); j < Math.min(ny, jz + rc); j++) for (let i = Math.max(0, iz - rc); i < Math.min(nx, iz + rc); i++) {
+      if (Math.hypot(i - iz, j - jz) * dx > 1500) continue;
+      const q = m.idx(i, j, 0);
+      vt = Math.max(vt, Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!) + frameVel.u, 0.5 * (m.v[q]! + m.v[q + m.sx]!) + frameVel.v));
+    }
+    if (vt >= 29) tornado = { zeta: zetaMax, v: vt, ef: efRating(vt), x: origin.x + iz * dx, y: origin.y + jz * m.c.dy };
+  }
   // storm-scale maxima from the column composites; the strongest storm column (max UH, else max w)
-  let dbzMax = 0, uhMax = 0, capeMax = 0;
+  let dbzMax = 0, uhMax = 0, uhMin = 0, capeMax = 0;
   if (col) {
     let cu = -1, cw = -1, wBest = 0;
     for (let c = 0; c < nx * ny; c++) {
       const o = NCOL * c;
       dbzMax = Math.max(dbzMax, col[o + C.dbz]!); capeMax = Math.max(capeMax, col[o + C.cape]!);
       if (col[o + C.uh]! > uhMax) { uhMax = col[o + C.uh]!; cu = c; }
+      uhMin = Math.min(uhMin, col[o + C.uh]!);
       if (col[o + C.wmax]! > wBest) { wBest = col[o + C.wmax]!; cw = c; }
     }
     const pick = uhMax > 25 ? cu : wBest > 5 ? cw : -1;
@@ -704,7 +799,7 @@ async function sendFrame(): Promise<void> {
   if (trOut) transfer.add(trOut.buffer as ArrayBuffer);
   stormDomain = storm ? { x: storm.x - origin.x, y: storm.y - origin.y } : stormDomain;
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
-    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, capeMax, storm, vtProfile },
+    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, uhMin, capeMax, storm, vtProfile, tornado },
     origin: { ...origin }, charts, tracers: trOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
 }
 

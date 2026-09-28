@@ -190,8 +190,8 @@ export class AxiDriver {
     const charts = req ? this.charts(req, col, transfer) : null;
     const msg: RegionalFrame = {
       type: 'frame', time: ax.time, nx: N, ny: N, nz, dx: this.dxv, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
-      stats: { wmax, wmin: col.wmin, qcmax, qrmax, rainmax, vmax: mt.vmax, dp: mt.dp, rmw: mt.rmw, eyewalls: eyewallPeaks(rr, vt), zetaMax, vGround: mt.vmax, dbzMax, uhMax, capeMax,
-        storm: { x: origin.x + this.D, y: origin.y + this.D }, vtProfile: { dr, vt } },
+      stats: { wmax, wmin: col.wmin, qcmax, qrmax, rainmax, vmax: mt.vmax, dp: mt.dp, rmw: mt.rmw, eyewalls: eyewallPeaks(rr, vt), zetaMax, vGround: mt.vmax, dbzMax, uhMax, uhMin: 0, capeMax,
+        storm: { x: origin.x + this.D, y: origin.y + this.D }, vtProfile: { dr, vt }, tornado: null },
       origin, charts, tracers: null, stepsPerSecond, dt: ax.a.dt,
     };
     return { msg, transfer };

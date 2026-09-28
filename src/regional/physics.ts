@@ -62,6 +62,8 @@ export class RegionalPhysics {
   readonly shf: Float64Array; readonly lhf: Float64Array;
 
   private readonly sfc: ReturnType<typeof surfaceState>;
+  /** Current per-column surface (skin temperature K, wetness), or null without surface fluxes. */
+  get surface(): { tsk: Float64Array; wet: Float64Array } | null { return this.sfc ? { tsk: this.sfc.tsk, wet: this.sfc.wet } : null; }
 
   constructor(private readonly m: RegionalModel, readonly cfg: RegionalPhysicsConfig) {
     this.sfc = surfaceState(m, cfg);
