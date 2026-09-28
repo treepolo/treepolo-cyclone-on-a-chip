@@ -48,20 +48,20 @@ refinement for the tornado item).
 `src/regional/axisym.ts`（模式）、`src/app/regional/axiDriver.ts`（區域頁面的「颱風軸對稱快速版」，繞軸旋轉成 3D 顯示，所有圖表可用）、
 `src/tools/runAxisym.ts`（命令列、多核心參數掃描）。28 °C、Δr 4 km：約 4.5 天醞釀後 30 小時內增強到 69 m/s（見 RESULTS 4.3b）。
 
-## 4. 颱風雨帶診斷與修正 / Tropical-cyclone rainbands（進行中 / in progress）
+## 4. 颱風雨帶診斷與修正 / Tropical-cyclone rainbands（15 km 與軸對稱已測，待 GPU 5 km 確認 / tested at 15 km and axisymmetric; awaiting a 5 km GPU run）
 - 已加入選項（3D CPU／GPU 與軸對稱，網頁「颱風環境與參數」面板）：地面通量最小風速（陣風）、固定晴空冷卻（取代向初始探空鬆弛）、
   探空 12 km 相對濕度。預設不變。/ Options added (3-D CPU/GPU and axisymmetric; page panel): minimum wind in the surface fluxes,
   constant clear-sky cooling instead of the relaxation, RH at 12 km. Defaults unchanged.
 - 軸對稱篩選（4 km，6–8 天；RESULTS 4.3c）：成熟後外圍（100–300 km）雨量幾乎為零（基準 0.03–0.05 mm/h）；最小風速 4 m/s
   或固定冷卻保留一些（0.25–0.3 mm/h），但固定冷卻使眼牆收縮到軸心附近；中層較濕無效；2 km 時 vmin 4 的外圍雨又掉回 0.01 mm/h。
-- 3D 15 km 對照（基準／vmin 4／vmin 4＋冷卻 1.5 K/day，RESULTS 4.3d）：成熟期三組外圍雨都只有 0.02–0.07 mm/h、外圍降雨面積
-  0–1%；外圍只有零星的單格對流（15 km 網格上的格點尺度對流），組織不成雨帶。15 km 沒有積雲參數化、水平混合長度 3 km，
+- 3D 15 km 對照（基準／vmin 4／vmin 4＋冷卻 1.5 K/day，RESULTS 4.3d）：成熟期三組外圍雨都只有 0.02–0.06 mm/h、外圍降雨面積
+  0.3–1.2%（醞釀期有 0.35–0.5 mm/h、8–12%）；外圍只有零星的單格對流（15 km 網格上的格點尺度對流），組織不成雨帶。15 km 沒有積雲參數化、水平混合長度 3 km，
   解析不了雨帶；週期區域只有 1200 km，眼牆外流的下沉增溫遍及整個區域也可能壓抑外圍對流。預設維持不變。
 - 下一步（使用者的 GPU）：5 km（tc_hr）或 3 km 比較預設與 vmin 4，看時間序列的「外圍雨量」與無人值守報告的 rain_outer／wet_outer。
 - 檢查弱風區地面通量（最小陣風 3–5 m/s）、中層濕度、輻射冷卻、水平混合、邊界與範圍
 - 雨帶是多重眼牆的前提
 
-## 5. 多重眼牆與眼牆置換 / Multiple eyewalls and eyewall replacement（準備中 / preparing）
+## 5. 多重眼牆與眼牆置換 / Multiple eyewalls and eyewall replacement（軸對稱已測，待 GPU 3 km / axisymmetric tested; awaiting a 3 km GPU run）
 - 已加入 3 km 颱風實驗（1200 km 週期區域、400×400×50，從 5 km「細化」接續；不用移動巢狀）與 Hovmöller 上的眼牆點（白：最內圈、橘：外圈）。
   3 km 實驗之前漏算中心氣壓、RMW 與眼牆（已修正）。
 - 軸對稱 10 天（Δr 2 km；Δr 4 km 海溫 30 °C；Δr 4 km 緯度 30°）都只有單一眼牆，收縮到 9–12 km 後維持，沒有次眼牆

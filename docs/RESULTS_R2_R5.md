@@ -226,6 +226,36 @@ Sweeps: `node dist/tools/runAxisym.js days=6 sweep=vmin:1,3,5`（每個 CPU 核�
   that contracts to 9–12 km and stays there (67–75 m/s); no secondary eyewall forms. Without outer rainbands (above), the axisymmetric
   model lacks the usual source of a secondary eyewall, so concentric eyewalls are left to the 3-D 3 km run (GPU).
 
+### 4.3d 雨帶：3D 15 km 對照 / Rainbands: 3-D 15 km comparison
+`node dist/tools/runTropicalCyclone.js 8 15000 1200000 <out> ice vmin=1 | vmin=4 | vmin=4 radc=1.5`（每 3 小時印核心／外圍雨量
+與外圍 > 1 mm/h 的面積比 / prints core and outer rain and the outer area fraction above 1 mm/h every 3 h）
+
+每格：最大地面風 m/s／最低氣壓 hPa／外圍 100–300 km 平均雨量 mm/h／外圍降雨面積 %
+Each cell: max surface wind m/s / minimum pressure hPa / outer (100–300 km) mean rain mm/h / outer raining area %
+
+| 設定 / Setting | 24 h | 48 h | 72 h | 96 h | 120 h | 144 h |
+|---|---|---|---|---|---|---|
+| A 基準 / baseline（vmin 1、鬆弛 / relaxation） | 15 / 941 / 0.12 / 2.4 | 16 / 940 / 0.49 / 12.6 | 19 / 939 / 0.59 / 10.2 | 19 / 934 / 0.14 / 3.7 | 42 / 919 / 0.03 / 0.6 | 47 / 910 / 0.02 / 0.1 |
+| B vmin 4 m/s | 14 / 941 / 0.13 / 3.1 | 15 / 940 / 0.46 / 11.6 | 17 / 939 / 0.40 / 8.2 | 21 / 935 / 0.44 / 6.6 | 38 / 922 / 0.04 / 0.7 | 42 / 917 / 0.01 / 0.1 |
+| C vmin 4 ＋ 冷卻 / cooling 1.5 K/day | 18 / 944 / 0.46 / 9.7 | 23 / 939 / 0.26 / 4.5 | 56 / 904 / 0.06 / 1.4 | 61 / 900 / 0.02 / 0.5 | 55 / 906 / 0.03 / 0.5 | 58 / 901 / 0.01 / 0.0 |
+
+成熟期（最大風 ≥ 40 m/s 之後）平均外圍雨量：A 0.022、B 0.024、C 0.058 mm/h；外圍降雨面積 0.3 %、0.3 %、1.2 %。
+醞釀期三組外圍都有 0.35–0.5 mm/h、8–12 % 面積在下雨，颱風一成熟就消失。最小陣風 4 m/s 在 3D 沒有差別；固定冷卻讓颱風
+提早兩天增強、更強（56–61 m/s，氣壓 900–906 hPa），但成熟後外圍同樣幾乎無雨。雨量圖上外圍只有零星、一格大小的陣雨
+（15 km 網格上的格點尺度對流），沒有組織成帶狀。可能原因：15 km 沒有積雲參數化、水平混合長度 3 km（0.2·Δx），
+解析不了雨帶的對流；1200 km 的週期區域裡，眼牆外流的補償下沉遍及整個區域，也可能壓抑外圍對流。
+預設不改；在 5 km／3 km（GPU，對流可以直接解析）比較預設與 vmin 4。
+Mature-stage (after 40 m/s) mean outer rain: A 0.022, B 0.024, C 0.058 mm/h; outer raining area 0.3, 0.3, 1.2 %. During gestation
+all three have 0.35–0.5 mm/h and 8–12 % raining area in the outer region, which disappears once the storm matures. A 4 m/s minimum
+wind makes no difference in 3-D; constant cooling makes the storm intensify two days earlier and stronger (56–61 m/s, 900–906 hPa),
+but the mature outer region is just as dry. The rain maps show only scattered one-cell showers outside the core (grid-scale convection
+on a 15 km grid), never organised into bands. Likely reasons: at 15 km there is no cumulus parameterisation and the horizontal mixing
+length is 3 km (0.2·Δx), so rainband convection is not resolved; and in a 1200 km periodic domain the compensating subsidence of the
+eyewall outflow covers the whole domain and may suppress outer convection. Defaults unchanged; compare the default and vmin 4 at
+5 km / 3 km on the GPU, where convection is explicit.
+
+![rain d6](results/tc15_ice_rain_d6.svg)
+
 ### 4.4 單向巢狀：全球模式中的區域預報 / One-way nest inside the Earth model
 `node dist/tools/runNest.js results/EARTH_T21 auto 30 24 20`
 
@@ -298,11 +328,11 @@ melting level, 15 km outflow) and the azimuthal-mean tangential wind (white: ver
 ## 5. 尚未達成 / Not yet achieved
 
 - 亞洲季風的季節性（見 2.2）→ R7 非灰體輻射與雲。
-- 颱風眼牆、雙眼牆、眼牆置換 → R6（2–3 km、GPU、長時間積分）。
+- 颱風外圍雨帶（15 km 與軸對稱都沒有，見 4.3c、4.3d）、雙眼牆、眼牆置換 → 5 km／3 km GPU（使用者的顯卡）。
 - 龍捲風 → R6（50–250 m LES）。
 - 全球模式的降水相態仍是診斷（灰體物理沒有融解潛熱）；區域模式已有完整冰相。
 
 - Asian monsoon seasonality (2.2) → R7, non-gray radiation and clouds.
-- Tropical-cyclone eyewalls, concentric eyewalls, replacement cycles → R6 (2–3 km, GPU, long runs).
+- Tropical-cyclone outer rainbands (absent at 15 km and in the axisymmetric model, 4.3c, 4.3d), concentric eyewalls, replacement cycles → 5 km / 3 km on the GPU (the user's card).
 - Tornadoes → R6 (50–250 m LES).
 - Precipitation phase in the global model is still diagnostic (the gray physics has no latent heat of fusion); the regional model has full ice microphysics.
