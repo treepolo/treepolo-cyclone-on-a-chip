@@ -314,6 +314,15 @@ $('embed').onclick = (): void => {
   log('建立嵌入的區域模式中（以目前全球場為初始與邊界）/ Building the embedded nest from the current global state…');
 };
 $('unembed').onclick = stopEmbed;
+// the regional page opens in the same in-page overlay (it then reaches the artifact capabilities of this page)
+$('openRegional').onclick = (ev): void => {
+  ev.preventDefault();
+  nestReady = false; pendingNest = null;
+  const frame = $<HTMLIFrameElement>('nestFrame');
+  frame.src = 'regional.html';
+  $('nestOverlay').hidden = false;
+  nestWin = frame.contentWindow;
+};
 $('nestClose').onclick = (): void => {
   $('nestOverlay').hidden = true;
   $<HTMLIFrameElement>('nestFrame').src = 'about:blank';

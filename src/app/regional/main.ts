@@ -1,7 +1,8 @@
 // Regional-model page: controls, 3-D volume view, statistics.
 import { VolumeView } from './volume.js';
 import { sequential, diverging } from '../colormap.js';
-import { mountSavesPanel, type SaveMeta } from '../saves.js';
+import { mountSavesPanel, storeSave, type SaveMeta } from '../saves.js';
+import { UnattendedRun } from './runner.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tornado: '250 m' };
@@ -32,6 +33,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     if ((m.experiment as string) !== 'nest') $<HTMLSelectElement>('exp').value = m.experiment;
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
+    runner.sample(m);
     view.setVolume(m.nx, m.ny, m.nz, m.cloud, m.rain, aspect);
     const [lo, hi] = m.groundRange, rgba = new Uint8Array(m.nx * m.ny * 4);
     for (let i = 0; i < m.ground.length; i++) {
@@ -57,9 +59,9 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       : (s.eyewalls.length >= 2 ? '雙眼牆 / concentric: ' : '') + s.eyewalls.map((e) => `${(e.r / 1000).toFixed(0)} km (${e.v.toFixed(0)} m/s)`).join(' · ');
     $('zeta').textContent = `${s.zetaMax.toFixed(3)} s⁻¹ · ${s.vGround.toFixed(1)} m/s`;
     $('legend').textContent = `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
-  } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); }
+  } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); if (runner.running) void runner.abort(`error: ${m.message}`); }
   else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
-  else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; }
+  else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; if (runner.running) void runner.end('done'); }
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
 };
 function sync(): void { $('run').textContent = running ? '暫停 / Pause' : '執行 / Run'; send({ type: 'run', running }); }
@@ -102,7 +104,7 @@ $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = 
 $('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
 // ---------------- saved simulations
 let pendingSave: ((r: { meta: SaveMeta; data: ArrayBuffer }) => void) | null = null;
-mountSavesPanel($('saves'), 'regional',
+const savesPanel = mountSavesPanel($('saves'), 'regional',
   () => new Promise((resolve, reject) => {
     if (pendingSave) { reject(new Error('存檔進行中 / a save is already in progress')); return; }
     pendingSave = resolve; send({ type: 'save' });
@@ -123,4 +125,37 @@ $('untilGo').onclick = (): void => {
   send({ type: 'runUntil', hours: h });
   running = true; sync();
   log(`執行 ${h} 模式小時後自動暫停 / running for ${h} model hours`);
+};
+// ---------------- unattended runs
+const captureSave = (): Promise<{ meta: SaveMeta; data: ArrayBuffer }> => new Promise((resolve, reject) => {
+  if (pendingSave) { reject(new Error('存檔進行中 / a save is already in progress')); return; }
+  pendingSave = resolve; send({ type: 'save' });
+  setTimeout(() => { if (pendingSave === resolve) { pendingSave = null; reject(new Error('逾時 / timed out')); } }, 120000);
+});
+const runner = new UnattendedRun({
+  experiment: () => $<HTMLSelectElement>('exp').value,
+  grid: () => $('grid').textContent ?? '',
+  start: (cfg) => {
+    send({ type: 'pace', target: 0 }); $<HTMLSelectElement>('pace').value = '0';
+    send({ type: 'frames', kind: 'model', every: cfg.everyMin * 60 });
+    send({ type: 'runUntil', hours: cfg.hours });
+    running = true; sync();
+    $<HTMLButtonElement>('runStart').disabled = true; $<HTMLButtonElement>('runStop').disabled = false;
+  },
+  finish: () => {
+    $('frames').dispatchEvent(new Event('change'));
+    $<HTMLButtonElement>('runStart').disabled = false; $<HTMLButtonElement>('runStop').disabled = true; $<HTMLButtonElement>('runCopy').disabled = false;
+  },
+  save: async () => { const { meta, data } = await captureSave(); await storeSave(meta, data); await savesPanel.refresh(); return meta.title; },
+  log, status: (t) => { $('runStatus').textContent = t; },
+});
+$('runStart').onclick = (): void => {
+  const hours = Number($<HTMLInputElement>('runH').value);
+  if (!(hours > 0)) return;
+  void runner.begin({ hours, everyMin: Number($<HTMLSelectElement>('runEvery').value), note: $<HTMLInputElement>('runNote').value.slice(0, 200), autoSave: $<HTMLInputElement>('runSave').checked });
+};
+$('runStop').onclick = (): void => { send({ type: 'runUntil', hours: 0 }); running = false; sync(); void runner.abort('stopped'); };
+$('runCopy').onclick = async (): Promise<void> => {
+  try { await navigator.clipboard.writeText(runner.reportText()); log('已複製報告，可以貼給開發者 / report copied'); }
+  catch { log('無法存取剪貼簿 / clipboard unavailable'); }
 };

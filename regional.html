@@ -72,6 +72,14 @@ a{color:#8fc1ff}
 <div class="row"><span>中心氣壓降 / Central pressure deficit</span><span id="dp">—</span></div>
 <div class="row"><span>眼牆（1.5 km 切向風極大）/ Eyewalls (1.5 km vt maxima)</span><span id="eyewalls">—</span></div>
 <div class="row"><span>近地面最大渦度・對地風速 / Near-surface max vorticity · ground-relative wind</span><span id="zeta">—</span></div>
+<h2>無人值守實驗 / Unattended run</h2>
+<div class="muted">按一下就讓它自己跑：全速、快轉顯示，每隔固定模式時間記錄風暴統計，結束時自動存檔，報告存到雲端資料庫讓開發者直接讀取。/ Runs by itself at full speed, records the storm statistics at a fixed model-time interval, saves the final state and stores the report for the developer.</div>
+<div class="controls"><input id="runH" type="number" min="0.5" step="0.5" value="24" style="width:5em" /><span style="align-self:center">模式小時 / model hours</span>
+<select id="runEvery"><option value="5">每 5 模式分記錄 / every 5 min</option><option value="15" selected>每 15 模式分 / every 15 min</option><option value="60">每 1 模式小時 / every hour</option></select></div>
+<input id="runNote" placeholder="備註（選填）/ note (optional)" style="width:100%;box-sizing:border-box" />
+<label><input id="runSave" type="checkbox" checked /> 結束時自動存檔 / save the final state</label>
+<div class="controls"><button id="runStart">開始無人值守實驗 / Start</button><button id="runStop" disabled>停止 / Stop</button><button id="runCopy" disabled>複製報告 / Copy report</button></div>
+<div class="row"><span>狀態 / Status</span><span id="runStatus">—</span></div>
 <h2>存檔 / Saved simulations</h2>
 <div id="saves"></div>
 <h2>效能分析 / Profiling</h2>
