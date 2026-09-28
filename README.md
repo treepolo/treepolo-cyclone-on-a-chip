@@ -14,6 +14,7 @@ v0.1 起為**完整重新設計**（原因與路線圖見 [`docs/ARCHITECTURE.md
 - ✅ WebGPU（R4）：全球與區域模式都能在 GPU 上執行，每一部分都對 CPU Float64 參考解逐場驗證。
 - ✅ 區域非靜力模式（R5）：全可壓縮 RK3 + 聲波分裂步、**六類冰相微物理**（雲水、雨、雲冰、雪、霰）、正定水物質平流、Smagorinsky 亂流、地表通量；Straka 密度流、超大胞分裂、熱帶氣旋快速增強。
 - ✅ **放大區域（單向巢狀）**：在地球上點選地點，以當下的全球場為初始與側邊界條件開啟區域模式（1200 km／12 km 或可解析對流的 480 km／4 km）。
+- ✅ **區域模式圖表**：水平切面（雷達回波、w、風、θ′、θe、RH、渦度、p′…）、合成圖（最大回波、紅外雲頂、降水率、UH、CAPE／CIN、海平面等壓線）、自己畫線的垂直剖面、颱風半徑–高度圖、探空（斜溫圖＋風徑圖＋指數）、時間序列與風暴路徑、Hovmöller 圖、3D 軌跡粒子；診斷量在 GPU 上算好只讀回需要的部分，並對 CPU 版本逐項驗證。
 - ⏭ 之後：2–3 km 颱風（眼牆、雙眼牆、眼牆置換）→ 龍捲尺度 LES → 非灰體輻射與雲（改善季風）。
 
 ## 執行 / Run
@@ -55,7 +56,7 @@ node dist/tools/runTropicalCyclone.js 8 15000                  # f 平面熱帶�
 | `src/gpu/` | WebGPU 版本：轉換、動力核心、水汽與柱物理；`src/gpu/tests/` GPU 驗收 |
 | `data/earth_t42.json` | ERA 地表高度與海陸遮罩（T42） |
 | `src/regional/` | 區域全可壓縮非靜力模式、Kessler 與六類冰相微物理、次網格／地表物理、熱帶氣旋設定、由全球模式巢狀 |
-| `src/app/` | 瀏覽器介面：WebGL2 地球、Web Worker 模式（WebGPU/CPU）、剖面圖；`src/app/regional/` 3D 雲體積檢視 |
+| `src/app/` | 瀏覽器介面：WebGL2 地球、Web Worker 模式（WebGPU/CPU）、剖面圖；`src/app/regional/` 3D 雲體積檢視、圖表（`charts.ts`）、軌跡粒子 |
 | `src/tools/` | Node 長期積分與 SVG 繪圖 |
 | `src/tests/` | 驗收測試 |
 | `docs/` | 架構與路線圖、物理規格、驗收計畫、UI 規格 |

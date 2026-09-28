@@ -42,29 +42,26 @@
 
 ## 測試
 - 伺服器：`PORT=5199 node tools/serve.mjs &`（serve 常在指令間被殺，和測試寫在同一條指令）。
-- CPU：`npm test`（很久）或 `node dist/tests/regional.js`（21 項）。
-- GPU（SwiftShader）：`node tools/gpuTest.mjs "gpu-test.html?only=regional"`（32 項，含 adaptive、refine），
-  `?only=spinup`、`?only=earth`、`?only=perf`。
+- CPU：`npm test`（很久）或 `node dist/tests/regional.js`（26 項）。
+- GPU（SwiftShader）：`node tools/gpuTest.mjs "gpu-test.html?only=regional"`（含 adaptive、refine、charts；機器忙時會超過預設
+  10 分鐘，可設 `GPU_TEST_TIMEOUT=2400000`），`?only=charts`、`?only=spinup`、`?only=earth`、`?only=perf`。
 - 端對端：scratchpad 裡用 playwright（`require(<npm root -g>/playwright)`，chromium 參數
   `--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader --enable-features=Vulkan`，畫面加 `--use-gl=angle --use-angle=swiftshader`）。
 - 我方環境只有軟體 GPU（比 GTX 1650 慢上百倍）：長時間物理實驗用 Node CPU 背景跑或請使用者用無人值守實驗。
 - 注意：`pkill -f <pattern>` 會殺掉自己的 shell；不要對有未提交修改的檔案用 `git checkout`。
 
-## 目前進行中：第 2 項「區域模式圖表」（約完成 25%）
-已完成（已提交）：
-- `regionalGpu.ts`：`readDisplay(levels, volMode)` 現在每欄回傳 `COL=8` 個值
-  `[wmax, wmin, cmax, pmax, dBZmax, 雲頂高, 雲頂溫, 2–5 km UH]`，planes 含所有預報場（`DisplayPlanes`），
-  volMode 讓 3D 第二通道顯示降水/上升氣流/渦度；新增 `readColumns(points)`（剖面、探空）、`readRZ(xc,yc,dr,nr)`（颱風軸對稱平均）。
-- `src/regional/diagnostics.ts`：氣壓、飽和混合比、θe、露點、dBZ、`SLICE_VARS`/`SECTION_VARS`/`MAP_VARS`、`sectionValues()`。
-- worker 已改用 `COL` stride（其餘尚未使用新資料）。
+## 區域模式圖表（第 3 節，已完成）
+- 協定：`ToRegionalWorker` 的 `{type:'charts', req: ChartRequest|null}`（地圖變數、切面層、剖面線、探空點、r–z 中心）、
+  `{type:'volMode'}`、`{type:'tracers', n}`；`RegionalFrame` 帶 `charts`（maps / slice / section / sounding / rz）、`tracers`、
+  `origin`（移動座標實驗的區域原點對地位置）與新統計量（dbzMax、uhMax、capeMax、storm 位置、1.5 km vt(r)）。
+  全球頁面嵌入的區域模式不送 charts 請求，不增加成本。
+- 診斷：`src/regional/diagnostics.ts`（CPU：柱合成 COL=10 值含地面氣塊 CAPE/CIN、切面、剖面、方位平均、合成圖）；GPU 顯示核心在
+  `regionalGpu.ts`（`readDisplay` 同定義，`readColumns`、`readRZ`）。`?only=charts` 測 GPU 與 CPU 一致（含軌跡粒子）。
+- 軌跡粒子：`src/regional/tracers.ts`（CPU）＋ `GpuRegional.advectTracers`（同步驟、同雜湊亂數）；只供顯示。
+  3D 繪製在 `volume.ts`：先把粒子畫到離屏緩衝（顏色＋距離），光線追蹤到該距離時再疊上，雲會遮住後面的粒子。
+- 介面：`src/app/regional/charts.ts`（各圖）、`chartDraw.ts`（色階、色標、等值線、箭頭、風標）。顏色：單一色相藍色序列、
+  藍–灰–紅發散；雷達回波用 NWS 色階、紅外雲頂用強化灰階（領域慣例）。
+- 測試方式：在 Node 用 CPU 先跑出成熟狀態寫成存檔（`packSave`），再用 playwright 匯入存檔截圖各圖（本環境 SwiftShader 太慢，跑不出成熟風暴）。
 
-待做：
-1. 協定：`ToRegionalWorker` 加 `{type:'charts', level, section:{i0,j0,i1,j1}|null, point:{i,j}|null, rz:boolean, volMode}`；
-   `RegionalFrame` 加 `maps`（MAP_VARS × nx·ny）、`slice`、`section`、`point`、`rz`。
-2. worker `sendFrame`：GPU 用上述讀取；CPU 後端用迴圈算同樣的東西（dBZ、雲頂、UH 等）。
-3. `src/app/regional/charts.ts`（canvas 繪圖：色階圖＋色標＋風向箭頭、剖面、r–z、斜溫圖＋風徑圖、時間序列、Hovmöller）；
-   `regional.html` 加「主畫面」選單（3D／水平切面／合成圖／垂直剖面／颱風 r–z／探空／時間序列／Hovmöller）、變數與高度選擇、
-   在地圖上拖曳畫剖面線、點擊看探空。時間序列與 Hovmöller 在主執行緒累積（颱風：氣壓降、最大風速、RMW、1.5 km 切向風 vs 半徑）。
-4. CAPE/CIN、3D 軌跡粒子：之後再做（ROADMAP 有列）。
-
-之後依 ROADMAP 順序：軸對稱快速版颱風模式 → 颱風雨帶（只有眼牆有雲）→ 多重眼牆與置換 → 龍捲 → 互動機制。
+## 下一步
+依 ROADMAP 順序：軸對稱快速版颱風模式 → 颱風雨帶（只有眼牆有雲）→ 多重眼牆與置換 → 龍捲 → 互動機制。

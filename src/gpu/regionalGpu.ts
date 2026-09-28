@@ -8,6 +8,8 @@
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { RegionalPhysicsConfig, surfaceState } from '../regional/physics.js';
 import { ICE, LF, gammaFn } from '../regional/ice.js';
+import { COL } from '../regional/diagnostics.js';
+import type { TracerParams } from '../regional/tracers.js';
 
 const WG = 64;
 /** workgroups along x per dispatch row; kernels see gid.x = x + y * GX * WG */
@@ -15,8 +17,8 @@ const GX = 32768;
 /** kernel passes per command buffer: about PASS_CELLS / grid size (at least 4) */
 const PASS_CELLS = 2e7;
 type Pass = ((pass: GPUComputePassEncoder) => void) & { label: string };
-/** values per column in the display readback (see readDisplay) */
-export const COL = 8;
+/** values per column in the display readback (see readDisplay and columnDiagnostics) */
+export { COL } from '../regional/diagnostics.js';
 export interface DisplayPlanes { u: Float32Array; v: Float32Array; w: Float32Array; wTop: Float32Array; th: Float32Array; pp: Float32Array; sc: Float32Array[] }
 const linearGid = (code: string): string => code.replace(/fn main\(@builtin\(global_invocation_id\) gid: vec3<u32>\) \{/g,
   `fn main(@builtin(global_invocation_id) gid3: vec3<u32>) { let gid = vec3<u32>(gid3.x + gid3.y * ${GX * WG}u, 0u, 0u);`);
@@ -271,7 +273,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
 
   /** Release GPU buffers. */
   destroy(): void {
-    for (const b of [this.S, this.S0, this.F, this.aux, this.TR, this.FT, this.CF, this.B, this.R, this.disp?.D, this.disp?.C, this.disp?.LB, this.disp?.MODE, this.cflK?.out, this.rzK?.RP, this.rzK?.O, ...this.params]) b?.destroy();
+    for (const b of [this.S, this.S0, this.F, this.aux, this.TR, this.FT, this.CF, this.B, this.R, this.disp?.D, this.disp?.C, this.disp?.LB, this.disp?.MODE, this.cflK?.out, this.rzK?.RP, this.rzK?.O, this.trK?.T, this.trK?.P, ...this.params]) b?.destroy();
   }
 
   /** Change the time step (all kernels take it from the per-stage uniforms). */
@@ -410,16 +412,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   private disp: { pipe: GPUComputePipeline; bind: GPUBindGroup; D: GPUBuffer; C: GPUBuffer; LB: GPUBuffer; MODE: GPUBuffer } | null = null;
 
   /**
-   * Display data without reading the whole state back: a GPU kernel packs cloud (qc + qi) and
-   * precipitation (qr + qs + qg) bytes per cell and per-column extremes; only those, the requested
-   * horizontal planes of u, v, theta, pi' and the surface precipitation accumulations are copied.
+   * Display data without reading the whole state back: a GPU kernel packs the 3-D view bytes and the
+   * per-column composites; only those, the requested horizontal planes and the surface precipitation
+   * accumulations are copied. `packed`: per cell cloud byte (qc + qi) | channel-2 byte << 8 (channel 2:
+   * precipitation qr + qs + qg, or with `volMode` 1 updraft w, 2 cyclonic vertical vorticity); `col` (COL
+   * values per column, offsets C in diagnostics.ts): w max, w min, condensate max, precipitation max,
+   * column-max reflectivity (dBZ), cloud-top height (m), cloud-top temperature (K), 2-5 km updraft helicity
+   * (m^2/s^2), surface-based CAPE and CIN (J/kg; same steps as parcelAscent); `planes`: every prognostic
+   * field at the requested levels (w also at the level above); accumulated rain and snow at level 0.
    */
-  /** Display readback. `packed`: per cell cloud byte | channel-2 byte << 8 (channel 2: precipitation, or
-   *  with `volMode` 1 updraft w, 2 cyclonic vertical vorticity); `col` (COL values per column): w max, w min,
-   *  condensate max, precipitation max, column-max reflectivity (dBZ), cloud-top height (m), cloud-top
-   *  temperature (K), 2-5 km updraft helicity (m^2/s^2); `planes`: every prognostic field at the requested
-   *  levels (w also at the level above); accumulated rain and snow at level 0. */
-  async readDisplay(levels: number[], volMode = 0): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, DisplayPlanes>; rain: Float32Array; snow: Float32Array }> {
+  async readDisplay(levels: number[], volMode = 0): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, DisplayPlanes>; rain: Float32Array; snow: Float32Array; tracers: Float32Array | null }> {
     const m = this.cpu, { nx, ny, nz, dx, dy } = m.c, n = nx * ny * nz, dev = this.device, PL = m.plane, SIZE = m.size, NFp = this.nf;
     if (!this.disp) {
       const code = `
@@ -437,6 +439,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (t >= NX * NY) { return; }
   let j = t / NX; let i = t % NX;
   var wmax = 0.0; var wmin = 0.0; var cmax = 0.0; var pmax = 0.0; var zmax = 0.0; var ctz = 0.0; var ctt = 0.0; var uh = 0.0;
+  // surface-based parcel (parcelAscent in src/regional/diagnostics.ts)
+  var pth = 0.0; var pq = 0.0; var cape = 0.0; var cin = 0.0; var lcl = false; var lfc = false;
   for (var k = 0u; k < NZ; k++) {
     let q = k * PL + (j + HH) * SX + (i + HH);
     var cl = cs(6u, q); var pr = cs(7u, q);
@@ -461,10 +465,38 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     D[(k * NY + j) * NX + i] = cb | (pb << 8u);
     let w = S[2u * SIZE + q];
     wmax = max(wmax, w); wmin = min(wmin, w); cmax = max(cmax, cl); pmax = max(pmax, pr);
+    if (MOIST) {
+      let pik = LB[4u * k] + S[4u * SIZE + q];
+      let qvk = max(cs(5u, q), 0.0);
+      if (k == 0u) { pth = S[3u * SIZE + q]; pq = qvk; }
+      else {
+        let pk = 1e5 * pow(pik, 1004.5 / 287.05);
+        var tp = pth * pik; var d = 0.0;
+        let es0 = 611.2 * exp(17.67 * (tp - 273.15) / (tp - 29.65));
+        if (pq > 0.622 * es0 / max(pk - es0, 1.0)) {
+          for (var it = 0; it < 4; it++) {
+            let tt = tp + 2.5e6 * d / 1004.5;
+            let es = 611.2 * exp(17.67 * (tt - 273.15) / (tt - 29.65));
+            let qsat = 0.622 * es / max(pk - es, 1.0);
+            let dq = qsat * pk / max(pk - es, 1.0) * 17.67 * 243.5 / ((tt - 29.65) * (tt - 29.65));
+            d += (pq - d - qsat) / (1.0 + 2.5e6 / 1004.5 * dq);
+          }
+          d = clamp(d, 0.0, pq);
+          lcl = true;
+        }
+        tp += 2.5e6 * d / 1004.5; pq -= d; pth = tp / pik;
+        let tve = S[3u * SIZE + q] * pik * (1.0 + 0.61 * qvk);
+        let b = 9.80665 * (tp * (1.0 + 0.61 * pq) - tve) / tve;
+        if (!lfc) { if (lcl && b > 0.0) { lfc = true; cape += b * LB[4u * k + 3u]; } else { cin += min(b, 0.0) * LB[4u * k + 3u]; } }
+        else if (b > 0.0) { cape += b * LB[4u * k + 3u]; }
+      }
+    }
   }
+  if (!lfc) { cape = 0.0; cin = 0.0; }
   if (ctz == 0.0) { let q0 = (j + HH) * SX + (i + HH); ctt = S[3u * SIZE + q0] * (LB[0] + S[4u * SIZE + q0]); }
   C[COL * t] = wmax; C[COL * t + 1u] = wmin; C[COL * t + 2u] = cmax; C[COL * t + 3u] = pmax;
   C[COL * t + 4u] = 10.0 * log(max(zmax, 1e-3)) / log(10.0); C[COL * t + 5u] = ctz; C[COL * t + 6u] = ctt; C[COL * t + 7u] = uh;
+  C[COL * t + 8u] = cape; C[COL * t + 9u] = cin;
 }`;
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
       const D = dev.createBuffer({ size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -480,7 +512,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const d = this.disp, planeBytes = PL * 4;
     dev.queue.writeBuffer(d.MODE, 0, new Uint32Array([volMode, 0, 0, 0]));
     const perLevel = NFp + 1;
-    const total = n * 4 + nx * ny * COL * 4 + levels.length * perLevel * planeBytes + 2 * planeBytes;
+    const trBytes = this.trK ? this.trK.n * 16 : 0;
+    const total = n * 4 + nx * ny * COL * 4 + levels.length * perLevel * planeBytes + 2 * planeBytes + trBytes;
     const st = dev.createBuffer({ size: total, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = dev.createCommandEncoder();
     const pass = enc.beginComputePass(); pass.setPipeline(d.pipe); pass.setBindGroup(0, d.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny / 64)); pass.end();
@@ -492,7 +525,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       enc.copyBufferToBuffer(this.S, (2 * SIZE + (k + 1) * PL) * 4, st, off, planeBytes); off += planeBytes;   // w above
     }
     enc.copyBufferToBuffer(this.aux, 2 * SIZE * 4, st, off, planeBytes); off += planeBytes;
-    enc.copyBufferToBuffer(this.aux, 3 * SIZE * 4, st, off, planeBytes);
+    enc.copyBufferToBuffer(this.aux, 3 * SIZE * 4, st, off, planeBytes); off += planeBytes;
+    if (this.trK) enc.copyBufferToBuffer(this.trK.T, 0, st, off, trBytes);
     dev.queue.submit([enc.finish()]);
     await st.mapAsync(GPUMapMode.READ);
     const buf = st.getMappedRange().slice(0);
@@ -507,8 +541,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       planes.set(k, { u: f[0]!, v: f[1]!, w: f[2]!, th: f[3]!, pp: f[4]!, sc: f.slice(5), wTop: g() });
     }
     const rain = new Float32Array(buf, o, PL); o += planeBytes;
-    const snow = new Float32Array(buf, o, PL);
-    return { packed, col, planes, rain, snow };
+    const snow = new Float32Array(buf, o, PL); o += planeBytes;
+    const tracers = trBytes ? new Float32Array(buf, o, trBytes / 4) : null;
+    return { packed, col, planes, rain, snow, tracers };
   }
 
   /** Column profiles at grid columns (i, j): per point, per level, the cell-centred u, v, w, theta, pi' and
@@ -590,7 +625,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     tp += S[3u * SIZE + q] - TH0[k];
     if (MOIST) { for (var f = 6u; f < NFLD; f++) { cd += max(S[f * SIZE + q], 0.0); } }
   }
-  let inv = 1.0 / f32(na), o = 5u * t;
+  let inv = 1.0 / f32(na); let o = 5u * t;
   O[o] = vt * inv; O[o + 1u] = vr * inv; O[o + 2u] = ww * inv; O[o + 3u] = tp * inv; O[o + 4u] = cd * inv;
 }`;
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
@@ -612,6 +647,79 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return out;
   }
   private rzK: { pipe: GPUComputePipeline; RP: GPUBuffer; O: GPUBuffer | null } | null = null;
+
+  private trK: { pipe: GPUComputePipeline; T: GPUBuffer; P: GPUBuffer; bind: GPUBindGroup; n: number } | null = null;
+
+  /** Tracer particles (src/regional/tracers.ts): upload positions (x, y, z, age per particle). */
+  initTracers(pos: Float32Array): void {
+    const dev = this.device, m = this.cpu, { nx, ny, dx, dy } = m.c, n = pos.length / 4;
+    this.trK?.T.destroy(); this.trK?.P.destroy();
+    if (n === 0) { this.trK = null; return; }
+    const pipe = this.trPipe ?? (this.trPipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code: this.consts + `
+const LX: f32 = ${nx * dx}; const LY: f32 = ${ny * dy};
+struct TP { h: f32, nsub: u32, seed: u32, life: f32, cx: f32, cy: f32, rad: f32, zseed: f32, dt: f32, top: f32, n: u32, pad: u32 };
+@group(0) @binding(0) var<storage, read> S: array<f32>;
+@group(0) @binding(1) var<storage, read_write> T: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> TPR: TP;
+fn samp(f: u32, gi: f32, gj: f32, gk: f32, nk: u32) -> f32 {
+  let i0 = clamp(i32(floor(gi)), -2, i32(NX)); let j0 = clamp(i32(floor(gj)), -2, i32(NY));
+  let kc = clamp(gk, 0.0, f32(nk - 1u)); let k0 = min(i32(nk) - 2, i32(floor(kc)));
+  let fi = clamp(gi - f32(i0), 0.0, 1.0); let fj = clamp(gj - f32(j0), 0.0, 1.0); let fk = clamp(kc - f32(k0), 0.0, 1.0);
+  let q = f * SIZE + u32(k0 * i32(PL) + (j0 + i32(HH)) * i32(SX) + (i0 + i32(HH)));
+  let b = (S[q] * (1.0 - fi) + S[q + 1u] * fi) * (1.0 - fj) + (S[q + SX] * (1.0 - fi) + S[q + SX + 1u] * fi) * fj;
+  let t = (S[q + PL] * (1.0 - fi) + S[q + PL + 1u] * fi) * (1.0 - fj) + (S[q + PL + SX] * (1.0 - fi) + S[q + PL + SX + 1u] * fi) * fj;
+  return b * (1.0 - fk) + t * fk;
+}
+fn wind(p: vec3<f32>) -> vec3<f32> {
+  return vec3<f32>(samp(0u, p.x / DX, p.y / DY - 0.5, p.z / DZ - 0.5, NZ), samp(1u, p.x / DX - 0.5, p.y / DY, p.z / DZ - 0.5, NZ), samp(2u, p.x / DX - 0.5, p.y / DY - 0.5, p.z / DZ, NZ + 1u));
+}
+fn pcg(v: u32) -> u32 { let s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+fn hh(p: u32, k: u32) -> f32 { return f32(pcg(p * 4u + k + TPR.seed)) / 4294967296.0; }
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let p = gid.x;
+  if (p >= TPR.n) { return; }
+  let x0 = T[p];
+  var pos = x0.xyz;
+  for (var s = 0u; s < TPR.nsub; s++) {
+    let a = wind(pos);
+    var mid = pos + 0.5 * TPR.h * a; mid.z = max(mid.z, 0.0);
+    pos += TPR.h * wind(mid); pos.z = max(pos.z, 0.0);
+    if (!OPEN) { pos.x -= floor(pos.x / LX) * LX; pos.y -= floor(pos.y / LY) * LY; }
+  }
+  var age = x0.w + TPR.dt;
+  if (age > TPR.life || pos.z > TPR.top || (OPEN && (pos.x < 0.0 || pos.y < 0.0 || pos.x > LX || pos.y > LY))) {
+    if (TPR.rad > 0.0 && (p & 1u) == 0u) {
+      let a = 6.2831853 * hh(p, 0u); let r = TPR.rad * sqrt(hh(p, 1u));
+      pos.x = clamp(TPR.cx + r * cos(a), 0.0, LX); pos.y = clamp(TPR.cy + r * sin(a), 0.0, LY);
+    } else { pos.x = hh(p, 0u) * LX; pos.y = hh(p, 1u) * LY; }
+    pos.z = 50.0 + hh(p, 2u) * (TPR.zseed - 50.0);
+    age = 0.0;
+  }
+  T[p] = vec4<f32>(pos, age);
+}` }), entryPoint: 'main' } }));
+    const T = dev.createBuffer({ size: pos.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(T, 0, pos);
+    const P = dev.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const bind = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: T } }, { binding: 2, resource: { buffer: P } }] });
+    this.trK = { pipe, T, P, bind, n };
+  }
+  private trPipe: GPUComputePipeline | null = null;
+  get tracerCount(): number { return this.trK?.n ?? 0; }
+
+  /** Advance the tracers by dt in nsub midpoint steps in the current wind; seed: re-seeding hash offset. */
+  advectTracers(dt: number, nsub: number, pr: TracerParams, seed: number): void {
+    const k = this.trK; if (!k) return;
+    const m = this.cpu, ns = Math.max(1, nsub | 0);
+    const b = new ArrayBuffer(48), f = new Float32Array(b), u = new Uint32Array(b);
+    f[0] = dt / ns; u[1] = ns; u[2] = seed >>> 0; f[3] = pr.life; f[4] = pr.cx; f[5] = pr.cy; f[6] = pr.rad; f[7] = pr.zSeed; f[8] = dt; f[9] = m.c.nz * m.c.dz - m.c.dampDepth; u[10] = k.n;
+    this.device.queue.writeBuffer(k.P, 0, b);
+    const enc = this.device.createCommandEncoder(), pass = enc.beginComputePass();
+    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.ceil(k.n / 64)); pass.end();
+    this.device.queue.submit([enc.finish()]);
+  }
+
+  async readTracers(): Promise<Float32Array> { return this.trK ? this.readBuffer(this.trK.T, this.trK.n * 16) : new Float32Array(0); }
 
   /** Accumulated frozen precipitation (snow + graupel + ice) at level 0, same layout as readRain. */
   async readSnow(): Promise<Float32Array> { const b = this.cpu.size * 4; const all = await this.readBuffer(this.aux, 4 * b); return all.slice(3 * this.cpu.size, 4 * this.cpu.size); }

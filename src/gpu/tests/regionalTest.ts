@@ -7,6 +7,8 @@ import { GpuRegional, COL } from '../regionalGpu.js';
 import { gcheck, getDevice } from './harness.js';
 import { nestFromGlobal, GlobalSnapshot } from '../../regional/nest.js';
 import { IceMicrophysics, QI, QS, QG } from '../../regional/ice.js';
+import { C, columnDiagnostics, columnProfiles, azimuthalMeans } from '../../regional/diagnostics.js';
+import { Tracers } from '../../regional/tracers.js';
 
 function cmp(m: RegionalModel, g: Float32Array, f: number, a: Float64Array, nk: number): number {
   let e = 0, s = 0;
@@ -280,4 +282,80 @@ export async function regionalRefineTest(): Promise<void> {
   gcheck('refine GPU: updraft carried over (w max within 30 % right after refining)', Math.abs(just.w - before.w) < 0.3 * before.w, `${just.w.toFixed(1)} vs ${before.w.toFixed(1)} m/s`);
   gcheck('refine GPU: condensate carried over (within 30 %)', Math.abs(just.c - before.c) < 0.3 * before.c, `${(just.c * 1e3).toFixed(2)} vs ${(before.c * 1e3).toFixed(2)} g/kg`);
   gcheck('refine GPU: fine run continues (5 min later: storm alive, no blow-up)', Number.isFinite(after.w) && after.w > 0.5 * before.w && after.w < 80, `${after.w.toFixed(1)} m/s at t = ${(gf.time / 60).toFixed(0)} min`);
+}
+
+/** Chart diagnostics: the GPU display kernels (column composites with CAPE / CIN, column profiles,
+ *  azimuthal means) agree with the CPU versions on the same state (a storm in shear, ice microphysics). */
+export async function regionalChartsTest(): Promise<void> {
+  const device = await getDevice();
+  const nx = 24, nz = 30, dx = 2500, dz = 500;
+  const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: 6, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 5000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, 6);
+  const mp = new IceMicrophysics(m);
+  m.setBaseWind((z) => ({ u: 20 * Math.tanh(z / 3000) - 10, v: 4 * Math.sin(z / 2000) }));
+  for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+  const c = nx * dx / 2;
+  for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+    const r = Math.sqrt((((i + 0.5) * dx - c) / 9000) ** 2 + (((j + 0.5) * dx - c) / 9000) ** 2 + ((m.zc[k]! - 1400) / 1400) ** 2);
+    if (r < 1) m.th[m.idx(i, j, k)] = m.th[m.idx(i, j, k)]! + 2 * Math.cos(0.5 * Math.PI * r) ** 2;
+  }
+  for (let s = 0; s < 250; s++) { m.step(); mp.apply(6); }     // 25 min: mature cell with rain, graupel and anvil
+  const g = new GpuRegional(device, m, { moist: true, physics: null, ice: true });
+  g.uploadFrom(m);
+  const d = await g.readDisplay([0], 0);
+  const cpu = columnDiagnostics(m);
+  const rel = (f: number): number => {
+    let e = 0, n = 0;
+    for (let q = 0; q < nx * nx; q++) { e += (d.col[COL * q + f]! - cpu[COL * q + f]!) ** 2; n += cpu[COL * q + f]! ** 2; }
+    return Math.sqrt(e / Math.max(n, 1e-30));
+  };
+  const basic = [C.wmax, C.wmin, C.cmax, C.pmax, C.ctopT].map(rel);
+  gcheck('charts: GPU column extremes and cloud-top temperature match the CPU (rel L2 < 1e-4)', basic.every((x) => x < 1e-4), basic.map((x) => x.toExponential(1)).join(' '));
+  let dz2 = 0, ctzMis = 0;
+  for (let q = 0; q < nx * nx; q++) {
+    if (cpu[COL * q + C.dbz]! > 0) dz2 = Math.max(dz2, Math.abs(d.col[COL * q + C.dbz]! - cpu[COL * q + C.dbz]!));
+    if (d.col[COL * q + C.ctopZ] !== cpu[COL * q + C.ctopZ]) ctzMis++;
+  }
+  gcheck('charts: column-max reflectivity within 0.05 dBZ, cloud-top height identical in 99 % of columns', dz2 < 0.05 && ctzMis <= 0.01 * nx * nx, `${dz2.toExponential(2)} dB, ${ctzMis} columns differ`);
+  const uh = rel(C.uh), cape = rel(C.cape), cin = rel(C.cin);
+  gcheck('charts: updraft helicity rel L2 < 1e-3, CAPE < 1e-2, CIN < 5e-2', uh < 1e-3 && cape < 1e-2 && cin < 5e-2, `${uh.toExponential(1)} ${cape.toExponential(1)} ${cin.toExponential(1)}`);
+  let capeMax = 0, uhMax = 0, dbzMax = 0;
+  for (let q = 0; q < nx * nx; q++) { capeMax = Math.max(capeMax, cpu[COL * q + C.cape]!); uhMax = Math.max(uhMax, Math.abs(cpu[COL * q + C.uh]!)); dbzMax = Math.max(dbzMax, cpu[COL * q + C.dbz]!); }
+  gcheck('charts: test storm exercises the paths (CAPE > 1000 J/kg, |UH| > 1 m2/s2, > 40 dBZ)', capeMax > 1000 && uhMax > 1 && dbzMax > 40, `CAPE ${capeMax.toFixed(0)} J/kg, UH ${uhMax.toFixed(1)}, ${dbzMax.toFixed(1)} dBZ`);
+  const pts = [{ i: 0, j: 0 }, { i: 12, j: 12 }, { i: 23, j: 5 }, { i: 7, j: 23 }];
+  const gc = await g.readColumns(pts), cc = columnProfiles(m, pts);
+  let e = 0, n = 0;
+  for (let i = 0; i < cc.length; i++) { e += (gc[i]! - cc[i]!) ** 2; n += cc[i]! ** 2; }
+  gcheck('charts: GPU column profiles match the CPU (rel L2 < 1e-6)', gc.length === cc.length && Math.sqrt(e / n) < 1e-6, Math.sqrt(e / n));
+  const xc = 0.55 * nx * dx, yc = 0.45 * nx * dx, dr = dx, nr = 10;
+  const gr = await g.readRZ(xc, yc, dr, nr), cr = azimuthalMeans(m, xc, yc, dr, nr);
+  const errs = [0, 1, 2, 3, 4].map((f) => {
+    let ee = 0, nn = 0;
+    for (let t = 0; t < nr * nz; t++) { ee += (gr[5 * t + f]! - cr[5 * t + f]!) ** 2; nn += cr[5 * t + f]! ** 2; }
+    return Math.sqrt(ee / Math.max(nn, 1e-30));
+  });
+  gcheck('charts: GPU azimuthal means (vt, vr, w, theta\', condensate) match the CPU (rel L2 < 1e-3)', gr.length === cr.length && errs.every((x) => x < 1e-3), errs.map((x) => x.toExponential(1)).join(' '));
+  // tracer particles: advection (no re-seeding) and re-seeding agree with the CPU version
+  const pr = { life: 1e9, cx: 0.5 * nx * dx, cy: 0.5 * nx * dx, rad: 15000, zSeed: 2000 };
+  const tc = new Tracers(512, m, pr);
+  for (let p = 0; p < 512; p++) tc.pos[4 * p + 2] = 200 + (p % 37) * 250;      // spread through the troposphere
+  g.initTracers(Float32Array.from(tc.pos));
+  tc.seed = 5; tc.advect(120, 12);
+  g.advectTracers(120, 12, pr, Math.imul(6, 2654435761) >>> 0);
+  let tg = await g.readTracers(), dmax = 0, moved = 0;
+  for (let p = 0; p < 512; p++) { for (let c = 0; c < 3; c++) dmax = Math.max(dmax, Math.abs(tg[4 * p + c]! - tc.pos[4 * p + c]!)); }
+  for (let p = 0; p < 512; p++) moved = Math.max(moved, Math.abs(tc.pos[4 * p + 2]! - (200 + (p % 37) * 250)));
+  gcheck('tracers: GPU advection matches the CPU (max position difference < 1 m after 2 min)', dmax < 1 && moved > 50, `${dmax.toExponential(2)} m (max vertical displacement ${moved.toFixed(0)} m)`);
+  const pr2 = { ...pr, life: 60 };
+  tc.params = pr2; tc.seed = 9; tc.advect(120, 4);
+  g.advectTracers(120, 4, pr2, Math.imul(10, 2654435761) >>> 0);
+  tg = await g.readTracers(); dmax = 0;
+  let inLayer = true;
+  let worst = '';
+  for (let p = 0; p < 512; p++) {
+    for (let c = 0; c < 3; c++) { const d = Math.abs(tg[4 * p + c]! - tc.pos[4 * p + c]!); if (d > dmax) { dmax = d; worst = `p ${p} c ${c}: ${tg[4 * p + c]} vs ${tc.pos[4 * p + c]}`; } }
+    if (tg[4 * p + 2]! > 2000 || tg[4 * p + 3] !== 0) inLayer = false;
+  }
+  // WGSL sin / cos are only accurate to about 2^-11 (absolute): metres over a 15 km seeding radius
+  gcheck('tracers: re-seeding matches the CPU (positions < 10 m, all re-seeded in the lowest 2 km)', dmax < 10 && inLayer, `${dmax.toExponential(2)} m ${worst}`);
+  g.destroy();
 }

@@ -5,14 +5,16 @@ import { weismanKlemp } from '../../regional/kessler.js';
 import { IceMicrophysics, QV, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { RegionalPhysics } from '../../regional/physics.js';
 import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../../regional/tropical.js';
-import { GpuRegional, COL } from '../../gpu/regionalGpu.js';
+import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { refineInto } from '../../regional/refine.js';
+import { Tracers, type TracerParams } from '../../regional/tracers.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { tornadoExperiment, StormTracker } from '../../regional/supercell.js';
-import { REFINE_TO, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
+import { REFINE_TO, type ChartData, type ChartRequest, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
+import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
 let m: RegionalModel | null = null;
 let mp: IceMicrophysics | null = null;
@@ -44,6 +46,43 @@ function frameDue(): boolean {
   return el > (gpu ? 500 : 300);
 }
 let nestSource: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
+// charts: what the page wants in each frame, the 3-D view's second channel
+let chartReq: ChartRequest | null = null, volMode = 0;
+// ground-relative position of the domain origin: advances with the frame velocity, jumps with rolls and refinement
+let origin = { x: 0, y: 0 }, originT = 0;
+function advanceOrigin(): void { const t = modelNow(); origin.x += frameVel.u * (t - originT); origin.y += frameVel.v * (t - originT); originT = t; }
+function resetOrigin(x = 0, y = 0): void { origin = { x, y }; originT = modelNow(); prevAcc = null; }
+// precipitation rate from the change of the accumulation between frames
+let prevAcc: { t: number; rain: Float32Array } | null = null, lastRate: Float32Array | null = null;
+const currentGpu = (): GpuRegional | null => gpu;
+const isTc = (): boolean => experiment === 'tc' || experiment === 'tc_hr';
+// tracer particles (3-D view): seeded in the lowest 2 km, half of them near the storm
+let tracers: Tracers | null = null, tracerN = 0, trSeed = 1, stormDomain: { x: number; y: number } | null = null;
+function tracerParams(): TracerParams {
+  const c = m!.c, L = Math.min(c.nx * c.dx, c.ny * c.dy), st = stormDomain;
+  return { life: isTc() ? 4 * 3600 : experiment === 'nest' ? 6 * 3600 : 1800, cx: st?.x ?? 0, cy: st?.y ?? 0, rad: st ? Math.min(L / 4, isTc() ? 200000 : 20000) : 0, zSeed: 2000 };
+}
+/** (Re)create the particles for the current model (after it is built, refined or loaded). */
+function setupTracers(keep: Float32Array | null = null): void {
+  if (!m || tracerN === 0) { tracers = null; gpu?.initTracers(new Float32Array(0)); return; }
+  tracers = new Tracers(tracerN, m, tracerParams());
+  if (keep && keep.length === tracers.pos.length) tracers.pos.set(keep);
+  gpu?.initTracers(Float32Array.from(tracers.pos));
+}
+function advectTracers(dt: number, nsteps: number): void {
+  if (!tracers) return;
+  tracers.params = tracerParams();
+  const nsub = Math.max(1, Math.min(64, nsteps));
+  if (gpu) { trSeed = (trSeed + 1) >>> 0; gpu.advectTracers(dt, nsub, tracers.params, Math.imul(trSeed, 2654435761) >>> 0); }
+  else tracers.advect(dt, nsub);
+}
+async function refreshFrame(): Promise<void> {
+  if (running || !m) return;
+  while (busy) await new Promise((r) => setTimeout(r, 5));
+  busy = true;
+  try { await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
+  busy = false;
+}
 const EXP_LABEL: Record<RegionalExperiment, string> = {
   supercell: '超大胞 2 km / supercell 2 km', supercell_hr: '超大胞 1 km / supercell 1 km', tc: '熱帶氣旋 15 km / tropical cyclone 15 km',
   tc_hr: '熱帶氣旋 5 km / tropical cyclone 5 km', tornado: '龍捲超大胞 250 m / tornadic supercell 250 m', tornado_c: '龍捲超大胞 1 km / tornadic supercell 1 km', nest: '巢狀區域 / nest',
@@ -189,6 +228,8 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     if (msg.type === 'init') {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
       const device = msg.backend === 'cpu' ? null : await getGpu();
       gpu?.destroy(); gpu = null;
       let info = build(msg.experiment, !!device);
@@ -200,13 +241,16 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       } else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       if (!gpu && (msg.experiment === 'tc_hr' || msg.experiment === 'supercell_hr' || msg.experiment === 'tornado')) note += (note ? ' · ' : '') + '此高解析實驗在 CPU 上非常慢 / this high-resolution experiment is very slow on the CPU';
       const c = m!.c;
-      dt0 = c.dt;
+      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers();
       post({ type: 'ready', land: null, experiment: msg.experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, refineTo: REFINE_TO[msg.experiment] ?? null });
       await sendFrame();
+      } finally { busy = false; }
     }
     else if (msg.type === 'initNest') {
       running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
       const device = msg.backend === 'cpu' ? null : await getGpu();
       gpu?.destroy(); gpu = null;
       let info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, !!device);
@@ -217,9 +261,10 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         if (reason) { note = gpuFailNote(reason); info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, false); builtGpu = false; }
       } else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
-      dt0 = c.dt;
+      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers();
       post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land, refineTo: null });
       await sendFrame();
+      } finally { busy = false; }
     }
     else if (msg.type === 'run') { running = msg.running; if (running) pacer.reset(modelNow()); }
     else if (msg.type === 'pace') { pacer.target = Math.max(0, msg.target); pacer.reset(modelNow()); }
@@ -230,15 +275,21 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       while (busy) await new Promise((r) => setTimeout(r, 5));
       busy = true;
       try {
-        if (gpu) { gpu.step(1); await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); }
-        else { m.step(); mp.apply(m.c.dt); }
+        if (gpu) { const d1 = gpu.dt; gpu.step(1); advectTracers(d1, 1); await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); }
+        else { m.step(); mp.apply(m.c.dt); advectTracers(m.c.dt, 1); }
         busy = false;
         await sendFrame();
       } catch (e) { post({ type: 'error', message: String(e) }); }
       busy = false;
     }
     else if (msg.type === 'speed') stepsPerTick = Math.max(1, msg.stepsPerTick | 0);
-    else if (msg.type === 'ground') { ground = msg.field; sendFrame(); }
+    else if (msg.type === 'ground') { ground = msg.field; await refreshFrame(); }
+    else if (msg.type === 'charts') { chartReq = msg.req; await refreshFrame(); }
+    else if (msg.type === 'volMode') { volMode = msg.mode | 0; await refreshFrame(); }
+    else if (msg.type === 'tracers') {
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      tracerN = Math.max(0, Math.min(65536, msg.n | 0)); setupTracers(); await refreshFrame();
+    }
     else if (msg.type === 'save') {
       if (!m || !mp) return;
       const wasRunning = running; running = false;
@@ -259,7 +310,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         const t = m.time;
         const meta = { kind: 'regional' as const, title: `${EXP_LABEL[experiment]} · ${t < 7200 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`}`,
           experiment, builtGpu, grid: { nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, size: m.size, nsc: m.scalars.length },
-          time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest };
+          time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest, origin };
         const buffer = packSave(meta, arrays);
         post({ type: 'saveData', meta, buffer }, [buffer]);
       } catch (e) { post({ type: 'error', message: `存檔失敗 / save failed: ${String(e)}` }); }
@@ -271,7 +322,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       busy = true;
       try {
         const { meta, arrays } = unpackSave(msg.buffer);
-        const M = meta as unknown as { experiment: RegionalExperiment; builtGpu: boolean; grid: { nx: number; ny: number; nz: number; size: number; nsc: number }; time: number; steps: number; dt: number; frameVel: { u: number; v: number }; dpEnv: number; nest: Record<string, unknown> | null };
+        const M = meta as unknown as { experiment: RegionalExperiment; builtGpu: boolean; grid: { nx: number; ny: number; nz: number; size: number; nsc: number }; time: number; steps: number; dt: number; frameVel: { u: number; v: number }; dpEnv: number; nest: Record<string, unknown> | null; origin?: { x: number; y: number } };
         if (meta.kind !== 'regional') throw new Error('不是區域模式存檔 / not a regional save');
         const device = msg.backend === 'cpu' ? null : await getGpu();
         gpu?.destroy(); gpu = null;
@@ -304,6 +355,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           else if (gpu) (gpu as GpuRegional).setDt(M.dt);
         } else if (M.builtGpu) note += ' · 此存檔是 GPU 網格，在 CPU 上會很慢 / GPU-sized grid: very slow on the CPU';
         dt0 = mm.c.dt;
+        resetOrigin(M.origin?.x ?? 0, M.origin?.y ?? 0); stormDomain = null; setupTracers();
         const c = mm.c;
         post({ type: 'ready', experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land ?? null, refineTo: REFINE_TO[experiment] ?? null });
         busy = false;
@@ -319,7 +371,8 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       busy = true;
       try {
         await syncFromGpu();
-        const mc = m, mpc = mp, fromDx = mc.c.dx, frameC = { ...frameVel }, trackC = tracker?.position ?? null;
+        advanceOrigin();
+        const mc = m, mpc = mp, fromDx = mc.c.dx, frameC = { ...frameVel }, trackC = tracker?.position ?? null, originC = { ...origin };
         const device = gpu ? gpu.device : null;
         gpu?.destroy(); gpu = null;
         const info = build(target, !!device);
@@ -341,6 +394,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           if (reason) note += ' · ' + gpuFailNote(reason);
         }
         dt0 = mf.c.dt;
+        resetOrigin(originC.x + x0, originC.y + y0); stormDomain = null; setupTracers();
         const c = mf.c;
         post({ type: 'ready', land: null, experiment: target, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, refineTo: REFINE_TO[target] ?? null });
         busy = false;
@@ -388,7 +442,9 @@ async function loop(): Promise<void> {
           const nb0 = adaptive ? Math.max(1, Math.min(gpuBatch, Math.ceil(300 / gpu.dt))) : gpuBatch;
           const nb = pacer.allow(gpu.time, gpu.dt, nb0);
           if (nb === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
+          const dtb = gpu.dt;
           gpu.step(nb); rateSteps += nb;
+          advectTracers(nb * dtb, nb);
           await gpu.device.queue.onSubmittedWorkDone();
           await adaptDt();
           const el = performance.now() - t0, target = 60 * stepsPerTick;
@@ -400,7 +456,9 @@ async function loop(): Promise<void> {
           const ns = pacer.allow(m.time, m.c.dt, stepsPerTick);
           if (ns === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
           for (let s = 0; s < ns; s++) { m.step(); mp.apply(m.c.dt); rateSteps++; }
+          advectTracers(ns * m.c.dt, ns);
         }
+        advanceOrigin();
         if (pacer.reached(modelNow())) {
           running = false;
           await sendFrame();
@@ -425,8 +483,15 @@ async function followStorm(): Promise<void> {
   await syncFromGpu();
   const a = tracker.update(m);
   if (!a || (!a.du && !a.dv && !a.di && !a.dj)) return;
+  advanceOrigin();
   if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; physCfg.frameVel = frameVel; }
-  if (a.di || a.dj) m.roll(a.di, a.dj, [mp.rainAcc, mp.snowAcc]);
+  if (a.di || a.dj) { m.roll(a.di, a.dj, [mp.rainAcc, mp.snowAcc]); origin.x -= a.di * m.c.dx; origin.y -= a.dj * m.c.dy; prevAcc = null; }
+  // particles keep their positions (moved with a roll of the fields)
+  let tp = gpu ? (gpu.tracerCount ? await gpu.readTracers() : null) : tracers ? tracers.pos.slice() : null;
+  if (tp && (a.di || a.dj)) {
+    const Lx = m.c.nx * m.c.dx, Ly = m.c.ny * m.c.dy;
+    for (let p = 0; p < tp.length; p += 4) { tp[p] = ((tp[p]! + a.di * m.c.dx) % Lx + Lx) % Lx; tp[p + 1] = ((tp[p + 1]! + a.dj * m.c.dy) % Ly + Ly) % Ly; }
+  }
   if (gpu) {
     const device = gpu.device, dtNow = gpu.dt;
     gpu.destroy();
@@ -434,6 +499,8 @@ async function followStorm(): Promise<void> {
     gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
     gpu.setDt(dtNow);
   }
+  if (tp && tracers) { tracers.pos.set(tp); gpu?.initTracers(tp); }
+  else if (tp) setupTracers(tp);
 }
 
 /** Copy the GPU state into the CPU model arrays (display and diagnostics reuse the CPU code). */
@@ -452,34 +519,66 @@ async function sendFrame(): Promise<void> {
   lastFrame = performance.now(); lastFrameModel = modelNow();
   const { nx, ny, nz, dx, dz } = m.c, n = nx * ny * nz;
   const cloud = new Uint8Array(n), rain = new Uint8Array(n);
+  const req = chartReq;
   let wmax = 0, wmin = 0, qcmax = 0, qrmax = 0;
+  let col: Float32Array | null = null;
+  const planeAt = new Map<number, LevelPlanes>();
+  const sliceK = req?.slice ? Math.max(0, Math.min(nz - 1, req.slice.k | 0)) : -1;
+  let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
+  let charts: ChartData | null = null, trOut: Float32Array | null = null;
+  const transfer = new Set<ArrayBuffer>([cloud.buffer, rain.buffer]);
+  // the GPU model of this frame (the module variable can be replaced while a readback is awaited)
+  const gpu = currentGpu();
   if (gpu) {
-    // GPU: packed display bytes, column extremes and the few horizontal planes the diagnostics need
-    let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
-    const d = await gpu.readDisplay(k15 === 0 ? [0] : [0, k15]);
-    // keep the GPU busy while this frame is unpacked on the CPU
+    // GPU: packed display bytes, column composites and the few horizontal planes the diagnostics need
+    const levels = [...new Set([0, k15, ...(sliceK >= 0 ? [sliceK] : [])])];
+    const d = await gpu.readDisplay(levels, volMode);
     const tNow = gpu.time, sNow = gpu.steps;
-    if (running) { gpu.step(gpuBatch); rateSteps += gpuBatch; }
     for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; }
-    for (let c = 0; c < nx * ny; c++) { wmax = Math.max(wmax, d.col[COL * c]!); wmin = Math.min(wmin, d.col[COL * c + 1]!); qcmax = Math.max(qcmax, d.col[COL * c + 2]!); qrmax = Math.max(qrmax, d.col[COL * c + 3]!); }
-    for (const [k, pl] of d.planes) { const o = k * m.plane; m.u.set(pl.u, o); m.v.set(pl.v, o); m.th.set(pl.th, o); m.pp.set(pl.pp, o); }
+    col = d.col;
+    for (let c = 0; c < nx * ny; c++) { wmax = Math.max(wmax, col[NCOL * c]!); wmin = Math.min(wmin, col[NCOL * c + 1]!); qcmax = Math.max(qcmax, col[NCOL * c + 2]!); qrmax = Math.max(qrmax, col[NCOL * c + 3]!); }
+    for (const [k, pl] of d.planes) {
+      const o = k * m.plane; m.u.set(pl.u, o); m.v.set(pl.v, o); m.th.set(pl.th, o); m.pp.set(pl.pp, o);
+      planeAt.set(k, pl);
+    }
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = m.idx(i, j, 0); mp.rainAcc[j * nx + i] = d.rain[q]!; mp.snowAcc[j * nx + i] = d.snow[q]!; }
     m.time = tNow; m.steps = sNow;
     if (!Number.isFinite(wmax)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
+    if (req && Number.isFinite(wmax)) charts = await buildCharts(req, col, planeAt, sliceK, gpu);
+    advanceOrigin();
+    // keep the GPU busy while this frame is unpacked on the CPU
+    if (running) { const dtb = gpu.dt; gpu.step(gpuBatch); rateSteps += gpuBatch; advectTracers(gpuBatch * dtb, gpuBatch); }
+    trOut = d.tracers ? d.tracers.slice() : null;
   } else {
     if (!Number.isFinite(m.w[m.idx(0, 0, 1)]!)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
     const qc = m.scalars[QC]!, qr = m.scalars[QR]!, qi = m.scalars[QI]!, qs = m.scalars[QS]!, qg = m.scalars[QG]!;
+    const vm = volMode;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const q = m.idx(i, j, k), o = (k * ny + j) * nx + i;
-      // cloud: liquid + ice cloud; precipitation: rain + snow + graupel
+      // cloud: liquid + ice cloud; channel 2: precipitation (rain + snow + graupel), updraft or vorticity
       const cl = Math.max(0, qc[q]! + qi[q]!), pr = Math.max(0, qr[q]! + qs[q]! + qg[q]!);
       cloud[o] = Math.min(255, Math.round(Math.sqrt(cl / 3e-3) * 255));
-      rain[o] = Math.min(255, Math.round(Math.sqrt(pr / 8e-3) * 255));
+      let v2 = Math.sqrt(pr / 8e-3);
+      if (vm === 1) v2 = Math.sqrt(Math.max(0.5 * (m.w[q]! + m.w[q + m.plane]!), 0) / 40);
+      else if (vm === 2) {
+        const zeta = 0.25 * ((m.v[q + 1]! + m.v[q + 1 + m.sx]!) - (m.v[q - 1]! + m.v[q - 1 + m.sx]!)) / dx - 0.25 * ((m.u[q + m.sx]! + m.u[q + m.sx + 1]!) - (m.u[q - m.sx]! + m.u[q - m.sx + 1]!)) / m.c.dy;
+        v2 = Math.sqrt(Math.max(zeta, 0) / 0.05);
+      }
+      rain[o] = Math.min(255, Math.round(v2 * 255));
       qcmax = Math.max(qcmax, cl); qrmax = Math.max(qrmax, pr);
       const w = m.w[q]!; wmax = Math.max(wmax, w); wmin = Math.min(wmin, w);
     }
+    if (req) {
+      col = columnDiagnostics(m);
+      planeAt.set(0, modelPlanes(m, 0));
+      if (sliceK >= 0) planeAt.set(sliceK, modelPlanes(m, sliceK));
+      charts = await buildCharts(req, col, planeAt, sliceK, null);
+    }
+    advanceOrigin();
+    trOut = tracers ? tracers.pos.slice() : null;
   }
   const g = new Float32Array(nx * ny);
+  transfer.add(g.buffer);
   let vmax = 0, rainmax = 0;
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const q = m.idx(i, j, 0);
@@ -492,8 +591,14 @@ async function sendFrame(): Promise<void> {
   for (const v of g) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
   if (ground === 'theta') { const a = Math.max(Math.abs(lo), Math.abs(hi), 0.5); lo = -a; hi = a; }
   else { lo = 0; hi = Math.max(hi, ground === 'rain' || ground === 'snow' ? 5 : 10); }
-  let dp: number | null = null, rmw: number | null = null, eyewalls: { r: number; v: number }[] | null = null;
-  if (experiment === 'tc' || experiment === 'tc_hr') { const r = tcMetrics(m); dp = r.pmin - dpEnv; rmw = r.rmw; eyewalls = eyewallProfile(m).peaks; }
+  let dp: number | null = null, rmw: number | null = null, eyewalls: { r: number; v: number }[] | null = null, vtProfile: { dr: number; vt: number[] } | null = null;
+  let storm: { x: number; y: number } | null = null;
+  if (isTc()) {
+    const r = tcMetrics(m); dp = r.pmin - dpEnv; rmw = r.rmw;
+    const ew = eyewallProfile(m); eyewalls = ew.peaks;
+    vtProfile = { dr: dx, vt: ew.vt.map((x) => +x.toFixed(2)) };
+    storm = { x: origin.x + (r.ic + 0.5) * dx, y: origin.y + (r.jc + 0.5) * m.c.dy };
+  }
   // lowest-level vertical vorticity (cell corners) and ground-relative wind
   let zetaMax = 0, vGround = 0;
   for (let j = 1; j < ny; j++) for (let i = 1; i < nx; i++) {
@@ -502,6 +607,79 @@ async function sendFrame(): Promise<void> {
     zetaMax = Math.max(zetaMax, zeta);
     vGround = Math.max(vGround, Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!) + frameVel.u, 0.5 * (m.v[q]! + m.v[q + m.sx]!) + frameVel.v));
   }
+  // storm-scale maxima from the column composites; the strongest storm column (max UH, else max w)
+  let dbzMax = 0, uhMax = 0, capeMax = 0;
+  if (col) {
+    let cu = -1, cw = -1, wBest = 0;
+    for (let c = 0; c < nx * ny; c++) {
+      const o = NCOL * c;
+      dbzMax = Math.max(dbzMax, col[o + C.dbz]!); capeMax = Math.max(capeMax, col[o + C.cape]!);
+      if (col[o + C.uh]! > uhMax) { uhMax = col[o + C.uh]!; cu = c; }
+      if (col[o + C.wmax]! > wBest) { wBest = col[o + C.wmax]!; cw = c; }
+    }
+    const pick = uhMax > 25 ? cu : wBest > 5 ? cw : -1;
+    if (!isTc() && pick >= 0) storm = { x: origin.x + (pick % nx + 0.5) * dx, y: origin.y + (Math.floor(pick / nx) + 0.5) * m.c.dy };
+  }
+  if (charts) for (const a of chartArrays(charts)) transfer.add(a.buffer as ArrayBuffer);
+  if (trOut) transfer.add(trOut.buffer as ArrayBuffer);
+  stormDomain = storm ? { x: storm.x - origin.x, y: storm.y - origin.y } : stormDomain;
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
-    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround }, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [cloud.buffer, rain.buffer, g.buffer]);
+    stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, capeMax, storm, vtProfile },
+    origin: { ...origin }, charts, tracers: trOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
+}
+
+function chartArrays(c: ChartData): Float32Array[] {
+  const out: Float32Array[] = [];
+  const add = (r: Record<string, Float32Array | undefined> | undefined | null): void => { if (r) for (const a of Object.values(r)) if (a) out.push(a); };
+  add(c.maps); add(c.slice?.vars); add(c.section?.vars); add(c.sounding?.vars); add(c.rz?.vars as Record<string, Float32Array> | undefined);
+  return out;
+}
+
+/** Chart data for the current state. GPU: planes and column composites from readDisplay, profiles and
+ *  azimuthal means read back by small kernels; CPU: the same diagnostics from the model arrays. */
+async function buildCharts(req: ChartRequest, col: Float32Array, planes: Map<number, LevelPlanes>, sliceK: number, gpu: GpuRegional | null): Promise<ChartData> {
+  const mm = m!, mpp = mp!, { nx, ny, nz, dx, dy } = mm.c, t = modelNow();
+  // precipitation rate (mm/h) from the accumulation change since the previous frame
+  const acc = Float32Array.from(mpp.rainAcc);
+  if (prevAcc && prevAcc.rain.length === acc.length && t > prevAcc.t + 1e-6) {
+    const r = new Float32Array(acc.length), f = 3600 / (t - prevAcc.t);
+    for (let i = 0; i < acc.length; i++) r[i] = Math.max(0, (acc[i]! - prevAcc.rain[i]!) * f);
+    lastRate = r;
+  } else if (!prevAcc || prevAcc.rain.length !== acc.length || t < prevAcc.t) lastRate = null;
+  if (!prevAcc || t > prevAcc.t + 1e-6 || t < prevAcc.t) prevAcc = { t, rain: acc };
+  const charts: ChartData = { maps: {}, slice: null, section: null, sounding: null, rz: null };
+  const pl0 = planes.get(0) ?? modelPlanes(mm, 0);
+  if (req.maps.length) charts.maps = compositeMaps(mm, col, pl0, { rain: mpp.rainAcc, snow: mpp.snowAcc, rate: lastRate }, req.maps, frameVel);
+  if (sliceK >= 0 && req.slice) {
+    const pl = planes.get(sliceK) ?? modelPlanes(mm, sliceK);
+    charts.slice = { k: sliceK, z: mm.zc[sliceK]!, vars: sliceFields(mm, pl, sliceK, req.slice.vars, frameVel) };
+  }
+  const cellOf = (x: number, y: number): { i: number; j: number } => ({ i: Math.max(0, Math.min(nx - 1, Math.floor(x / dx))), j: Math.max(0, Math.min(ny - 1, Math.floor(y / dy))) });
+  const profiles = async (pts: { i: number; j: number }[]): Promise<{ cols: Float32Array; nf: number }> =>
+    gpu ? { cols: await gpu.readColumns(pts), nf: gpu.nf } : { cols: columnProfiles(mm, pts), nf: 5 + mm.scalars.length };
+  const split = (all: Float32Array, np: number): Record<SectionVar, Float32Array> => {
+    const r = {} as Record<SectionVar, Float32Array>;
+    SECTION_VARS.forEach((v, f) => { r[v] = all.slice(f * nz * np, (f + 1) * nz * np); });
+    return r;
+  };
+  if (req.section) {
+    const { x0, y0, x1, y1 } = req.section, len = Math.hypot(x1 - x0, y1 - y0);
+    const np = Math.max(2, Math.min(600, Math.round(len / dx) + 1));
+    const pts = Array.from({ length: np }, (_, p) => cellOf(x0 + (x1 - x0) * p / (np - 1), y0 + (y1 - y0) * p / (np - 1)));
+    const { cols, nf } = await profiles(pts);
+    charts.section = { x0, y0, x1, y1, np, vars: split(sectionFromColumns(mm, cols, np, nf, frameVel), np) };
+  }
+  if (req.sounding) {
+    const { cols, nf } = await profiles([cellOf(req.sounding.x, req.sounding.y)]);
+    charts.sounding = { x: req.sounding.x, y: req.sounding.y, vars: split(sectionFromColumns(mm, cols, 1, nf, frameVel), 1) };
+  }
+  if (req.rz) {
+    let xc: number, yc: number;
+    if (req.rz === 'auto') { const r = tcMetrics(mm); xc = (r.ic + 0.5) * dx; yc = (r.jc + 0.5) * dy; }
+    else { xc = req.rz.x; yc = req.rz.y; }
+    const dr = dx, nr = Math.max(4, Math.min(Math.floor(Math.min(nx, ny) / 2), Math.ceil(Math.max(300000, 20 * dx) / dr)));
+    const raw = gpu ? await gpu.readRZ(xc, yc, dr, nr) : azimuthalMeans(mm, xc, yc, dr, nr);
+    charts.rz = { xc, yc, dr, nr, vars: unpackRZ(raw, nr, nz) };
+  }
+  return charts;
 }

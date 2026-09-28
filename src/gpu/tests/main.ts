@@ -2,7 +2,7 @@ import { gdone } from './harness.js';
 import { transformTests } from './transformTest.js';
 import { dycoreTests } from './dycoreTest.js';
 import { moistTests, earthTests, spinupGpuTest } from './moistTest.js';
-import { regionalTests, regionalNestTests, regionalIceTests, regionalPerf, regionalAdaptiveTest, regionalFlagDebug, regionalRefineTest } from './regionalTest.js';
+import { regionalTests, regionalNestTests, regionalIceTests, regionalPerf, regionalAdaptiveTest, regionalFlagDebug, regionalRefineTest, regionalChartsTest } from './regionalTest.js';
 import { regionalDebug } from './regionalDebug.js';
 
 async function main(): Promise<void> {
@@ -20,6 +20,7 @@ async function main(): Promise<void> {
     if (which === 'flags') await regionalFlagDebug();
     if (!which || which === 'regional' || which === 'refine') await regionalRefineTest();
     if (!which || which === 'regional' || which === 'adaptive') await regionalAdaptiveTest();
+    if (!which || which === 'regional' || which === 'charts') await regionalChartsTest();
     if (which === 'rdebug') await regionalDebug();
   } catch (e) {
     console.log(`GPUTEST FAIL exception ${String(e)} ${(e as Error).stack ?? ''}`);

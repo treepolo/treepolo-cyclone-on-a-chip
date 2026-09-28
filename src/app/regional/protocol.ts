@@ -1,4 +1,5 @@
 // Messages between the regional-model UI and its worker.
+import type { MapVar, SliceVar, SectionVar, RzVar } from '../../regional/diagnostics.js';
 
 export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'nest' | 'tornado' | 'tornado_c';
 /** coarse-to-fine refinement: each coarse spin-up experiment and the finer experiment it continues as */
@@ -42,7 +43,32 @@ export type ToRegionalWorker =
   | { type: 'step1' }
   /** display cadence: every 0.5 s, every `every` model seconds, or rarely (fast-forward) */
   | { type: 'frames'; kind: 'wall' | 'model' | 'fast'; every?: number }
-  | { type: 'load'; buffer: ArrayBuffer; backend: 'auto' | 'cpu' };
+  | { type: 'load'; buffer: ArrayBuffer; backend: 'auto' | 'cpu' }
+  /** chart data to add to every frame (null: none, e.g. the globe-embedded nest) */
+  | { type: 'charts'; req: ChartRequest | null }
+  /** second channel of the 3-D view: 0 precipitation, 1 updraft, 2 cyclonic vertical vorticity */
+  | { type: 'volMode'; mode: number }
+  /** tracer particles for the 3-D view (0: off) */
+  | { type: 'tracers'; n: number };
+
+/** What the charts need in each frame. Positions in m from the domain origin (lower-left corner). */
+export interface ChartRequest {
+  maps: MapVar[];
+  slice: { k: number; vars: SliceVar[] } | null;
+  section: { x0: number; y0: number; x1: number; y1: number } | null;
+  sounding: { x: number; y: number } | null;
+  /** azimuthal means about the surface-pressure minimum ('auto') or a given centre */
+  rz: 'auto' | { x: number; y: number } | null;
+}
+
+/** Chart data of a frame. 2-D maps are [j][i]; section fields [k][point]; r-z fields [k][ring]. */
+export interface ChartData {
+  maps: Partial<Record<MapVar, Float32Array>>;
+  slice: { k: number; z: number; vars: Partial<Record<SliceVar, Float32Array>> } | null;
+  section: { x0: number; y0: number; x1: number; y1: number; np: number; vars: Record<SectionVar, Float32Array> } | null;
+  sounding: { x: number; y: number; vars: Record<SectionVar, Float32Array> } | null;
+  rz: { xc: number; yc: number; dr: number; nr: number; vars: Record<RzVar, Float32Array> } | null;
+}
 
 export interface RegionalFrame {
   type: 'frame';
@@ -54,7 +80,20 @@ export interface RegionalFrame {
   ground: Float32Array;       // [j][i]
   groundField: GroundField;
   groundRange: [number, number];
-  stats: { wmax: number; wmin: number; qcmax: number; qrmax: number; rainmax: number; vmax: number; dp: number | null; rmw: number | null; eyewalls: { r: number; v: number }[] | null; zetaMax: number; vGround: number };
+  stats: {
+    wmax: number; wmin: number; qcmax: number; qrmax: number; rainmax: number; vmax: number; dp: number | null; rmw: number | null; eyewalls: { r: number; v: number }[] | null; zetaMax: number; vGround: number;
+    /** column-max reflectivity (dBZ), 2-5 km updraft helicity (m^2/s^2) and surface-based CAPE (J/kg) maxima */
+    dbzMax: number; uhMax: number; capeMax: number;
+    /** strongest storm column (max UH, or max w before rotation): ground-relative position (m), or null */
+    storm: { x: number; y: number } | null;
+    /** tropical cyclones: azimuthal-mean tangential wind at 1.5 km, rings of width dr from the centre */
+    vtProfile: { dr: number; vt: number[] } | null;
+  };
+  /** ground-relative position (m) of the domain origin (moves with the frame of storm-following experiments) */
+  origin: { x: number; y: number };
+  charts: ChartData | null;
+  /** tracer particles: x, y, z (m, domain coordinates) and age (s) per particle, or null when off */
+  tracers: Float32Array | null;
   stepsPerSecond: number;
   /** current time step (s): varies with adaptive stepping on the GPU */
   dt: number;

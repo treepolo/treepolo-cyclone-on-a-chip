@@ -1,6 +1,9 @@
 // WebGL2 volume renderer for the regional model: front-to-back ray marching through a 3-D texture
 // (R = cloud water, G = rain water) with single-scattering sun lighting and self-shadowing,
 // a coloured ground plane (surface field) and an orbit camera. Vertical scale is exaggerated.
+// Tracer particles (with short trails) are drawn first into an offscreen buffer that keeps, per pixel, the
+// nearest particle colour and its distance from the eye; the ray march composites that colour where the
+// ray passes that distance, so clouds in front hide the particles behind them.
 import { attachOrbit } from '../orbitControls.js';
 
 const VS = `#version 300 es
@@ -13,6 +16,7 @@ in vec2 vUv; out vec4 o;
 uniform sampler3D uVol; uniform sampler2D uGround;
 uniform mat4 uInvVP; uniform vec3 uEye; uniform vec3 uBox; uniform vec3 uSun;
 uniform float uCloudK; uniform float uRainK;
+uniform sampler2D uTrC; uniform sampler2D uTrD; uniform int uTrOn;
 bool hitBox(vec3 ro, vec3 rd, out float t0, out float t1){
   vec3 inv = 1.0/rd; vec3 a = (vec3(0.0)-ro)*inv; vec3 b = (uBox-ro)*inv;
   vec3 mn = min(a,b), mx = max(a,b);
@@ -33,12 +37,16 @@ void main(){
     if (pg.x >= 0.0 && pg.y >= 0.0 && pg.x <= uBox.x && pg.y <= uBox.y) bg = texture(uGround, pg.xy/uBox.xy).rgb;
     else bg = vec3(0.07,0.09,0.12);
   }
+  vec4 tc = vec4(0.0); float tdist = 1e9;
+  if (uTrOn == 1) { tc = texture(uTrC, vUv); if (tc.a > 0.0) { vec4 d4 = texture(uTrD, vUv); tdist = (d4.r * 65280.0 + d4.g * 255.0) / 65535.0 * 16.0; } }
+  bool tdone = tc.a <= 0.0;
   if (hitBox(ro, rd, t0, t1)) {
     t0 = max(t0, 0.0);
     const int N = 160;
     float dt = (t1-t0)/float(N);
     for (int i = 0; i < N; i++) {
       float t = t0 + (float(i)+0.5)*dt;
+      if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
       vec3 p = ro + t*rd;
       vec2 d = dens(p);
       float ext = d.x + d.y;
@@ -55,8 +63,26 @@ void main(){
       }
     }
   }
+  if (!tdone) { col += trans*tc.rgb; trans *= 1.0 - tc.a; }
   o = vec4(col + trans*bg, 1.0);
 }`;
+
+// tracer lines / points: colour by height (orange near the ground, pale yellow aloft), alpha fades along the trail
+const TVS = `#version 300 es
+in vec4 aP; uniform mat4 uVP; uniform vec3 uEye; uniform vec3 uBox; uniform float uPt;
+out float vA; out float vD; out float vH;
+void main(){ vec3 p = aP.xyz; gl_Position = uVP * vec4(p, 1.0); gl_PointSize = uPt; vA = aP.w; vD = distance(p, uEye); vH = p.z / uBox.z; }`;
+const TFS = `#version 300 es
+precision highp float;
+in float vA; in float vD; in float vH;
+layout(location=0) out vec4 oC; layout(location=1) out vec4 oD;
+void main(){
+  vec3 c = mix(vec3(0.90, 0.38, 0.14), vec3(1.0, 0.94, 0.66), clamp(vH / 0.6, 0.0, 1.0));
+  oC = vec4(c * vA, vA);
+  float v = floor(clamp(vD / 16.0, 0.0, 1.0) * 65535.0 + 0.5), h = floor(v / 256.0);
+  oD = vec4(h / 255.0, (v - h * 256.0) / 255.0, 0.0, 1.0);
+}`;
+const TRAIL = 8;
 
 export class VolumeView {
   private readonly gl: WebGL2RenderingContext;
@@ -64,6 +90,13 @@ export class VolumeView {
   private readonly vol: WebGLTexture;
   private readonly groundTex: WebGLTexture;
   private box: [number, number, number] = [1, 1, 0.3];
+  // tracer particles
+  private trProg: WebGLProgram | null = null;
+  private trBuf: WebGLBuffer | null = null;
+  private trFbo: { fb: WebGLFramebuffer; c: WebGLTexture; d: WebGLTexture; z: WebGLRenderbuffer; w: number; h: number } | null = null;
+  private trHist: Float32Array | null = null; private trCnt: Uint8Array | null = null; private trAge: Float32Array | null = null;
+  private trLines = 0; private trPoints = 0;
+  private quad: WebGLBuffer | null = null;
   yaw = -0.9; pitch = 0.35; dist = 1.35;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
@@ -75,7 +108,13 @@ export class VolumeView {
     gl.attachShader(p, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) ?? 'link');
     this.prog = p;
+    try {
+      const tp = gl.createProgram()!;
+      gl.attachShader(tp, sh(gl.VERTEX_SHADER, TVS)); gl.attachShader(tp, sh(gl.FRAGMENT_SHADER, TFS)); gl.linkProgram(tp);
+      if (gl.getProgramParameter(tp, gl.LINK_STATUS)) { this.trProg = tp; this.trBuf = gl.createBuffer(); }
+    } catch { this.trProg = null; }
     const vb = gl.createBuffer()!;
+    this.quad = vb;
     gl.bindBuffer(gl.ARRAY_BUFFER, vb);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     const loc = gl.getAttribLocation(p, 'aPos');
@@ -101,6 +140,82 @@ export class VolumeView {
     const ax = 1, ay = ny / nx;
     this.box = [ax, ay, aspectZ];
     this.dirty = true;
+  }
+
+  /** Tracer particles (x, y, z in m and age per particle; null: none) in a domain of Lx x Ly x top. */
+  setTracers(pos: Float32Array | null, Lx: number, Ly: number, top: number): void {
+    const gl = this.gl;
+    if (!pos || !this.trProg) { if (this.trLines || this.trPoints) { this.trLines = 0; this.trPoints = 0; this.dirty = true; } this.trHist = null; return; }
+    const n = pos.length / 4, [bx, by, bz] = this.box;
+    if (!this.trHist || this.trHist.length !== n * TRAIL * 3) { this.trHist = new Float32Array(n * TRAIL * 3); this.trCnt = new Uint8Array(n); this.trAge = new Float32Array(n); }
+    const Hh = this.trHist, cnt = this.trCnt!, age = this.trAge!;
+    for (let p = 0; p < n; p++) {
+      const x = pos[4 * p]! / Lx * bx, y = pos[4 * p + 1]! / Ly * by, z = pos[4 * p + 2]! / top * bz, a = pos[4 * p + 3]!, o = p * TRAIL * 3;
+      // new particle (re-seeded) or wrapped around a periodic boundary: restart its trail
+      if (a < age[p]! || (cnt[p]! > 0 && Math.hypot(x - Hh[o]!, y - Hh[o + 1]!) > 0.2)) cnt[p] = 0;
+      age[p] = a;
+      Hh.copyWithin(o + 3, o, o + 3 * (TRAIL - 1));
+      Hh[o] = x; Hh[o + 1] = y; Hh[o + 2] = z;
+      cnt[p] = Math.min(TRAIL, cnt[p]! + 1);
+    }
+    let nl = 0; for (let p = 0; p < n; p++) nl += Math.max(0, cnt[p]! - 1);
+    const v = new Float32Array(4 * (2 * nl + n));
+    let o = 0;
+    for (let p = 0; p < n; p++) for (let s = 0; s < cnt[p]! - 1; s++) {
+      const q = p * TRAIL * 3 + 3 * s;
+      v[o++] = Hh[q]!; v[o++] = Hh[q + 1]!; v[o++] = Hh[q + 2]!; v[o++] = 0.85 * (1 - s / (TRAIL - 1));
+      v[o++] = Hh[q + 3]!; v[o++] = Hh[q + 4]!; v[o++] = Hh[q + 5]!; v[o++] = 0.85 * (1 - (s + 1) / (TRAIL - 1));
+    }
+    for (let p = 0; p < n; p++) { const q = p * TRAIL * 3; v[o++] = Hh[q]!; v[o++] = Hh[q + 1]!; v[o++] = Hh[q + 2]!; v[o++] = 1; }
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.trBuf); gl.bufferData(gl.ARRAY_BUFFER, v, gl.DYNAMIC_DRAW);
+    this.trLines = 2 * nl; this.trPoints = n;
+    this.dirty = true;
+  }
+
+  private tracerPass(vp: Float32Array, eye: [number, number, number], w: number, h: number): boolean {
+    const gl = this.gl;
+    if (!this.trProg || !this.trPoints) return false;
+    let f = this.trFbo;
+    if (!f || f.w !== w || f.h !== h) {
+      if (f) { gl.deleteFramebuffer(f.fb); gl.deleteTexture(f.c); gl.deleteTexture(f.d); gl.deleteRenderbuffer(f.z); }
+      const tex = (): WebGLTexture => {
+        const t = gl.createTexture()!; gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return t;
+      };
+      const c = tex(), d = tex(), z = gl.createRenderbuffer()!;
+      gl.bindRenderbuffer(gl.RENDERBUFFER, z); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+      const fb = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, c, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, d, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, z);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) { gl.bindFramebuffer(gl.FRAMEBUFFER, null); this.trProg = null; return false; }
+      f = this.trFbo = { fb, c, d, z, w, h };
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f.fb);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    gl.viewport(0, 0, w, h);
+    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]); gl.clearBufferfv(gl.COLOR, 1, [1, 1, 0, 1]); gl.clearBufferfv(gl.DEPTH, 0, [1]);
+    gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS);
+    gl.useProgram(this.trProg);
+    const u = (n: string): WebGLUniformLocation | null => gl.getUniformLocation(this.trProg!, n);
+    gl.uniformMatrix4fv(u('uVP'), false, vp); gl.uniform3f(u('uEye'), eye[0], eye[1], eye[2]); gl.uniform3f(u('uBox'), this.box[0], this.box[1], this.box[2]);
+    const loc = gl.getAttribLocation(this.trProg, 'aP');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.trBuf); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, 0, 0);
+    gl.uniform1f(u('uPt'), 1);
+    if (this.trLines) gl.drawArrays(gl.LINES, 0, this.trLines);
+    gl.uniform1f(u('uPt'), Math.max(2, Math.min(4, 2.5 * w / 1200)));
+    gl.drawArrays(gl.POINTS, this.trLines, this.trPoints);
+    gl.disableVertexAttribArray(loc);
+    gl.disable(gl.DEPTH_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // restore the full-screen quad attribute of the volume program
+    const ql = gl.getAttribLocation(this.prog, 'aPos');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad); gl.enableVertexAttribArray(ql); gl.vertexAttribPointer(ql, 2, gl.FLOAT, false, 0, 0);
+    return true;
   }
 
   /** Upload the ground colour image (RGBA bytes, [j][i]). */
@@ -142,6 +257,9 @@ export class VolumeView {
     ];
     const vp = viewProj(eye, ctr, w / h);
     const inv = invert4(vp);
+    const trOn = this.tracerPass(vp, eye, w, h);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(this.prog);
     const u = (n: string): WebGLUniformLocation => gl.getUniformLocation(this.prog, n)!;
     gl.uniformMatrix4fv(u('uInvVP'), false, inv);
     gl.uniform3f(u('uEye'), eye[0], eye[1], eye[2]);
@@ -152,6 +270,14 @@ export class VolumeView {
     gl.uniform1f(u('uRainK'), rainK);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, this.vol); gl.uniform1i(u('uVol'), 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.groundTex); gl.uniform1i(u('uGround'), 1);
+    gl.uniform1i(u('uTrOn'), trOn ? 1 : 0);
+    if (trOn) {
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.trFbo!.c); gl.uniform1i(u('uTrC'), 2);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.trFbo!.d); gl.uniform1i(u('uTrD'), 3);
+    } else {
+      // keep the samplers on 2-D texture units (an unbound sampler type mismatch is an error)
+      gl.uniform1i(u('uTrC'), 1); gl.uniform1i(u('uTrD'), 1);
+    }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }

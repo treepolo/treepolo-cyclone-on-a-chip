@@ -3,6 +3,7 @@ import { VolumeView } from './volume.js';
 import { sequential, diverging } from '../colormap.js';
 import { mountSavesPanel, storeSave, type SaveMeta } from '../saves.js';
 import { UnattendedRun } from './runner.js';
+import { RegionalCharts } from './charts.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tornado: '250 m' };
@@ -18,6 +19,17 @@ const send = (m: ToRegionalWorker): void => worker.postMessage(m);
 let running = false, dt = 6, aspect = 0.3;
 let land: Uint8Array | null = null;
 let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
+// charts: the main view is either the 3-D volume or one of the 2-D charts
+let lastVol: { nx: number; ny: number; nz: number; cloud: Uint8Array; rain: Uint8Array; ground: Uint8Array } | null = null, refining = false;
+const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
+  request: (req) => send({ type: 'charts', req }),
+  volMode: (mode) => send({ type: 'volMode', mode }),
+  tracers: (n) => send({ type: 'tracers', n }),
+  view: (v) => {
+    $('view').hidden = v !== '3d'; $('chart').hidden = v === '3d';
+    if (v === '3d' && lastVol) { view.setVolume(lastVol.nx, lastVol.ny, lastVol.nz, lastVol.cloud, lastVol.rain, aspect); view.setGround(lastVol.nx, lastVol.ny, lastVol.ground); }
+  },
+});
 
 worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
@@ -34,10 +46,14 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     rb.disabled = !m.refineTo;
     rb.textContent = m.refineTo ? `細化到 ${REFINE_LABEL[m.refineTo] ?? ''} / Refine to ${REFINE_LABEL[m.refineTo] ?? ''}` : '細化 / Refine';
     if ((m.experiment as string) !== 'nest') $<HTMLSelectElement>('exp').value = m.experiment;
+    charts.setGrid({ nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dy: m.dx, dz: m.dz, experiment: m.experiment, land: m.land }, refining);
+    refining = false;
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
     runner.sample(m);
-    view.setVolume(m.nx, m.ny, m.nz, m.cloud, m.rain, aspect);
+    charts.onFrame(m);
+    const in3d = charts.view === '3d';
+    if (in3d) { view.setVolume(m.nx, m.ny, m.nz, m.cloud, m.rain, aspect); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     const [lo, hi] = m.groundRange, rgba = new Uint8Array(m.nx * m.ny * 4);
     for (let i = 0; i < m.ground.length; i++) {
       const v = m.ground[i]!;
@@ -47,7 +63,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
-    view.setGround(m.nx, m.ny, rgba);
+    if (in3d) view.setGround(m.nx, m.ny, rgba);
+    lastVol = { nx: m.nx, ny: m.ny, nz: m.nz, cloud: m.cloud, rain: m.rain, ground: rgba };
     const s = m.stats, t = m.time;
     $('time').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h (${(t / 86400).toFixed(2)} d)`;
     const ms = m.stepsPerSecond * m.dt;
@@ -101,10 +118,10 @@ if (location.hash.startsWith('#nest') || new URLSearchParams(location.search).ha
 }
 if (window.parent !== window) { const back = document.getElementById('backLink'); if (back) back.hidden = true; }
 init();
-function tick(): void { view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); requestAnimationFrame(tick); }
+function tick(): void { if (charts.view === '3d') view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); requestAnimationFrame(tick); }
 requestAnimationFrame(tick);
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
-$('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
+$('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; refining = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
 // ---------------- saved simulations
 let pendingSave: ((r: { meta: SaveMeta; data: ArrayBuffer }) => void) | null = null;
 const savesPanel = mountSavesPanel($('saves'), 'regional',

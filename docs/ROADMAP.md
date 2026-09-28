@@ -30,7 +30,12 @@ refinement for the tornado item).
 - 目標倍速（真實時間 ×1、×10、×60、×600、全速）、單步、跑到 +N 小時自動暫停
 - 畫面更新間隔、快轉時不更新畫面；區域與全球模式都要
 
-## 3. 區域模式圖表 / Regional-model charts
+## 3. 區域模式圖表 / Regional-model charts（已完成 / done）
+已做 / Done: 主畫面選單（3D／水平切面／合成圖／垂直剖面／颱風 r–z／探空／時間序列／Hovmöller）、高度滑桿、
+在地圖上拖曳畫剖面線與點選探空點、風向箭頭、等壓線、斜溫圖（地面氣塊、CAPE/CIN 陰影、風標）＋風徑圖（Bunkers 右移胞、SRH）、
+時間序列（颱風：氣壓降、最大風、RMW；超大胞：w、UH、地面渦度、對地風、回波）與風暴路徑、1.5 km 切向風 Hovmöller、
+3D 第二通道（降水／上升氣流／渦度）、3D 軌跡粒子（GPU 平流、雲遮擋）。診斷量：`src/regional/diagnostics.ts`（CPU）與
+`regionalGpu.ts` 的顯示核心（GPU），`?only=charts` 逐項比對。
 - 高度滑桿＋水平切面：模擬雷達回波 dBZ、w、風速／箭頭／流線、θ′／θe、RH、渦度、p′
 - 合成圖：最大回波、紅外雲頂、海平面氣壓等壓線、即時降雨率、上升氣流螺旋度 UH、CAPE／CIN
 - 垂直剖面：自己畫線的剖面、颱風半徑–高度軸對稱圖

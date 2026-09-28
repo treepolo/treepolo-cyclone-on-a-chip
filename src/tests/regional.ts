@@ -260,4 +260,34 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
 }
 
 void DRY_AIR;
+// Chart diagnostics (display only)
+{
+  const { parcelAscent, qsatW, dewPoint, pressure, columnDiagnostics, azimuthalMeans, C, COL } = await import('../regional/diagnostics.js');
+  // Weisman-Klemp (1982) sounding, 14 g/kg boundary layer: surface-based CAPE of about 2000-2500 J/kg
+  const nz = 40, dz = 400;
+  const m = new RegionalModel({ ...base, nx: 4, ny: 4, nz, dx: 1000, dy: 1000, dz, dt: 6 }, weismanKlemp, 3);
+  const T = new Float64Array(nz), p = new Float64Array(nz), q = new Float64Array(nz);
+  for (let k = 0; k < nz; k++) { T[k] = m.th0[k]! * m.pi0[k]!; p[k] = pressure(m.pi0[k]!); q[k] = m.qv0[k]!; }
+  const pc = parcelAscent(T, p, q, dz);
+  check('diagnostics: WK82 surface-based CAPE 1500-3000 J/kg, small CIN, LCL below 2 km', pc.cape > 1500 && pc.cape < 3000 && pc.cin > -100 && pc.cin <= 0 && pc.lcl >= 0 && (pc.lcl + 0.5) * dz < 2000,
+    `CAPE ${pc.cape.toFixed(0)} J/kg, CIN ${pc.cin.toFixed(1)} J/kg, LCL ${((pc.lcl + 0.5) * dz / 1000).toFixed(1)} km, EL ${((pc.el + 0.5) * dz / 1000).toFixed(1)} km`);
+  const dry = parcelAscent(T, p, new Float64Array(nz), dz);
+  check('diagnostics: no CAPE without moisture', dry.cape === 0 && dry.cin === 0, dry.cape);
+  let worst = 0;
+  for (const [Tk, pk] of [[300, 1e5], [273.15, 7e4], [250, 4e4]] as const) worst = Math.max(worst, Math.abs(dewPoint(qsatW(Tk, pk), pk) + 273.15 - Tk));
+  check('diagnostics: dew point of saturated air equals the temperature (< 0.1 K)', worst < 0.1, worst);
+  // solid-body rotation (vertical vorticity 0.01 s^-1) and w = 10 m/s: 2-5 km updraft helicity = 10 * 0.01 * 3000 m
+  const r = new RegionalModel({ ...base, nx: 12, ny: 12, nz: 20, dx: 1000, dy: 1000, dz: 500, dt: 6 }, weismanKlemp, 3);
+  const om = 0.005, xc = 6000, yc = 6000;
+  for (let k = 0; k <= 20; k++) for (let j = -3; j < 15; j++) for (let i = -3; i < 15; i++) {
+    const o = k * r.plane + (j + 3) * r.sx + (i + 3);
+    r.u[o] = -om * ((j + 0.5) * 1000 - yc); r.v[o] = om * ((i + 0.5) * 1000 - xc); r.w[o] = 10;
+  }
+  const cd = columnDiagnostics(r);
+  check('diagnostics: updraft helicity of a rotating updraft (300 m2/s2)', Math.abs(cd[COL * (6 * 12 + 6) + C.uh]! - 300) < 1e-6, cd[COL * (6 * 12 + 6) + C.uh]!);
+  const az = azimuthalMeans(r, xc, yc, 1000, 4);
+  // ring 2 (r = 2.5 km): tangential wind om * r, no radial wind (cell-sampled, so within one cell's offset)
+  check('diagnostics: azimuthal-mean tangential wind of solid-body rotation (om r within 10 %)', Math.abs(az[5 * (2 * 20 + 3)]! - om * 2500) < 0.1 * om * 2500 && Math.abs(az[5 * (2 * 20 + 3) + 1]!) < 0.1 * om * 2500, `${az[5 * (2 * 20 + 3)]!.toFixed(3)} m/s vs ${(om * 2500).toFixed(3)}`);
+}
+
 summary('regional');
