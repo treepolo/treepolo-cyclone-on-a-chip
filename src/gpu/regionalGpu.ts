@@ -9,6 +9,7 @@ import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
 import { COL, WV_PATH } from '../regional/diagnostics.js';
+import { FORCING_TAU, MAX_FORCINGS, forcingTable, type WindForcing } from '../regional/forcing.js';
 import type { TracerParams } from '../regional/tracers.js';
 
 const WG = 64;
@@ -367,11 +368,80 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dev.queue.submit([enc.finish()]);
   }
 
+  /** lasting wind forcings (forcing.ts) applied at the start of every step */
+  private nForce = 0;
+  private forceK: { pipe: GPUComputePipeline; T: GPUBuffer; FP: GPUBuffer; bind: GPUBindGroup } | null = null;
+  /** Set the lasting wind forcings (at most MAX_FORCINGS; an empty list stops them). */
+  setForcings(list: readonly WindForcing[]): void {
+    this.nForce = Math.min(MAX_FORCINGS, list.length);
+    if (!this.nForce) return;
+    const dev = this.device, m = this.cpu, { nz } = m.c;
+    if (!this.forceK) {
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code: this.consts + `
+@group(0) @binding(0) var<storage, read_write> S: array<f32>;
+@group(0) @binding(1) var<uniform> FT: array<vec4<f32>, ${3 * MAX_FORCINGS}>;
+@group(0) @binding(2) var<uniform> FP: vec4<f32>;
+@group(0) @binding(3) var<storage, read> LV: array<f32>;     // ub[k], vb[k], zc[k] (nz each), zf[k] (nz + 1)
+// envelope and target wind of forcing n at a point (forcingAt in src/regional/forcing.ts)
+fn tgt(n: u32, px: f32, py: f32, pz: f32) -> vec4<f32> {
+  let a = FT[3u * n]; let b = FT[3u * n + 1u]; let c = FT[3u * n + 2u];
+  var dx = px - a.x; var dy = py - a.y;
+  if (!OPEN) { let lx = f32(NX) * DX; let ly = f32(NY) * DY; dx -= floor(dx / lx + 0.5) * lx; dy -= floor(dy / ly + 0.5) * ly; }
+  let r = sqrt(dx * dx + dy * dy); let rh = r / a.w; let rz = abs(pz - a.z) / b.x;
+  if (rh >= 1.0 || rz >= 1.0) { return vec4<f32>(0.0); }
+  let ch = cos(1.5707963 * rh); let cz = cos(1.5707963 * rz); let e = ch * ch * cz * cz;
+  if (b.z < 0.5) { return vec4<f32>(e, b.y * c.x, b.y * c.y, b.y * c.z); }
+  if (r < 1e-6) { return vec4<f32>(e, 0.0, 0.0, 0.0); }
+  let sp = b.y * sin(3.14159265 * rh); let ux = dx / r; let uy = dy / r;
+  if (b.z < 1.5) { return vec4<f32>(e, -b.w * sp * uy, b.w * sp * ux, 0.0); }
+  return vec4<f32>(e, -b.w * sp * ux, -b.w * sp * uy, 0.0);
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= NX * NY * (NZ + 1u)) { return; }
+  let k = t / (NX * NY); let r2 = t % (NX * NY); let j = r2 / NX; let i = r2 % NX;
+  let q = ix(i, j, k); let nf = u32(FP.x); let al = FP.y;
+  let xs = f32(i) * DX; let ys = f32(j) * DY; let xc = (f32(i) + 0.5) * DX; let yc = (f32(j) + 0.5) * DY;
+  for (var n = 0u; n < nf; n++) {
+    if (k < NZ) {
+      let zc = LV[2u * NZ + k];
+      let fu = tgt(n, xs, yc, zc);
+      if (fu.x > 0.0) { S[q] = S[q] + al * fu.x * (fu.y - (S[q] - LV[k])); }
+      let fv = tgt(n, xc, ys, zc);
+      if (fv.x > 0.0) { S[SIZE + q] = S[SIZE + q] + al * fv.x * (fv.z - (S[SIZE + q] - LV[NZ + k])); }
+    }
+    if (k > 0u && k < NZ) {
+      let fw = tgt(n, xc, yc, LV[3u * NZ + k]);
+      if (fw.x > 0.0) { S[2u * SIZE + q] = S[2u * SIZE + q] + al * fw.x * (fw.w - S[2u * SIZE + q]); }
+    }
+  }
+}` }), entryPoint: 'main' } });
+      const T = dev.createBuffer({ size: 48 * MAX_FORCINGS, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const FP = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const lv = new Float32Array(4 * nz + 1);
+      for (let k = 0; k < nz; k++) { lv[k] = m.ub[k]!; lv[nz + k] = m.vb[k]!; lv[2 * nz + k] = m.zc[k]!; }
+      for (let k = 0; k <= nz; k++) lv[3 * nz + k] = m.zf[k]!;
+      const LV = dev.createBuffer({ size: lv.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      dev.queue.writeBuffer(LV, 0, lv);
+      this.forceK = { pipe, T, FP, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: T } }, { binding: 2, resource: { buffer: FP } }, { binding: 3, resource: { buffer: LV } }] }) };
+    }
+    dev.queue.writeBuffer(this.forceK.T, 0, forcingTable(list));
+  }
+  private force(): void {
+    const k = this.forceK!, dev = this.device, { nx, ny, nz } = this.cpu.c;
+    dev.queue.writeBuffer(k.FP, 0, new Float32Array([this.nForce, this.dt / FORCING_TAU, 0, 0]));
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny * (nz + 1) / 64)); pass.end();
+    dev.queue.submit([enc.finish()]);
+  }
+
   step(n = 1): void {
     // several short command buffers per step: on large grids one step is ~1 s of GPU work, and a single
     // long submission can trip the OS GPU watchdog (Windows TDR, ~2 s), which resets the device
     const chunk = Math.max(4, Math.ceil(PASS_CELLS / this.cpu.size));
     for (let s = 0; s < n; s++) {
+      if (this.nForce > 0) this.force();
       if (this.blNoise > 0) {
         const e = Math.floor(this.time / BL_NOISE_PERIOD + 1e-6);
         if (this.noiseEpoch < 0 || e <= this.noiseEpoch) this.noiseEpoch = Math.max(this.noiseEpoch, e);

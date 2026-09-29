@@ -138,31 +138,45 @@ export class VolumeView {
   private lastInv: Float32Array | null = null; private lastEye: V3 = [0, 0, 0]; private lastVP: Float32Array | null = null;
   /** tap on the view (no drag): screen position, for interaction tools; returns true when it used the tap */
   onTap: ((clientX: number, clientY: number) => boolean) | null = null;
+  /** an interaction tool is active: one-finger / left drags go to onToolDrag (painting), right drags rotate, Shift drags pan */
+  toolActive = false;
+  onToolDrag: ((clientX: number, clientY: number, phase: 'start' | 'move' | 'end') => void) | null = null;
+  /** pointer moving over the view without a button (mouse), or leaving it (null): for a tool's preview */
+  onHover: ((clientX: number, clientY: number) => void) | null = null;
+  onLeave: (() => void) | null = null;
   private controls(): void {
     const canvas = this.canvas, pts = new Map<number, { x: number; y: number }>();
-    let mode: 'rotate' | 'pan' = 'rotate', moved = 0, spread0 = 0, cx0 = 0, cy0 = 0, lastTap = 0;
+    let mode: 'rotate' | 'pan' | 'tool' = 'rotate', moved = 0, spread0 = 0, cx0 = 0, cy0 = 0, lastTap = 0;
     const spreadC = (): [number, number, number] => { const p = [...pts.values()]; if (p.length < 2) return [0, 0, 0]; return [Math.hypot(p[0]!.x - p[1]!.x, p[0]!.y - p[1]!.y), (p[0]!.x + p[1]!.x) / 2, (p[0]!.y + p[1]!.y) / 2]; };
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('pointerdown', (e) => {
       canvas.setPointerCapture(e.pointerId);
       pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (pts.size === 1) { moved = 0; mode = e.button === 2 || e.shiftKey || e.button === 1 ? 'pan' : 'rotate'; }
+      if (pts.size === 1) {
+        moved = 0;
+        if (this.toolActive) mode = e.button === 0 && !e.shiftKey ? 'tool' : e.button === 2 ? 'rotate' : 'pan';
+        else mode = e.button === 2 || e.shiftKey || e.button === 1 ? 'pan' : 'rotate';
+        if (mode === 'tool') this.onToolDrag?.(e.clientX, e.clientY, 'start');
+      }
       if (pts.size === 2) { [spread0, cx0, cy0] = spreadC(); moved = 99; }
     });
     const end = (e: PointerEvent): void => {
       const was = pts.get(e.pointerId);
       pts.delete(e.pointerId);
+      if (was && mode === 'tool' && pts.size === 0) this.onToolDrag?.(e.clientX, e.clientY, 'end');
       if (!was || pts.size > 0 || moved >= 6) return;
       const now = performance.now();
-      if (now - lastTap < 350) { lastTap = 0; this.focusAt(e.clientX, e.clientY); return; }
+      // double tap: fly to the point (not with a tool: a second tap is a second placement)
+      if (!this.toolActive && now - lastTap < 350) { lastTap = 0; this.focusAt(e.clientX, e.clientY); return; }
       lastTap = now;
       this.onTap?.(e.clientX, e.clientY);
     };
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
+    canvas.addEventListener('pointerleave', () => { if (!pts.size) this.onLeave?.(); });
     canvas.addEventListener('pointermove', (e) => {
       const p = pts.get(e.pointerId);
-      if (!p) return;
+      if (!p) { if (e.pointerType === 'mouse') this.onHover?.(e.clientX, e.clientY); return; }
       const dx = e.clientX - p.x, dy = e.clientY - p.y;
       p.x = e.clientX; p.y = e.clientY;
       if (pts.size >= 2) {
@@ -173,6 +187,7 @@ export class VolumeView {
         return;
       }
       moved += Math.abs(dx) + Math.abs(dy);
+      if (mode === 'tool') { this.onToolDrag?.(e.clientX, e.clientY, 'move'); return; }
       if (mode === 'pan' && !this.fly) this.pan(dx, dy);
       else this.turn(dx, dy);
     });

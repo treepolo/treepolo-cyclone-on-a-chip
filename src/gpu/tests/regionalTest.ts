@@ -9,6 +9,7 @@ import { nestFromGlobal, GlobalSnapshot } from '../../regional/nest.js';
 import { IceMicrophysics, QI, QS, QG } from '../../regional/ice.js';
 import { C, columnDiagnostics, columnProfiles, azimuthalMeans } from '../../regional/diagnostics.js';
 import { Tracers } from '../../regional/tracers.js';
+import { applyWind, type WindForcing } from '../../regional/forcing.js';
 
 function cmp(m: RegionalModel, g: Float32Array, f: number, a: Float64Array, nk: number): number {
   let e = 0, s = 0;
@@ -103,6 +104,26 @@ export async function regionalTests(): Promise<void> {
     const st = await g.readState();
     const du = cmp(m, st, 0, m.u, nz), dth = cmp(m, st, 3, m.th, nz), dq = cmp(m, st, 5, m.scalars[QV]!, nz);
     gcheck('regional TC physics with gustiness and a geostrophic trade wind, 5 steps: u < 1e-3, theta < 1e-5, qv < 1e-3', du < 1e-3 && dth < 1e-5 && dq < 1e-3, `${du.toExponential(1)} ${dth.toExponential(1)} ${dq.toExponential(1)}`);
+  }
+  // ---- lasting wind forcings (forcing.ts): a tilted push across the periodic edge and a clockwise rotation
+  {
+    const nx = 24, nz = 16, dx = 2000, dz = 500;
+    const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: 6, nsound: 6, f: 1e-4, beta: 0.2, divDamp: 0.1, dampDepth: 3000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, 3);
+    m.setBaseWind((z) => ({ u: 5 * Math.tanh(z / 3000), v: 1 }));
+    for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+    const list: WindForcing[] = [
+      { x: 2000, y: 24000, z: 1500, R: 9000, H: 1500, speed: 15, dir: [0.6, 0.64, 0.48], form: 'push', sign: 1 },
+      { x: 30000, y: 20000, z: 3000, R: 12000, H: 2500, speed: 12, dir: [0, 0, 0], form: 'rotate', sign: -1 },
+    ];
+    m.preStep = (mm): void => applyWind(mm, list, mm.c.dt);
+    const g = new GpuRegional(device, m, { moist: true, physics: null });
+    g.uploadFrom(m); g.setForcings(list);
+    for (let s = 0; s < 5; s++) m.step();
+    g.step(5);
+    const st = await g.readState();
+    const du = cmp(m, st, 0, m.u, nz), dv = cmp(m, st, 1, m.v, nz), dw = cmp(m, st, 2, m.w, nz + 1);
+    let wm = 0; for (let q = 0; q < m.size; q++) wm = Math.max(wm, Math.abs(m.w[q]!));
+    gcheck('regional wind forcing (push across the periodic edge, rotation), 5 steps: u, v rel L2 < 1e-4, w < 1e-3', du < 1e-4 && dv < 1e-4 && dw < 1e-3 && wm > 0.05, `${du.toExponential(1)} ${dv.toExponential(1)} ${dw.toExponential(1)} (w max ${wm.toFixed(2)} m/s)`);
   }
 }
 

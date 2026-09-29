@@ -51,13 +51,25 @@ export type ToRegionalWorker =
   | { type: 'volMode'; mode: number }
   /** tracer particles for the 3-D view (0: off) */
   | { type: 'tracers'; n: number }
-  /** interaction (conditions only): a warm bubble or a cold pool centred at (x, y) m in domain coordinates */
-  | { type: 'perturb'; kind: 'warm' | 'cold'; x: number; y: number }
+  /** interaction (conditions only): a warm bubble or a cold pool centred at (x, y) m in domain coordinates, optionally
+   *  at height z (m; default 1.5 km warm, the ground cold) with horizontal radius (m) */
+  | { type: 'perturb'; kind: 'warm' | 'cold'; x: number; y: number; z?: number; radius?: number }
+  /** multiply the water vapour in a region (centre x, y, z, radius, full depth, m) by factor (capped at saturation) */
+  | { type: 'moisture'; x: number; y: number; z: number; radius: number; depth: number; factor: number }
+  /** wind in a region (forcing.ts): speed (m/s), direction the push blows toward (az degrees clockwise from north,
+   *  el degrees above the horizontal), form, sign (rotate: +1 counter-clockwise; converge: +1 inward); minutes 0: once,
+   *  > 0: lasting that many model minutes, < 0: lasting until cleared */
+  | { type: 'wind'; x: number; y: number; z: number; radius: number; depth: number; speed: number; az: number; el: number; form: 'push' | 'rotate' | 'converge'; sign: 1 | -1; minutes: number }
+  /** stop every lasting wind forcing */
+  | { type: 'clearForcing' }
   /** paint the surface within `radius` m of (x, y): sea temperature change (K) or land / sea */
   | { type: 'paint'; kind: 'warmer' | 'cooler' | 'land' | 'sea'; x: number; y: number; radius: number }
   /** change the environment now: add du6 (m/s) of westerly wind at 6 km (linear from the ground) and multiply
    *  the 1-8 km water vapour by humidity (capped at saturation) */
   | { type: 'environment'; du6: number; humidity: number };
+
+/** A lasting wind forcing as shown on the page. */
+export interface ForcingInfo { id: number; x: number; y: number; z: number; radius: number; depth: number; speed: number; az: number; el: number; form: 'push' | 'rotate' | 'converge'; sign: 1 | -1; until: number | null }
 
 /** What the charts need in each frame. Positions in m from the domain origin (lower-left corner). */
 export interface ChartRequest {
@@ -129,6 +141,8 @@ export type FromRegionalWorker =
       setup: import('./setup.js').RegionalSetup | null }
   /** surface changed (painting): land mask per column (1 land) */
   | { type: 'land'; land: Uint8Array | null }
+  /** the lasting wind forcings now (domain positions, m; until: model time they end, null: until cleared) */
+  | { type: 'forcings'; list: ForcingInfo[] }
   | { type: 'profile'; text: string }
   | { type: 'paused'; reason: string }
   | { type: 'log'; text: string }

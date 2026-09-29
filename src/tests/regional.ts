@@ -387,4 +387,28 @@ void DRY_AIR;
     `albedo ${vis.toFixed(2)}, PW ${pw.toFixed(1)} mm, WV ${wv.toFixed(1)} °C`);
 }
 
+// Wind interactions: a push once adds its speed at the centre; a lasting push relaxes the wind toward the target
+// (after 5 tau within 1 %); a counter-clockwise rotation blows toward +y east of the centre; w stays 0 at the ground
+{
+  const { applyWind, FORCING_TAU } = await import('../regional/forcing.js');
+  const mk = (): RegionalModel => new RegionalModel({ ...base, nx: 20, ny: 20, nz: 10, dx: 1000, dy: 1000, dz: 500, dt: 5 }, weismanKlemp, 3);
+  const m1 = mk(), c = 10000, zc = m1.zc[2]!;
+  const push = { x: c, y: c + 500, z: zc, R: 5000, H: 1500, speed: 10, dir: [1, 0, 0] as [number, number, number], form: 'push' as const, sign: 1 as const };
+  applyWind(m1, [push], 'once');
+  const u1 = m1.u[m1.idx(10, 10, 2)]!;
+  const m2 = mk();
+  for (let n = 0; n < 5 * FORCING_TAU / 5; n++) applyWind(m2, [push], 5);
+  const u2 = m2.u[m2.idx(10, 10, 2)]!;
+  const m3 = mk();
+  applyWind(m3, [{ ...push, x: c, y: c, form: 'rotate', speed: 10, dir: [0, 0, 0] }], 'once');
+  const vEast = m3.v[m3.idx(12, 10, 2)]!;
+  const m4 = mk();
+  applyWind(m4, [{ ...push, z: 0, dir: [0, 0, 1], H: 2000 }], 'once');
+  let w0 = 0; for (let j = 0; j < 20; j++) for (let i = 0; i < 20; i++) w0 = Math.max(w0, Math.abs(m4.w[m4.idx(i, j, 0)]!));
+  const wUp = m4.w[m4.idx(10, 10, 1)]!;
+  check('wind interactions: push once ~10 m/s at the centre, lasting push -> target within 1 %, CCW rotation northward east of centre, no w at the ground',
+    Math.abs(u1 - 10) < 0.2 && Math.abs(u2 - 10 * (1 - Math.exp(-5))) < 0.15 && vEast > 1 && w0 === 0 && wUp > 1,
+    `${u1.toFixed(2)}, ${u2.toFixed(2)}, v ${vEast.toFixed(2)}, w0 ${w0}, w1 ${wUp.toFixed(2)}`);
+}
+
 summary('regional');

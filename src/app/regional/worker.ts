@@ -16,7 +16,8 @@ import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { StormTracker, type TornadoEnv } from '../../regional/supercell.js';
 import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.js';
-import { type ChartData, type ChartRequest, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
+import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcing.js';
+import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
 let m: RegionalModel | null = null;
@@ -41,6 +42,27 @@ let followId: number | null = null;
 const followed = (): StormNow | null => (followId === null ? null : catalog.active.find((s) => s.id === followId) ?? null);
 /** the main storm: the followed one, else the catalogue's strongest */
 const mainStorm = (): StormNow | null => followed() ?? catalog.main();
+/** lasting wind forcings (forcing.ts): what the page shows and what the model applies */
+let forcings: { info: ForcingInfo; f: WindForcing }[] = [], forcingId = 1;
+/** Hand the lasting forcings to the models (the CPU hook reads the list; the GPU keeps a table) and to the page. */
+function syncForcings(): void {
+  gpu?.setForcings(forcings.map((x) => x.f));
+  post({ type: 'forcings', list: forcings.map((x) => x.info) });
+}
+/** Drop forcings that have ended; returns true when the list changed. */
+function expireForcings(): void {
+  const t = modelNow(), n = forcings.length;
+  forcings = forcings.filter((x) => x.info.until === null || x.info.until > t);
+  if (forcings.length !== n) syncForcings();
+}
+/** Forget every forcing (new model, refinement to another grid, restored state). */
+function clearForcings(): void { if (forcings.length) { forcings = []; syncForcings(); } }
+/** The CPU model applies the lasting forcings at the start of each step (after the physics' own pre-step work). */
+function hookForcing(model: RegionalModel): void {
+  const prev = model.preStep;
+  model.preStep = (mm): void => { prev?.(mm); if (forcings.length) applyWind(mm, forcings.map((x) => x.f), mm.c.dt); };
+}
+
 /** One storm analysis of the current CPU model state (level-0 fields; column composites for cells). */
 function analyseStorms(col: Float32Array | null): void {
   if (!m) return;
@@ -165,6 +187,7 @@ async function restoreUndo(): Promise<boolean> {
     const device = gpu.device, tp = gpu.tracerCount ? await gpu.readTracers() : null;
     gpu.destroy();
     gpu = new GpuRegional(device, m, { moist: true, physics: physCfg, ice: true });
+    gpu.setForcings(forcings.map((x) => x.f));
     gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
     gpu.setDt(dt0);
     if (tp) gpu.initTracers(tp);
@@ -176,6 +199,7 @@ async function restoreUndo(): Promise<boolean> {
 async function blowUp(): Promise<void> {
   running = false;
   if (undo && modelNow() - undo.t < 3600 && await restoreUndo()) {
+    clearForcings();
     post({ type: 'paused', reason: '數值不穩定：上一個互動太強，已自動還原到互動前並暫停 / numerical instability right after the last change: the state before it was restored and the run paused' });
     await sendFrame();
   } else post({ type: 'error', message: '數值發散 / numerical blow-up' });
@@ -232,6 +256,7 @@ async function tryGpu(device: GPUDevice): Promise<string> {
     let bad = false;
     for (let i = 3 * size; i < 4 * size; i += 13) if (!Number.isFinite(st[i]!)) { bad = true; break; }
     if (bad) reason = 'GPU 試跑結果出現非數值 / GPU trial produced non-finite values';
+    g.setForcings(forcings.map((x) => x.f));
     gpu = g;
   } catch (e) { reason = String(e); }
   for (let i = 0; i < scopes.length; i++) { const err = await device.popErrorScope(); if (err && !reason) reason = err.message; }
@@ -251,6 +276,7 @@ function build(s0: RegionalSetup, gpuOk: boolean): { dt: number; description: st
   frameVel = { ...b.frame }; if (physCfg) physCfg.frameVel = frameVel;
   tracker = b.tracker; lastTrack = 0;
   dpEnv = b.dpEnv;
+  hookForcing(m);
   return { dt: m.c.dt, description: b.description, land: b.land };
 }
 
@@ -277,6 +303,7 @@ function buildNest(g: NestPayload, lat0: number, lon0: number, size: NestSize, g
   const surface = g.ts && g.wet ? { tsk: sampleSurface(g, spec, g.ts), wet: sampleSurface(g, spec, g.wet) } : null;
   physCfg = { lh: 0.2 * spec.dx, lv: 100, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface };
   phys = new RegionalPhysics(m, physCfg);
+  hookForcing(m);
   let land: Uint8Array | null = null;
   if (g.land) { const lf = sampleSurface(g, spec, g.land); land = Uint8Array.from(lf, (x) => (x > 0.5 ? 1 : 0)); }
   const d = (x: number): string => (x * 180 / Math.PI).toFixed(1);
@@ -299,7 +326,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
         experiment = 'tc_axi'; frameVel = { u: 0, v: 0 }; setup = { ...msg.setup };
         axi = new AxiDriver(axiFromSetup(msg.setup));
-        resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null;
+        resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings();
         post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu',
           note: '軸對稱模式在 CPU 上執行（很快）；3D 畫面是把半徑–高度場繞軸旋轉 / the axisymmetric model runs on the CPU (fast); the 3-D view revolves the radius-height fields', refineTo: null, tc: true, setup });
         await sendFrame();
@@ -322,7 +349,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       } else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       const c = m!.c, cells = c.nx * c.ny * c.nz;
       if (!gpu && cells > 1.5e6) note += (note ? ' · ' : '') + `這個網格有 ${(cells / 1e6).toFixed(1)} M 格點，在 CPU 上非常慢 / ${(cells / 1e6).toFixed(1)} M cells: very slow on the CPU`;
-      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null;
+      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings();
       post({ type: 'ready', land: info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
         refineTo: refinedSetup(setup!)?.dx ?? null, tc: isTc(), setup });
       await sendFrame();
@@ -344,7 +371,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         if (reason) { note = gpuFailNote(reason); info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, false); builtGpu = false; }
       } else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
-      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null;
+      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings();
       post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land, refineTo: null, tc: false, setup: null });
       await sendFrame();
       } finally { busy = false; }
@@ -432,7 +459,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           axi = new AxiDriver({ ...AXI_DEFAULTS, ...LEGACY_TC, ...((meta as unknown as { axi?: AxiParams }).axi ?? {}) });
           axi.restore(arrays as Record<string, Float32Array>, M.time, M.steps);
           setup = M.setup ?? setupOf('tc_axi');
-          resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null;
+          resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings();
           post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu', note: `已載入存檔 / save loaded (t = ${(M.time / 3600).toFixed(2)} h)`, refineTo: null, tc: true, setup });
           await sendFrame();
           busy = false;
@@ -474,7 +501,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           else if (gpu) (gpu as GpuRegional).setDt(M.dt);
         } else if (M.builtGpu) note += ' · 此存檔是 GPU 網格，在 CPU 上會很慢 / GPU-sized grid: very slow on the CPU';
         dt0 = mm.c.dt;
-        resetOrigin(M.origin?.x ?? 0, M.origin?.y ?? 0); stormDomain = null; setupTracers(); catalog.reset(); followId = null;
+        resetOrigin(M.origin?.x ?? 0, M.origin?.y ?? 0); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings();
         const c = mm.c;
         post({ type: 'ready', experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land ?? null,
           refineTo: setup && experiment !== 'nest' ? refinedSetup(setup)?.dx ?? null : null, tc: isTc(), setup: experiment === 'nest' ? null : setup });
@@ -513,7 +540,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           if (reason) note += ' · ' + gpuFailNote(reason);
         }
         dt0 = mf.c.dt;
-        resetOrigin(originC.x + x0, originC.y + y0); stormDomain = null; setupTracers();
+        resetOrigin(originC.x + x0, originC.y + y0); stormDomain = null; setupTracers(); clearForcings();
         const c = mf.c;
         post({ type: 'ready', land: landMask() ?? info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
           refineTo: refinedSetup(setup!)?.dx ?? null, tc: isTc(), setup });
@@ -541,7 +568,8 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       } catch (e) { post({ type: 'profile', text: `效能分析失敗 / profiling failed: ${String(e)}` }); }
       busy = false; running = wasRunning;
     }
-    else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment') {
+    else if (msg.type === 'clearForcing') { clearForcings(); if (!running) await refreshFrame(); }
+    else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment' || msg.type === 'moisture' || msg.type === 'wind') {
       if (!m || !mp) { post({ type: 'error', message: '這個實驗不支援此互動（軸對稱模式請改用參數面板）/ this experiment does not support this interaction (use the panel for the axisymmetric model)' }); return; }
       while (busy) await new Promise((r) => setTimeout(r, 5));
       busy = true;
@@ -613,6 +641,7 @@ async function loop(): Promise<void> {
           await sendFrame();
           post({ type: 'paused', reason: `已到達設定時間，自動暫停 / reached the stop time (t = ${(modelNow() / 3600).toFixed(2)} h)` });
         }
+        if (forcings.length) expireForcings();
         if (tracker && m.time - lastTrack >= 600) { lastTrack = m.time; await followStorm(); }
         if (running && frameDue()) { const tf = performance.now(); await sendFrame(); if (DEBUG) console.log(`DBG frame ${(performance.now() - tf).toFixed(0)} ms`); }
       } catch (e) { running = false; post({ type: 'error', message: String(e) }); }
@@ -673,6 +702,11 @@ async function followStorm(): Promise<void> {
     if (sf && physCfg) { rollPlane(sf.tsk, a.di, a.dj); rollPlane(sf.wet, a.di, a.dj); physCfg.surface = { tsk: sf.tsk, wet: sf.wet }; }
     if (m.c.lateral === 'open') enterEnvironment(a.di, a.dj);
     if (sf) post({ type: 'land', land: landMask() });
+    if (forcings.length) {
+      const Lx = m.c.nx * m.c.dx, Ly = m.c.ny * m.c.dy;
+      for (const x of forcings) { x.f.x = ((x.f.x + a.di * m.c.dx) % Lx + Lx) % Lx; x.f.y = ((x.f.y + a.dj * m.c.dy) % Ly + Ly) % Ly; x.info.x = x.f.x; x.info.y = x.f.y; }
+      post({ type: 'forcings', list: forcings.map((x) => x.info) });
+    }
   }
   // particles keep their positions (moved with a roll of the fields)
   let tp = gpu ? (gpu.tracerCount ? await gpu.readTracers() : null) : tracers ? tracers.pos.slice() : null;
@@ -684,6 +718,7 @@ async function followStorm(): Promise<void> {
     const device = gpu.device, dtNow = gpu.dt;
     gpu.destroy();
     gpu = new GpuRegional(device, m, { moist: true, physics: physCfg, ice: true });
+    gpu.setForcings(forcings.map((x) => x.f));
     gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
     gpu.setDt(dtNow);
   }
@@ -692,7 +727,7 @@ async function followStorm(): Promise<void> {
 }
 
 /** Interaction: change the conditions (never the outcome). Returns a log line. */
-async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'paint' | 'environment' }>): Promise<string> {
+async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'paint' | 'environment' | 'moisture' | 'wind' }>): Promise<string> {
   const mm = m!, { nx, ny, nz, dx, dy } = mm.c, L = Math.min(nx * dx, ny * dy);
   if (msg.type === 'paint') {
     const sf = phys?.surface;
@@ -714,10 +749,50 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
   await syncFromGpu();
   takeUndo();
   gpuBatch = 1;
+  const top = nz * mm.c.dz;
+  const clampR = (r: number | undefined, d: number): number => Math.max(2 * dx, Math.min(0.45 * L, Number.isFinite(r) ? r! : d));
+  if (msg.type === 'wind') {
+    // a wind once (added now) or a lasting forcing; the push's vertical part is at most 15 m/s
+    const R = clampR(msg.radius, 20 * dx), H = Math.max(mm.c.dz, Math.min(top / 2, 0.5 * (Number.isFinite(msg.depth) ? msg.depth : 3000)));
+    const az = (msg.az || 0) * Math.PI / 180, el = Math.max(-90, Math.min(90, msg.el || 0)) * Math.PI / 180;
+    let speed = Math.max(0, Math.min(40, msg.speed || 0));
+    const dir: [number, number, number] = [Math.cos(el) * Math.sin(az), Math.cos(el) * Math.cos(az), Math.sin(el)];
+    if (msg.form === 'push' && Math.abs(dir[2]) * speed > 15) speed = 15 / Math.abs(dir[2]);
+    const f: WindForcing = { x: msg.x, y: msg.y, z: Math.max(0, Math.min(top, msg.z || 0)), R, H, speed, dir, form: msg.form, sign: msg.sign === -1 ? -1 : 1 };
+    const what = `${msg.form === 'push' ? '推送 / push' : msg.form === 'rotate' ? (f.sign > 0 ? '逆時針旋轉 / counter-clockwise' : '順時針旋轉 / clockwise') : (f.sign > 0 ? '輻合 / converging' : '輻散 / diverging')} ${speed.toFixed(0)} m/s`;
+    if (msg.minutes === 0) {
+      applyWind(mm, [f], 'once');
+      if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+      return `一次風 / wind once: ${what} at (${(f.x / 1000).toFixed(0)}, ${(f.y / 1000).toFixed(0)}) km, ${(f.z / 1000).toFixed(1)} km high`;
+    }
+    if (forcings.length >= MAX_FORCINGS) forcings.shift();
+    const until = msg.minutes > 0 ? modelNow() + msg.minutes * 60 : null;
+    forcings.push({ f, info: { id: forcingId++, x: f.x, y: f.y, z: f.z, radius: R, depth: 2 * H, speed, az: msg.az || 0, el: msg.el || 0, form: msg.form, sign: f.sign, until } });
+    syncForcings();
+    return `持續風 / lasting wind: ${what}${until === null ? '，直到清除 / until cleared' : `，${msg.minutes} 模式分鐘 / model minutes`}`;
+  }
+  if (msg.type === 'moisture') {
+    // multiply the vapour in the region (cos^2 envelope), capped at saturation
+    const R = clampR(msg.radius, 20 * dx), H = Math.max(mm.c.dz, Math.min(top / 2, 0.5 * (Number.isFinite(msg.depth) ? msg.depth : 3000)));
+    const fac = Math.max(0.3, Math.min(2, msg.factor || 1)), qv = mm.scalars[QV]!, open = mm.c.lateral === 'open';
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      let ex = (i + 0.5) * dx - msg.x, ey = (j + 0.5) * dy - msg.y;
+      if (!open) { ex -= Math.round(ex / (nx * dx)) * nx * dx; ey -= Math.round(ey / (ny * dy)) * ny * dy; }
+      const rh = Math.hypot(ex, ey) / R, rz = Math.abs(mm.zc[k]! - msg.z) / H;
+      if (rh >= 1 || rz >= 1) continue;
+      const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = mm.idx(i, j, k);
+      const pi = mm.pi0[k]! + mm.pp[q]!, T = mm.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
+      qv[q] = Math.max(0, Math.min(qv[q]! * (1 + (fac - 1) * e), Math.max(qv[q]!, 0.622 * es / Math.max(p - es, 1))));
+    }
+    if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+    return `${fac >= 1 ? '增濕 / moistened' : '變乾 / dried'} ×${fac} at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km, ${(msg.z / 1000).toFixed(1)} km high`;
+  }
   if (msg.type === 'perturb') {
-    // warm bubble (+3 K centred at 1.5 km) or cold pool (-6 K at the ground), horizontal radius 10 km (at least 4 cells, at most L/8).
-    // Repeated clicks add up only to +6 K / -10 K relative to the base state (they never weaken an existing anomaly).
-    const rh = Math.max(4 * dx, Math.min(10000, L / 8)), warm = msg.kind === 'warm', zc = warm ? 1500 : 0, rz = 1500, amp = warm ? 3 : -6, cap = warm ? 6 : -10;
+    // warm bubble (+3 K, centred at 1.5 km unless given) or cold pool (-6 K at the ground unless given), horizontal radius 10 km
+    // (at least 4 cells, at most L/8) unless given. Repeated clicks add up only to +6 K / -10 K relative to the base state
+    // (they never weaken an existing anomaly).
+    const warm = msg.kind === 'warm', rh = msg.radius ? clampR(msg.radius, 10000) : Math.max(4 * dx, Math.min(10000, L / 8));
+    const zc = msg.z !== undefined && Number.isFinite(msg.z) ? Math.max(0, Math.min(top, msg.z)) : warm ? 1500 : 0, rz = 1500, amp = warm ? 3 : -6, cap = warm ? 6 : -10;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const r = Math.sqrt((((i + 0.5) * dx - msg.x) / rh) ** 2 + (((j + 0.5) * dy - msg.y) / rh) ** 2 + ((mm.zc[k]! - zc) / rz) ** 2);
       if (r >= 1) continue;
@@ -753,6 +828,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const device = gpu.device, dtNow = gpu.dt, tp = gpu.tracerCount ? await gpu.readTracers() : null;
     gpu.destroy();
     gpu = new GpuRegional(device, mm, { moist: true, physics: physCfg, ice: true });
+    gpu.setForcings(forcings.map((x) => x.f));
     gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
     gpu.setDt(dtNow);
     if (tp) gpu.initTracers(tp);

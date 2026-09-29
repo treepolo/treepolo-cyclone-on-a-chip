@@ -8,8 +8,10 @@ import { Missions } from './missions.js';
 import { SetupForm } from './setupForm.js';
 import type { RegionalSetup } from './setup.js';
 import type { StormNow } from '../../regional/storms.js';
+import { Tools3D } from './tools3d.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
+const presetAxi = (s: RegionalSetup): boolean => s.preset === 'tc_axi';
 const km = (m: number): string => (m >= 1000 ? `${+(m / 1000).toFixed(2)} km` : `${+m.toFixed(0)} m`);
 
 // Opened on its own without the artifact runtime: regional.html redirects to the main page (see the
@@ -20,6 +22,7 @@ const log = (s: string): void => { const el = $('log'); el.textContent = `${s}\n
 const view = new VolumeView($<HTMLCanvasElement>('view'));
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
 const send = (m: ToRegionalWorker): void => worker.postMessage(m);
+const tools = new Tools3D(view, $('tools'), document.getElementById('fx') as unknown as SVGSVGElement, send, (s) => log(s));
 let running = false, dt = 6, aspect = 0.3;
 let land: Uint8Array | null = null;
 let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
@@ -64,6 +67,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     document.querySelectorAll<HTMLElement>('.stormOnly').forEach((el) => { el.hidden = curTc; });
     charts.setGrid({ nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dy: m.dx, dz: m.dz, experiment: m.experiment, land: m.land, tc: m.tc, sea: curSea }, refining);
     showSurface();
+    tools.setGrid({ Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, dx: m.dx, dz: m.dz, paint: m.setup ? m.setup.fluxes && !presetAxi(m.setup) : m.experiment === 'nest', interact: m.experiment !== 'tc_axi' });
     missions.reset({ e: m.experiment, tc: m.tc });
     refining = false;
     log(`就緒 / Ready: ${m.description}`);
@@ -110,6 +114,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; $('ovRun').textContent = '▶'; if (runner.running) void runner.end('done'); }
   else if (m.type === 'log') log(m.text);
   else if (m.type === 'land') { land = m.land; charts.setLand(m.land); showSurface(); }
+  else if (m.type === 'forcings') tools.setForcings(m.list);
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
 };
 // tornado events: a detection that lasts at least one model minute; logged when it starts and when it ends
@@ -245,7 +250,19 @@ if (location.hash.startsWith('#nest') || new URLSearchParams(location.search).ha
 }
 if (window.parent !== window) { const back = document.getElementById('backLink'); if (back) back.hidden = true; }
 init();
-function tick(): void { if (charts.view === '3d') view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); placeStormLabels(); requestAnimationFrame(tick); }
+function tick(): void {
+  const in3d = charts.view === '3d';
+  if (in3d) view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5);
+  placeStormLabels();
+  // tools and their overlay sit on the 3-D view (below the chart bar)
+  const v = $('view'), fx = $('fx'), tl = $('tools');
+  tl.hidden = !in3d; fx.style.display = in3d ? '' : 'none';
+  if (in3d) {
+    tl.style.top = `${v.offsetTop + 8}px`; fx.style.top = `${v.offsetTop}px`; fx.style.height = `${v.clientHeight}px`;
+    tools.drawOverlay();
+  }
+  requestAnimationFrame(tick);
+}
 requestAnimationFrame(tick);
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
 $('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; refining = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
