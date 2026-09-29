@@ -1,12 +1,9 @@
 // Messages between the regional-model UI and its worker.
 import type { MapVar, SliceVar, SectionVar, RzVar } from '../../regional/diagnostics.js';
 
-export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'tc_3' | 'nest' | 'tornado' | 'tornado_c' | 'tc_axi';
-/** tropical-cyclone experiments (radius-height charts, Hovmoller) */
+export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'tc_3' | 'nest' | 'tornado' | 'tornado_c' | 'tc_axi' | 'custom';
+/** tropical cyclones: mean rain rate in the core and the outer region over the last model hour (mm/h), outer wet fraction */
 export interface TcRain { core: number; outer: number; wet: number }
-export const isTcExperiment = (e: RegionalExperiment): boolean => e === 'tc' || e === 'tc_hr' || e === 'tc_3' || e === 'tc_axi';
-/** coarse-to-fine refinement: each coarse spin-up experiment and the finer experiment it continues as */
-export const REFINE_TO: Partial<Record<RegionalExperiment, RegionalExperiment>> = { supercell: 'supercell_hr', tc: 'tc_hr', tc_hr: 'tc_3', tornado_c: 'tornado' };
 
 /** Global-model state handed to the regional page for one-way nesting. Grid arrays are [k][lat][lon]. */
 export interface NestPayload {
@@ -26,7 +23,7 @@ export const NEST_HALF_WIDTH_KM: Record<NestSize, number> = { meso: 600, storm: 
 export type GroundField = 'rain' | 'wind' | 'theta' | 'snow' | 'none';
 
 export type ToRegionalWorker =
-  | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu'; axi?: import('./axiDriver.js').AxiParams; tornado?: import('../../regional/supercell.js').TornadoEnv }
+  | { type: 'init'; setup: import('./setup.js').RegionalSetup; backend: 'auto' | 'cpu' }
   | { type: 'initNest'; payload: NestPayload; lat0: number; lon0: number; size: NestSize; backend: 'auto' | 'cpu' }
   | { type: 'run'; running: boolean }
   | { type: 'speed'; stepsPerTick: number }
@@ -36,7 +33,7 @@ export type ToRegionalWorker =
   /** time every GPU kernel for a few steps and report */
   | { type: 'profile' }
   | { type: 'adaptive'; on: boolean }
-  /** continue the running simulation on the finer grid of REFINE_TO[experiment] */
+  /** continue the running simulation on the finer grid of its set-up (build.ts refinedSetup) */
   | { type: 'refine' }
   | { type: 'save' }
   /** target speed in model seconds per wall second (0 = full speed) */
@@ -119,7 +116,15 @@ export interface RegionalFrame {
 
 export type FromRegionalWorker =
   | RegionalFrame
-  | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null; refineTo: RegionalExperiment | null }
+  | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null;
+      /** grid spacing (m) the run continues on after 'refine', or null */
+      refineTo: number | null;
+      /** tropical-cyclone diagnostics apply (a vortex run) */
+      tc: boolean;
+      /** the set-up of this run (null: nest in the global model) */
+      setup: import('./setup.js').RegionalSetup | null }
+  /** surface changed (painting): land mask per column (1 land) */
+  | { type: 'land'; land: Uint8Array | null }
   | { type: 'profile'; text: string }
   | { type: 'paused'; reason: string }
   | { type: 'log'; text: string }

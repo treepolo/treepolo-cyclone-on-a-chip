@@ -10,7 +10,7 @@
 
 import { DRY_AIR } from '../core/constants.js';
 import { RegionalModel } from './core.js';
-import { QV } from './kessler.js';
+import { QV, QR } from './kessler.js';
 import { pcg, rnd } from './tracers.js';
 
 export interface RegionalPhysicsConfig {
@@ -38,6 +38,22 @@ export interface RegionalPhysicsConfig {
    *  theta below BL_NOISE_DEPTH changes by blNoise * (2 r - 1), r uniform in [0, 1). They stand for the turbulent thermals
    *  a 3-15 km grid cannot resolve, which start convection wherever the air is unstable (periodic domains only). */
   blNoise?: number;
+  /** surface gustiness: the bulk fluxes use sqrt(U^2 + (1.2 w*)^2 + Ug^2), with the free-convection velocity w* from the
+   *  surface buoyancy flux (Beljaars 1995, boundary layer 1 km deep) and Ug from the near-surface rain rate (convective
+   *  downdraft gusts, Redelsperger et al. 2000), never below vmin: calm air over a warm sea still evaporates */
+  gust?: boolean;
+}
+
+/** Effective wind speed of the bulk fluxes (m/s): mean wind `spd`, gustiness from the surface buoyancy flux (surface minus
+ *  air potential temperature dth K, specific-humidity difference dq, air theta th, exchange coefficient ck) and the rain
+ *  rate from the lowest-level rain water qr (kg/kg) at density rho. The GPU flux kernel uses the same formula. */
+export function gustSpeed(spd: number, vmin: number, ck: number, dth: number, dq: number, th: number, qr: number, rho: number): number {
+  const u0 = Math.max(spd, vmin), b = ck * u0 * (dth + 0.61 * th * dq);
+  const ws = b > 0 ? Math.cbrt(9.80665 / th * b * 1000) : 0;
+  // rain rate (cm/day) from Kessler-Wilhelmson fall speed, Redelsperger et al. (2000) gustiness, capped at its 7 cm/day maximum
+  const rq = Math.max(0, rho * qr), rcd = rq > 0 ? Math.min(7, rq * 36.34 * Math.pow(1e-3 * rq, 0.1364) * 3600 * 2.4) : 0;
+  const ug = Math.log(1 + 6.69 * rcd - 0.476 * rcd * rcd);
+  return Math.max(vmin, Math.sqrt(spd * spd + 1.44 * ws * ws + ug * ug));
 }
 
 export const BL_NOISE_PERIOD = 600, BL_NOISE_DEPTH = 1000;
@@ -182,7 +198,9 @@ export class RegionalPhysics {
         const thS = tsk / sf.pis;
         // ground-relative wind (the model frame may translate with a storm at frameVel)
         const ua = 0.5 * (u[q]! + u[q + 1]!) + (c.frameVel?.u ?? 0), va = 0.5 * (v[q]! + v[q + sx]!) + (c.frameVel?.v ?? 0);
-        const spd = Math.max(Math.hypot(ua, va), c.vmin ?? 1);
+        const spd = c.gust
+          ? gustSpeed(Math.hypot(ua, va), c.vmin ?? 1, c.ck, thS - th[q]!, qv ? (qsS - qv[q]!) * sf.wet[c2]! : 0, th[q]!, m.scalars[QR]?.[q] ?? 0, rho1)
+          : Math.max(Math.hypot(ua, va), c.vmin ?? 1);
         // drag coefficient: 1e-3 (1 + 0.07 U) capped at 2.4e-3 (Donelan-type saturation)
         const cd = dragCoefficient(c, 0.5 * dz, spd);
         const taux = cd * spd * ua, tauy = cd * spd * va;

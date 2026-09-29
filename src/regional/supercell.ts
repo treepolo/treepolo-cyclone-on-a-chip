@@ -84,6 +84,9 @@ export function tornadoExperiment(dx: number, L: number, nz: number, dz: number,
  */
 export class StormTracker {
   private last: { x: number; y: number; t: number } | null = null;
+  /** 'updraft': the main updraft at 4 km (convective storms); 'vortex': the surface-pressure minimum of a vortex that
+   *  is at least 1 hPa deeper than the domain mean (tropical cyclones), searched within 150 km of the last centre */
+  constructor(readonly mode: 'updraft' | 'vortex' = 'updraft') {}
   /** last located storm position (m from the domain origin), or null before the storm is found */
   get position(): { x: number; y: number } | null { return this.last ? { x: this.last.x, y: this.last.y } : null; }
 
@@ -98,6 +101,19 @@ export class StormTracker {
       return [ddx, ddy];
     };
     let wmax = 0, im = 0, jm = 0;
+    if (this.mode === 'vortex') {
+      let mean = 0, pmin = Infinity;
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const p = m.pp[m.idx(i, j, 0)]!; mean += p;
+        if (this.last) { const [a, b] = dist(this.last.x, this.last.y, (i + 0.5) * dx, (j + 0.5) * dy); if (Math.hypot(a, b) > 150000) continue; }
+        if (p < pmin) { pmin = p; im = i; jm = j; }
+      }
+      mean /= nx * ny;
+      // pi' deficit of 1 hPa: dp = p cp / (Rd pi) dpi ~ 3.5e3 dpi
+      if (!((mean - pmin) * 3.5e5 / 100 >= 1)) return null;
+      const x = (im + 0.5) * dx, y = (jm + 0.5) * dy, t = m.time;
+      return this.move(x, y, t, dist, Lx, Ly, periodic, dx, dy, 3 * 3600);
+    }
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       if (this.last) { const [a, b] = dist(this.last.x, this.last.y, (i + 0.5) * dx, (j + 0.5) * dy); if (Math.hypot(a, b) > 8000) continue; }
       const w = m.w[m.idx(i, j, k4)]!; if (w > wmax) { wmax = w; im = i; jm = j; }
@@ -113,9 +129,14 @@ export class StormTracker {
       sw += w; sx += w * ddx; sy += w * ddy;
     }
     const x = (im + 0.5) * dx + sx / sw, y = (jm + 0.5) * dy + sy / sw, t = m.time;
+    return this.move(x, y, t, dist, Lx, Ly, periodic, dx, dy, 1200);
+  }
+
+  /** Frame change toward the storm's motion plus a pull toward the centre (time scale tau), and whole-cell rolls. */
+  private move(x: number, y: number, t: number, dist: (x0: number, y0: number, x1: number, y1: number) => [number, number], Lx: number, Ly: number, periodic: boolean, dx: number, dy: number, tau: number): { du: number; dv: number; di: number; dj: number; x: number; y: number } {
     let du = 0, dv = 0;
     if (this.last && t > this.last.t) {
-      const [ddx, ddy] = dist(this.last.x, this.last.y, x, y), tau = 1200;
+      const [ddx, ddy] = dist(this.last.x, this.last.y, x, y);
       du = 0.5 * ddx / (t - this.last.t) + (x - Lx / 2) / tau;
       dv = 0.5 * ddy / (t - this.last.t) + (y - Ly / 2) / tau;
     }

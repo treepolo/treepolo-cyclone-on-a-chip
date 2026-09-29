@@ -119,7 +119,7 @@ export class GpuRegional {
     const consts = `
 const NX: u32 = ${nx}u; const NY: u32 = ${ny}u; const NZ: u32 = ${nz}u; const HH: u32 = ${H}u;
 const SX: u32 = ${m.sx}u; const SY: u32 = ${m.sy}u; const PL: u32 = ${m.plane}u; const SIZE: u32 = ${size}u; const L: u32 = ${L}u;
-const DX: f32 = ${dx}; const DY: f32 = ${dy}; const DZ: f32 = ${dz}; const FCOR: f32 = ${f};
+const DX: f32 = ${dx}; const DY: f32 = ${dy}; const DZ: f32 = ${dz}; const FCOR: f32 = ${f}; const GEOB: f32 = ${m.c.geostrophic ? 1 : 0};
 const CP: f32 = ${cp}; const RD: f32 = ${rd}; const G: f32 = 9.80665; const XLV: f32 = 2.5e6;
 const BETA: f32 = ${beta}; const DIVD: f32 = ${divDamp};
 const MOIST: bool = ${opts.moist}; const PHYS: bool = ${!!ph}; const NQ: u32 = ${this.nq}u; const NFLD: u32 = ${NF}u;
@@ -127,7 +127,7 @@ const OPEN: bool = ${open}; const NEST: bool = ${!!bnd}; const HASPP: bool = ${!
 const NRELAX: u32 = ${m.c.relaxCells ?? 5}u; const RTAU: f32 = ${m.c.relaxTau ?? 300};
 const LH2: f32 = ${ph ? ph.lh * ph.lh : 0}; const LV2: f32 = ${ph ? ph.lv * ph.lv : 0};
 const Z0: f32 = ${ph?.z0 ?? 0}; const FRU: f32 = ${ph?.frameVel?.u ?? 0}; const FRV: f32 = ${ph?.frameVel?.v ?? 0}; const PIS: f32 = ${sfc ? sfc.pis : 1}; const PSFC: f32 = ${sfc ? sfc.psfc : 1e5}; const CK: f32 = ${ph ? ph.ck : 0}; const RADTAU: f32 = ${ph ? ph.radTau : 0}; const RADMAX: f32 = ${ph ? ph.radMax : 0};
-const VMIN: f32 = ${ph?.vmin ?? 1}; const RADC: f32 = ${ph?.radConst ?? 0};
+const VMIN: f32 = ${ph?.vmin ?? 1}; const RADC: f32 = ${ph?.radConst ?? 0}; const GUST: bool = ${!!ph?.gust}; const RHO1: f32 = ${m.rho0[0]};
 struct P { dts: f32, dtStage: f32, dtBig: f32, pad: f32 };
 fn ix(i: u32, j: u32, k: u32) -> u32 { return k * PL + (j + HH) * SX + (i + HH); }
 fn f5(a0: f32, a1: f32, a2: f32, a3: f32, a4: f32, a5: f32, vel: f32) -> f32 {
@@ -872,7 +872,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (k < NZ - 1u) { hc1 = wb * zfaceU(q + PL, k + 1u, wb, 0u); }
       let dv = (ub - ua) / DX + (vb - va) / DY + (wb - wa) / (r0 * DZ);
       var fu = -((fc1 - fc0) / DX + (gc1 - gc0) / DY + (hc1 - hc0) / (r0 * DZ)) + U(q) * dv;
-      fu += FCOR * 0.25 * (V(q) + V(q - 1u) + V(q + SX) + V(q - 1u + SX));
+      fu += FCOR * (0.25 * (V(q) + V(q - 1u) + V(q + SX) + V(q - 1u + SX)) - GEOB * bvb(k));
       fu -= brc(k) * (U(q) - bub(k));
       F[q] = fu;
     }
@@ -891,7 +891,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (k < NZ - 1u) { hc1 = wb * zfaceU(q + PL, k + 1u, wb, SIZE); }
       let dv = (ub - ua) / DX + (vb - va) / DY + (wb - wa) / (r0 * DZ);
       var fv = -((fc1 - fc0) / DX + (gc1 - gc0) / DY + (hc1 - hc0) / (r0 * DZ)) + V(q) * dv;
-      fv -= FCOR * 0.25 * (U(q) + U(q + 1u) + U(q - SX) + U(q + 1u - SX));
+      fv -= FCOR * (0.25 * (U(q) + U(q + 1u) + U(q - SX) + U(q + 1u - SX)) - GEOB * bub(k));
       fv -= brc(k) * (V(q) - bvb(k));
       F[SIZE + q] = fv;
     }
@@ -1122,6 +1122,23 @@ const surfaceWgsl = (logDrag: boolean): string => /* wgsl */`
 fn cdrag(spd: f32) -> f32 {
   ${logDrag ? 'let l = 0.4 / log(0.5 * DZ / Z0); return l * l;' : 'return min(2.4e-3, 1.0e-3 * (1.0 + 0.07 * spd));'}
 }
+// effective wind of the bulk fluxes of column c (lowest-level cell qq): gustSpeed() in src/regional/physics.ts
+fn effspd(qq: u32, c: u32, ua: f32, va: f32) -> f32 {
+  let s = sqrt(ua * ua + va * va);
+  if (!GUST) { return max(s, VMIN); }
+  let tsk = SF[c]; let th = S[3u * SIZE + qq];
+  let es = 611.2 * exp(17.67 * (tsk - 273.15) / (tsk - 29.65));
+  var dq = 0.0; var qr = 0.0;
+  if (MOIST) { dq = (0.622 * es / (PSFC - 0.378 * es) - S[5u * SIZE + qq]) * SF[NX * NY + c]; qr = max(S[7u * SIZE + qq], 0.0); }
+  let b = CK * max(s, VMIN) * (tsk / PIS - th + 0.61 * th * dq);
+  var ws = 0.0;
+  if (b > 0.0) { ws = pow(9.80665 / th * b * 1000.0, 1.0 / 3.0); }
+  let rq = RHO1 * qr;
+  var rcd = 0.0;
+  if (rq > 0.0) { rcd = min(7.0, rq * 36.34 * pow(1e-3 * rq, 0.1364) * 3600.0 * 2.4); }
+  let ug = log(1.0 + 6.69 * rcd - 0.476 * rcd * rcd);
+  return max(VMIN, sqrt(s * s + 1.44 * ws * ws + ug * ug));
+}
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
@@ -1129,16 +1146,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let j = t / NX; let i = t % NX;
   let q = ix(i, j, 0u);
   let ua = 0.5 * (S[q] + S[q + 1u]) + FRU; let va = 0.5 * (S[SIZE + q] + S[SIZE + q + SX]) + FRV;
-  let spd = max(sqrt(ua * ua + va * va), VMIN);
+  let spd = effspd(q, t, ua, va);
   let cd = cdrag(spd);
   let taux = cd * spd * ua; let tauy = cd * spd * va;
   // each u/v face is shared by two columns: apply half of each column's stress to its two faces
   // (atomic-free: every thread only writes its own west/south face with its own and neighbour's share)
   let qw = ix((i + NX - 1u) % NX, j, 0u); let qs = ix(i, (j + NY - 1u) % NY, 0u);
   let uw = 0.5 * (S[qw] + S[qw + 1u]) + FRU; let vw = 0.5 * (S[SIZE + qw] + S[SIZE + qw + SX]) + FRV;
-  let spw = max(sqrt(uw * uw + vw * vw), VMIN); let cdw = cdrag(spw);
+  let spw = effspd(qw, j * NX + (i + NX - 1u) % NX, uw, vw); let cdw = cdrag(spw);
   let us = 0.5 * (S[qs] + S[qs + 1u]) + FRU; let vs = 0.5 * (S[SIZE + qs] + S[SIZE + qs + SX]) + FRV;
-  let sps = max(sqrt(us * us + vs * vs), VMIN); let cds = cdrag(sps);
+  let sps = effspd(qs, ((j + NY - 1u) % NY) * NX + i, us, vs); let cds = cdrag(sps);
   var shw = cdw * spw * uw; var shs = cds * sps * vs;
   if (OPEN && i == 0u) { shw = 0.0; }
   if (OPEN && j == 0u) { shs = 0.0; }

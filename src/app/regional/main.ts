@@ -5,13 +5,11 @@ import { mountSavesPanel, storeSave, type SaveMeta } from '../saves.js';
 import { UnattendedRun } from './runner.js';
 import { RegionalCharts } from './charts.js';
 import { Missions } from './missions.js';
-import type { AxiParams } from './axiDriver.js';
-import { quarterCircleWind, bunkersRightMover, type TornadoEnv } from '../../regional/supercell.js';
-import { weismanKlempQ } from '../../regional/kessler.js';
-import { parcelAscent } from '../../regional/diagnostics.js';
-import { isTcExperiment, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
+import { SetupForm } from './setupForm.js';
+import type { RegionalSetup } from './setup.js';
+import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
-const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tc_3: '3 km', tornado: '250 m' };
+const km = (m: number): string => (m >= 1000 ? `${+(m / 1000).toFixed(2)} km` : `${+m.toFixed(0)} m`);
 
 // Opened on its own without the artifact runtime: regional.html redirects to the main page (see the
 // inline script there); stop here instead of starting a model that is about to be unloaded.
@@ -26,7 +24,7 @@ let land: Uint8Array | null = null;
 let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
 // charts: the main view is either the 3-D volume or one of the 2-D charts
 const missions = new Missions($('missions'), (s) => log(s));
-let curExp: RegionalExperiment = 'supercell';
+let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
 let lastVol: { nx: number; ny: number; nz: number; cloud: Uint8Array; rain: Uint8Array; ground: Uint8Array } | null = null, refining = false;
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
   request: (req) => send({ type: 'charts', req }),
@@ -56,28 +54,33 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('desc').textContent = m.description;
     const rb = $<HTMLButtonElement>('refine');
     rb.disabled = !m.refineTo;
-    rb.textContent = m.refineTo ? `細化到 ${REFINE_LABEL[m.refineTo] ?? ''} / Refine to ${REFINE_LABEL[m.refineTo] ?? ''}` : '細化 / Refine';
-    if ((m.experiment as string) !== 'nest') $<HTMLSelectElement>('exp').value = m.experiment;
-    tcPanel(m.experiment);
-    charts.setGrid({ nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dy: m.dx, dz: m.dz, experiment: m.experiment, land: m.land }, refining);
-    curExp = m.experiment; missions.reset(m.experiment);
+    rb.textContent = m.refineTo ? `細化到 ${km(m.refineTo)} / Refine to ${km(m.refineTo)}` : '細化 / Refine';
+    if (m.setup) form.set(m.setup);
+    curExp = m.experiment; curTc = m.tc;
+    // a nest has its land mask from the global model (sea elsewhere); a set-up says which surface it has
+    curSea = m.setup ? m.setup.surface === 'sea' : m.experiment === 'nest';
+    document.querySelectorAll<HTMLElement>('.tcOnly').forEach((el) => { el.hidden = !curTc; });
+    document.querySelectorAll<HTMLElement>('.stormOnly').forEach((el) => { el.hidden = curTc; });
+    charts.setGrid({ nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dy: m.dx, dz: m.dz, experiment: m.experiment, land: m.land, tc: m.tc, sea: curSea }, refining);
+    showSurface();
+    missions.reset({ e: m.experiment, tc: m.tc });
     refining = false;
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
     runner.sample(m);
     charts.onFrame(m);
-    missions.check(m, curExp);
+    missions.check(m, { e: curExp, tc: curTc });
     const in3d = charts.view === '3d';
     if (in3d) { view.setVolume(m.nx, m.ny, m.nz, m.cloud, m.rain, aspect); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     const [lo, hi] = m.groundRange, rgba = new Uint8Array(m.nx * m.ny * 4);
     // plain surface: sea (tropical cyclones, sea points of a nest) or land (convective storms, land points)
-    const sea = isTcExperiment(curExp), bare = (i: number): [number, number, number] => ((land ? !land[i] : sea) ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]);
+    const bare = (i: number): [number, number, number] => ((land ? !land[i] : curSea) ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]);
     for (let i = 0; i < m.ground.length; i++) {
       const v = m.ground[i]!;
       let c: [number, number, number];
       if (m.groundField === 'theta') c = diverging(v / hi);
       else if (m.groundField === 'none') c = bare(i);
-      else if (m.groundField === 'rain' || m.groundField === 'snow') { const t = Math.sqrt(Math.max(0, v) / hi); c = t < 0.02 ? bare(i) : sequential(0.15 + 0.85 * t); }
+      else if (m.groundField === 'rain' || m.groundField === 'snow') { const t = hi > 0 ? Math.sqrt(Math.max(0, v) / hi) : 0; c = t < 0.02 ? bare(i) : sequential(0.15 + 0.85 * t); }
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
@@ -99,11 +102,12 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('zeta').textContent = `${s.zetaMax.toFixed(3)} s⁻¹ · ${s.vGround.toFixed(1)} m/s`;
     $('tcrain').textContent = !s.tcRain ? '—' : `${s.tcRain.core.toFixed(1)} · ${s.tcRain.outer.toFixed(2)} mm/h（外圍 >1 mm/h ${(100 * s.tcRain.wet).toFixed(1)}%）`;
     tornadoWatch(m.time, s.tornado, m.dx);
-    $('legend').textContent = m.groundField === 'none' ? '' : `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
+    $('legend').textContent = m.groundField === 'none' ? '深藍 = 海、深綠 = 陸地 / dark blue = sea, dark green = land' : `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); if (runner.running) void runner.abort(`error: ${m.message}`); }
   else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
   else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; $('ovRun').textContent = '▶'; if (runner.running) void runner.end('done'); }
   else if (m.type === 'log') log(m.text);
+  else if (m.type === 'land') { land = m.land; charts.setLand(m.land); showSurface(); }
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
 };
 // tornado events: a detection that lasts at least one model minute; logged when it starts and when it ends
@@ -134,52 +138,37 @@ document.querySelectorAll<HTMLButtonElement>('#flyPad button').forEach((b) => {
   const k = b.dataset.k!, on = (e: PointerEvent): void => { e.preventDefault(); b.setPointerCapture(e.pointerId); view.setKey(k, true); }, off = (): void => view.setKey(k, false);
   b.addEventListener('pointerdown', on); b.addEventListener('pointerup', off); b.addEventListener('pointercancel', off); b.addEventListener('lostpointercapture', off);
 });
-const init = (): void => {
+/** Sea / land shown in the diagnostics: the set-up's surface and the painted share. */
+function showSurface(): void {
+  const n = land ? land.reduce((a, x) => a + x, 0) : 0, frac = land ? n / land.length : curSea ? 0 : 1;
+  $('surface').textContent = frac <= 0 ? '海洋 / sea' : frac >= 1 ? '陸地 / land' : `海洋 ${(100 * (1 - frac)).toFixed(0)}%、陸地 ${(100 * frac).toFixed(0)}% / sea and land`;
+}
+const form = new SetupForm($<HTMLSelectElement>('preset'), { grid: $('setupGrid'), env: $('setupEnv'), init: $('setupInit') }, $('setupInfo'), $<HTMLButtonElement>('apply'), $<HTMLButtonElement>('resetPreset'));
+const backend = (): 'auto' | 'cpu' => $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu';
+function start(s: RegionalSetup): void {
   running = false; sync();
-  const exp = $<HTMLSelectElement>('exp').value as RegionalExperiment, backend = $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu';
-  if (exp === 'nest') {
-    if (!nest) { log('等待全球模式傳送資料… / Waiting for the global model state…'); return; }
-    log('建立巢狀區域模式中 / Building the nested regional model…');
-    send({ type: 'initNest', payload: nest.payload, lat0: nest.lat0, lon0: nest.lon0, size: nest.size, backend });
-  } else if (exp === 'tc_axi' || exp === 'tc' || exp === 'tc_hr' || exp === 'tc_3') send({ type: 'init', experiment: exp, backend, axi: axiParams() });
-  else if (exp === 'tornado' || exp === 'tornado_c') send({ type: 'init', experiment: exp, backend, tornado: tornadoParams() });
-  else send({ type: 'init', experiment: exp, backend });
-};
-/** Parameters of the axisymmetric experiment from the panel. */
-function axiParams(): AxiParams {
-  const num = (id: string, d: number): number => { const v = Number($<HTMLInputElement>(id).value); return Number.isFinite(v) ? v : d; };
-  const lat = Math.max(1, Math.min(60, Math.abs(num('axLat', 20))));
-  return { sst: num('axSst', 28) + 273.15, dr: num('axDr', 2000), lh: Math.max(0, num('axLh', 1000)), lv: Math.max(0, num('axLv', 100)), ck: Math.max(0, num('axCk', 1.2)) * 1e-3,
-    vmin: Math.max(0, num('axVmin', 1)), vmax0: Math.max(1, num('axV0', 15)), f: 2 * 7.292e-5 * Math.sin(lat * Math.PI / 180),
-    radMax: Math.max(0, num('axRad', 2)), radConst: $<HTMLSelectElement>('axRadMode').value === 'const' ? Math.max(0, num('axRad', 1.5)) : 0, rhTop: Math.max(0.05, Math.min(1, num('axRh', 40) / 100)),
-    snd: $<HTMLSelectElement>('axSnd').value === 're87' ? 're87' : 'unstable', blNoise: $<HTMLSelectElement>('axSnd').value === 're87' ? 0 : 0.1 };
+  log(`建立模式中 / Building the model…`);
+  send({ type: 'init', setup: s, backend: backend() });
 }
-/** Tornado environment from the panel, and its 0-1 / 0-3 km storm-relative helicity, shear and CAPE. */
-function tornadoParams(): TornadoEnv {
-  const num = (id: string, d: number): number => { const v = Number($<HTMLInputElement>(id).value); return Number.isFinite(v) ? v : d; };
-  return { R: Math.max(0, num('toR', 10)), depth: Math.max(250, Math.min(5500, 1000 * num('toDepth', 2))), U6: num('toU6', 30), qvMax: Math.max(0.008, Math.min(0.02, num('toQ', 14) / 1000)) };
+function startNest(): void {
+  running = false; sync();
+  if (!nest) { log('等待全球模式傳送資料… / Waiting for the global model state…'); return; }
+  log('建立巢狀區域模式中 / Building the nested regional model…');
+  send({ type: 'initNest', payload: nest.payload, lat0: nest.lat0, lon0: nest.lon0, size: nest.size, backend: backend() });
 }
-function tornadoInfo(): void {
-  const e = tornadoParams(), h = { R: e.R, U6: e.U6, depth: e.depth }, rm = bunkersRightMover((z) => quarterCircleWind(z, h));
-  const srh = (top: number): number => { let s = 0; const n = 200; for (let i = 0; i < n; i++) { const a = quarterCircleWind(i * top / n, h), b = quarterCircleWind((i + 1) * top / n, h); s += (b.u - rm.u) * (a.v - rm.v) - (a.u - rm.u) * (b.v - rm.v); } return s; };
-  const snd = weismanKlempQ(e.qvMax), nz = 80, dz = 250, T = new Float64Array(nz), p = new Float64Array(nz), q = new Float64Array(nz);
-  // WK82 is tabulated as theta and qv: integrate the Exner function hydrostatically from 1000 hPa
-  let pi = 1;
-  for (let k = 0; k < nz; k++) { const z = (k + 0.5) * dz, s = snd(z); if (k > 0) { const sb = snd(z - dz); pi -= 9.80665 / (1004.5 * 0.5 * (s.theta * (1 + 0.61 * s.qv) + sb.theta * (1 + 0.61 * sb.qv))) * dz; } else pi -= 9.80665 / (1004.5 * s.theta * (1 + 0.61 * s.qv)) * 0.5 * dz; T[k] = s.theta * pi; p[k] = 1e5 * Math.pow(pi, 1004.5 / 287.05); q[k] = s.qv; }
-  const pc = parcelAscent(T, p, q, dz);
-  $('toInfo').textContent = `SRH 0–1 km ${srh(1000).toFixed(0)}、0–3 km ${srh(3000).toFixed(0)} m²/s² · CAPE ${pc.cape.toFixed(0)} J/kg · LCL ${pc.lcl >= 0 ? ((pc.lcl + 0.5) * dz / 1000).toFixed(1) : '—'} km`;
-}
-for (const id of ['toR', 'toDepth', 'toU6', 'toQ']) $(id).oninput = tornadoInfo;
-tornadoInfo();
+form.onApply = start;
+form.onNest = startNest;
+const init = (): void => { if (form.isNest) startNest(); else start(form.value()); };
 $('envApply').onclick = (): void => {
   const du6 = Number($<HTMLInputElement>('envDu').value), humidity = Number($<HTMLInputElement>('envRh').value);
   if (!Number.isFinite(du6) || !(humidity > 0)) return;
   send({ type: 'environment', du6: Math.max(-30, Math.min(30, du6)), humidity: Math.max(0.3, Math.min(2, humidity)) });
 };
-$('toApply').onclick = (): void => { if (/^tornado/.test($<HTMLSelectElement>('exp').value)) init(); };
-$('axApply').onclick = (): void => { if (/^tc/.test($<HTMLSelectElement>('exp').value)) init(); };
-const tcPanel = (e: string): void => { $('tornadoPanel').hidden = !/^tornado/.test(e); $('axiPanel').hidden = !/^tc/.test(e); document.querySelectorAll<HTMLElement>('.axOnly').forEach((el) => { el.hidden = e !== 'tc_axi'; }); };
-$('exp').onchange = (): void => { tcPanel($<HTMLSelectElement>('exp').value); init(); };
+// remember which sections are open (per-viewer convenience)
+document.querySelectorAll<HTMLDetailsElement>('details[id]').forEach((d) => {
+  try { const v = localStorage.getItem(`regional-${d.id}`); if (v !== null) d.open = v === '1'; } catch { /* storage unavailable */ }
+  d.addEventListener('toggle', () => { try { localStorage.setItem(`regional-${d.id}`, d.open ? '1' : '0'); } catch { /* storage unavailable */ } });
+});
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
@@ -188,14 +177,12 @@ $('adaptive').onchange = (): void => send({ type: 'adaptive', on: $<HTMLInputEle
 // parent/opener posts the global state and the chosen point.
 const host = window.parent !== window ? window.parent : (window.opener as Window | null);
 if (location.hash.startsWith('#nest') || new URLSearchParams(location.search).has('nest')) {
-  const sel = $<HTMLSelectElement>('exp'), opt = document.createElement('option');
-  opt.value = 'nest'; opt.textContent = '全球模式巢狀區域 / Nest in the global model';
-  sel.prepend(opt); sel.value = 'nest';
+  form.addNest(true);
   window.addEventListener('message', (ev: MessageEvent) => {
     if (!host || ev.source !== host || !ev.data || ev.data.type !== 'nest') return;
     nest = { payload: ev.data.payload as NestPayload, lat0: ev.data.lat0 as number, lon0: ev.data.lon0 as number, size: (ev.data.size as NestSize) ?? 'meso' };
-    sel.value = 'nest';
-    init();
+    form.addNest(true);
+    startNest();
   });
   if (host) host.postMessage({ type: 'nest-ready' }, '*');
   else log('找不到全球模式視窗；請從全球模式頁面點選地點後開啟 / No global-model window found; open this page from the global model after picking a point');
@@ -214,7 +201,7 @@ const savesPanel = mountSavesPanel($('saves'), 'regional',
     pendingSave = resolve; send({ type: 'save' });
     setTimeout(() => { if (pendingSave === resolve) { pendingSave = null; reject(new Error('逾時 / timed out')); } }, 120000);
   }),
-  (_meta, data) => { running = false; sync(); send({ type: 'load', buffer: data.slice(0), backend: $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu' }); },
+  (_meta, data) => { running = false; sync(); send({ type: 'load', buffer: data.slice(0), backend: backend() }); },
   log);
 // ---------------- pacing
 $('pace').onchange = (): void => send({ type: 'pace', target: Number($<HTMLSelectElement>('pace').value) });
@@ -237,7 +224,7 @@ const captureSave = (): Promise<{ meta: SaveMeta; data: ArrayBuffer }> => new Pr
   setTimeout(() => { if (pendingSave === resolve) { pendingSave = null; reject(new Error('逾時 / timed out')); } }, 120000);
 });
 const runner = new UnattendedRun({
-  experiment: () => $<HTMLSelectElement>('exp').value,
+  experiment: () => `${curExp}: ${$('desc').textContent ?? ''}`,
   grid: () => $('grid').textContent ?? '',
   start: (cfg) => {
     send({ type: 'pace', target: 0 }); $<HTMLSelectElement>('pace').value = '0';

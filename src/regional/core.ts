@@ -34,6 +34,9 @@ export interface RegionalConfig {
   relaxTau?: number;                        // relaxation time scale at the outer boundary (s)
   /** positive-definite flux limiter for the moisture scalars in the final RK3 stage (default on) */
   positiveDefinite?: boolean;
+  /** the base-state wind (ub, vb) is geostrophic: the Coriolis force acts on the departure from it, as if a large-scale
+   *  pressure gradient balanced it (a background trade wind on an f-plane); default: on the full wind */
+  geostrophic?: boolean;
 }
 
 /** Boundary targets for open lateral boundaries (same layout as the prognostic arrays). */
@@ -353,8 +356,9 @@ export class RegionalModel {
       if (f !== 0) {
         const vAtU = 0.25 * (v[q]! + v[q - 1]! + v[q + sx]! + v[q - 1 + sx]!);
         const uAtV = 0.25 * (u[q]! + u[q + 1]! + u[q - sx]! + u[q + 1 - sx]!);
-        this.fu[q] = this.fu[q]! + f * vAtU;
-        this.fv[q] = this.fv[q]! - f * uAtV;
+        const geo = this.c.geostrophic ? 1 : 0;
+        this.fu[q] = this.fu[q]! + f * (vAtU - geo * this.vb[k]!);
+        this.fv[q] = this.fv[q]! - f * (uAtV - geo * this.ub[k]!);
       }
     }
     if (this.buoyancy) this.buoyancy(this, buoy);

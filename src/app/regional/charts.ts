@@ -5,7 +5,7 @@
 
 import { parcelAscent, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { CameraMode } from './volume.js';
-import { isTcExperiment, type ChartRequest, type RegionalFrame, type RegionalExperiment, type TcRain } from './protocol.js';
+import { type ChartRequest, type RegionalFrame, type RegionalExperiment, type TcRain } from './protocol.js';
 import { INK, SERIES, FONT, FONT_SMALL, type Rect, type Scale, type ScaleKind, colorOf, niceCeil, ticks, fmt, drawField, drawColorbar, drawAxes, drawContours, drawArrow, drawBarb, haloText, tooltip } from './chartDraw.js';
 
 export type ViewKind = '3d' | 'slice' | 'composite' | 'section' | 'rz' | 'sounding' | 'series' | 'hovmoller';
@@ -80,7 +80,11 @@ function scaleFor(name: string, data: ArrayLike<number>): Scale {
 }
 
 interface Sample { t: number; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null; ew: { r: number; v: number }[] | null; tcRain: TcRain | null }
-interface GridInfo { nx: number; ny: number; nz: number; dx: number; dy: number; dz: number; experiment: RegionalExperiment; land: Uint8Array | null }
+interface GridInfo {
+  nx: number; ny: number; nz: number; dx: number; dy: number; dz: number; experiment: RegionalExperiment; land: Uint8Array | null;
+  /** tropical-cyclone-like run (pressure deficit, eyewall and rainband diagnostics); surface all sea where not land */
+  tc: boolean; sea: boolean;
+}
 type MapFrame = { r: Rect; Lx: number; Ly: number };
 /** what a click or drag on a map does */
 export type MapTool = 'inspect' | 'warm' | 'cold' | 'warmer' | 'cooler' | 'land' | 'sea';
@@ -163,6 +167,9 @@ export class RegionalCharts {
     this.buildBar();
     this.sendRequest();
   }
+
+  /** The land mask changed (painting, or the domain moved over painted ground). */
+  setLand(land: Uint8Array | null): void { if (this.grid) { this.grid.land = land; if (this.view !== '3d') this.redraw(); } }
 
   private levelZ(): number { return this.grid ? (this.level + 0.5) * this.grid.dz : 1500; }
   private nearestLevel(z: number): number { const g = this.grid!; return Math.max(0, Math.min(g.nz - 1, Math.round(z / g.dz - 0.5))); }
@@ -428,7 +435,7 @@ export class RegionalCharts {
 
   private underlay(): (i: number, j: number) => [number, number, number] {
     const g = this.grid!, land = g.land, sea: [number, number, number] = [15, 28, 43], ground: [number, number, number] = [26, 34, 26];
-    const allSea = isTcExperiment(g.experiment);
+    const allSea = g.sea;
     return (i, j) => (land ? (land[j * g.nx + i] ? ground : sea) : allSea ? sea : ground);
   }
 
@@ -740,7 +747,7 @@ export class RegionalCharts {
   private drawSeries(area: Rect): void {
     const ctx = this.ctx, S = this.samples;
     if (S.length < 2) { this.centerText('等待資料… / Waiting for data… / 時間序列在模式執行時累積 / series accumulate while the model runs', area); return; }
-    const tc = this.grid && isTcExperiment(this.grid.experiment);
+    const tc = !!this.grid?.tc;
     type P = { label: string; unit: string; get: (s: Sample) => number | null; digits: number };
     const panels: P[] = tc ? [
       { label: '中心氣壓降 / Central pressure deficit', unit: 'hPa', get: (s) => s.dp, digits: 1 },
@@ -820,7 +827,7 @@ export class RegionalCharts {
     if (mark?.storm) { ctx.beginPath(); ctx.arc(X(mark.storm.x), Y(mark.storm.y), 7, 0, 2 * Math.PI); ctx.strokeStyle = '#fafafa'; ctx.lineWidth = 1.5; ctx.stroke(); }
     ctx.restore();
     ctx.font = FONT_SMALL; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-    const tc = this.grid && isTcExperiment(this.grid.experiment);
+    const tc = !!this.grid?.tc;
     ctx.fillText(tc ? '颱風中心路徑 / TC centre track' : '風暴路徑 / Storm track', r.x, r.y - 4);
     ctx.fillStyle = INK.secondary; ctx.textBaseline = 'top';
     ctx.fillText('○ 起點 / start  ● 目前 / now' + (tc ? '' : ' · 位置：最強 UH（無旋轉時為最強上升氣流）/ position: max UH (max updraft before rotation)'), r.x, r.y + r.h + 32, r.w + 40);

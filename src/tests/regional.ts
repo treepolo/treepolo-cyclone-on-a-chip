@@ -308,4 +308,35 @@ void DRY_AIR;
     `CAPE ${u.cape.toFixed(0)} J/kg, CIN ${u.cin.toFixed(0)}, qv ${(u.q0 * 1e3).toFixed(1)} g/kg`);
 }
 
+// Surface gustiness: free convection adds to a light wind (Beljaars 1995: w* of about 0.7 m/s at 5 m/s over a warm sea),
+// heavy rain adds downdraft gusts of a few m/s even in calm air, and a strong mean wind is barely changed
+{
+  const { gustSpeed } = await import('../regional/physics.js');
+  const g = (spd: number, qr: number): number => gustSpeed(spd, 1, 1.2e-3, 1, 4e-3, 300, qr, 1.15);
+  const calm = g(0, 0), light = g(5, 0), rainy = g(0, 3e-3), windy = g(20, 0);
+  check('gustiness: light wind +0.5-6 %, heavy rain in calm air > 2.5 m/s, strong wind within 1 %, calm dry air at the floor', light > 5.025 && light < 5.3 && rainy > 2.5 && windy < 20.2 && calm === 1,
+    `${calm.toFixed(2)}, ${light.toFixed(2)}, ${rainy.toFixed(2)}, ${windy.toFixed(2)} m/s`);
+}
+
+// Set-ups: every small preset builds and steps with finite values; the trade wind is geostrophic (Coriolis balanced)
+{
+  const { buildModel } = await import('../app/regional/build.js');
+  const { setupOf } = await import('../app/regional/setup.js');
+  const { RegionalPhysics } = await import('../regional/physics.js');
+  let ok = true; const bad: string[] = [];
+  for (const id of ['tc', 'supercell', 'tornado_c']) {
+    const b = buildModel(setupOf(id), false), mm = b.model, mp = new IceMicrophysics(mm);
+    if (b.physics) new RegionalPhysics(mm, b.physics);
+    for (let n = 0; n < 2; n++) { mm.step(); mp.apply(mm.c.dt); }
+    if (![mm.u, mm.v, mm.w, mm.th, mm.pp, ...mm.scalars].every((a) => a.every(Number.isFinite))) { ok = false; bad.push(id); }
+  }
+  check('set-ups: the tc, supercell and tornado_c presets build and step with finite values', ok, bad.join(' ') || 'all finite');
+  // a trade wind on the f-plane without surface physics stays put (geostrophic balance), no inertial oscillation
+  const s = { ...setupOf('tc'), wind: 'trade' as const, windU: 8, fluxes: false, radiation: 'none' as const, init: 'none' as const, L: 240000 };
+  const b = buildModel(s, false), mm = b.model;
+  for (let n = 0; n < 60; n++) mm.step();
+  let dv = 0; for (let q = 0; q < mm.size; q++) dv = Math.max(dv, Math.abs(mm.v[q]!));
+  check('set-ups: an 8 m/s trade wind stays geostrophic (|v| < 0.05 m/s after 1 h)', dv < 0.05, dv);
+}
+
 summary('regional');

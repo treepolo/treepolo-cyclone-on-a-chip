@@ -23,7 +23,7 @@ body{display:grid;grid-template-columns:minmax(0,1fr) 380px}
 .panel{padding:14px 16px;border-left:1px solid var(--line);overflow:auto;background:var(--panel);font-size:13px}
 h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:16px 0 6px;color:#b8c6d4}
 .muted{color:var(--muted);font-size:12px;line-height:1.5}
-.row{display:flex;justify-content:space-between;gap:10px;line-height:1.7}.row span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.row{display:flex;justify-content:space-between;gap:10px;line-height:1.7}.row span:first-child{flex:0 0 auto;max-width:55%}.row span:last-child{text-align:right;font-variant-numeric:tabular-nums}
 button,select,input{font:inherit;background:#101821;color:var(--fg);border:1px solid #334354;padding:5px 8px;border-radius:4px}
 .controls{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
 .filebtn{display:inline-block;background:#101821;border:1px solid #334354;padding:5px 8px;border-radius:4px;cursor:pointer}
@@ -32,7 +32,18 @@ button,select,input{font:inherit;background:#101821;color:var(--fg);border:1px s
 .saverow .controls{margin:4px 0 0}
 .savetitle{font-weight:600;overflow-wrap:anywhere}
 label{display:block;margin:6px 0 2px;color:#b8c6d4} select,input[type=range]{width:100%;box-sizing:border-box}
-.axgrid{display:grid;grid-template-columns:1fr 8em;gap:4px 8px;align-items:center}.axgrid label{margin:0}.axgrid input,.axgrid select{width:100%;box-sizing:border-box}
+label.f input[type=range]{padding:0}
+.hd{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}.hd a{font-size:12px}
+.runbar{display:flex;gap:6px;margin:8px 0}.runbar button{flex:1}
+button.primary{background:#16324f;border-color:#3d6d99}
+details{border-top:1px solid var(--line);padding:6px 0}details[open]{padding-bottom:10px}
+summary{cursor:pointer;font-size:13px;font-weight:600;color:#b8c6d4;padding:4px 0;list-style-position:inside}
+.grp{margin:10px 0 2px;font-size:12px;color:var(--muted)}
+.fields{display:flex;flex-direction:column;gap:3px}
+label.f{display:grid;grid-template-columns:1fr 8.5em;gap:8px;align-items:center;margin:3px 0;color:var(--fg)}
+label.f input,label.f select{width:100%;box-sizing:border-box;min-width:0}
+label.f.chk{grid-template-columns:auto 1fr;justify-content:start}label.f.chk input{width:auto}
+.foot{margin-top:10px}
 .missions{display:flex;flex-direction:column;gap:6px;margin-top:6px}.mission{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:4px;padding:6px 8px}
 .mission .mark{font-size:15px;line-height:1.2;color:var(--muted)}.mission.done .mark{color:#1baf7a}
 .log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:var(--bg);padding:8px;border:1px solid #1d2833;max-height:120px;overflow:auto}
@@ -46,111 +57,84 @@ a{color:#8fc1ff}
 <div class="flypad" id="flyPad" hidden><span></span><button data-k="w" title="前進 / forward">▲</button><button data-k="e" title="上升 / up">⤒</button><button data-k="a" title="左 / left">◀</button><button data-k="s" title="後退 / back">▼</button><button data-k="d" title="右 / right">▶</button><span></span><span></span><button data-k="q" title="下降 / down">⤓</button></div>
 </div>
 <section class="panel">
-<h1>區域非靜力模式 / Regional Non-hydrostatic Model</h1>
-<div class="muted">全可壓縮非靜力方程、笛卡兒 C 網格、RK3 + 聲波分裂步、六類冰相微物理（水氣、雲水、雨、雲冰、雪、霰）。雲（白：雲水＋雲冰）與降水粒子（藍：雨＋雪＋霰）以體積光線追蹤繪製，垂直比例放大。 / Fully compressible non-hydrostatic equations, Cartesian C-grid, RK3 with split acoustic steps, six-class ice microphysics (vapour, cloud water, rain, cloud ice, snow, graupel). Cloud (white: water + ice) and precipitation (blue: rain + snow + graupel) are volume ray-marched; vertical scale exaggerated.</div>
-<div class="muted" id="backLink"><a href="index.html">← 全球模式 / Global model</a></div>
-<h2>實驗 / Experiment</h2>
-<select id="exp">
-<option value="supercell">超大胞（Weisman–Klemp）/ Supercell (Weisman–Klemp)</option>
-<option value="tc">熱帶氣旋（f 平面，15 km）/ Tropical cyclone (f-plane, 15 km)</option>
-<option value="tc_axi">颱風軸對稱快速版（半徑–高度，數天只要幾分鐘）/ Axisymmetric TC (fast: days in minutes)</option>
-<option value="supercell_hr">超大胞 1 km（需 GPU）/ Supercell 1 km (GPU)</option>
-<option value="tc_hr">熱帶氣旋 5 km（需 GPU）/ Tropical cyclone 5 km (GPU)</option>
-<option value="tc_3">熱帶氣旋 3 km（需獨立顯卡；雙眼牆與眼牆置換）/ Tropical cyclone 3 km (discrete GPU; concentric eyewalls)</option>
-<option value="tornado">龍捲尺度超大胞 250 m（需高階 GPU）/ Tornado-scale supercell 250 m (fast GPU)</option>
-<option value="tornado_c">龍捲超大胞：1 km 快速起轉，可細化到 250 m / Tornadic supercell: 1 km spin-up, refine to 250 m</option>
-</select>
-<label for="backendSel">計算後端 / Compute backend</label>
-<select id="backendSel"><option value="auto">自動：可用時用 WebGPU / Auto: WebGPU when available</option><option value="cpu">CPU Float64</option></select>
+<div class="hd"><h1>區域非靜力模式 / Regional model</h1><a id="backLink" href="index.html">← 全球模式 / Global</a></div>
+<div class="runbar"><button id="run" class="primary">執行 / Run</button><button id="step1">單步 / Step</button><button id="refine" disabled title="用更細的網格接著算（自動對準風暴）/ continue on a finer grid (centred on the storm)">細化 / Refine</button></div>
 <div id="desc" class="muted"></div>
-<div id="tornadoPanel" hidden>
-<h2>龍捲環境 / Tornado environment</h2>
-<div class="muted">改變環境（不改結果）：四分之一圓風徑圖的半徑與深度決定低層風切與 0–1 km 螺旋度；邊界層水氣越多，雲底越低、CAPE 越大。/ Change the environment, not the outcome: the quarter-circle hodograph's radius and depth set the low-level shear and 0–1 km helicity; a moister boundary layer lowers the cloud base and raises CAPE.</div>
-<div class="axgrid">
-<label for="toR">風徑圖半徑 / Hodograph radius (m/s)</label><input id="toR" type="number" step="1" value="12" />
-<label for="toDepth">彎曲段深度 / Curved-segment depth (km)</label><input id="toDepth" type="number" step="0.25" value="1" />
-<label for="toU6">6 km 風速 / Wind at 6 km (m/s)</label><input id="toU6" type="number" step="1" value="30" />
-<label for="toQ">邊界層水氣上限 / Boundary-layer vapour cap (g/kg)</label><input id="toQ" type="number" step="0.5" value="16" />
-</div>
-<div class="row"><span>環境 / Environment</span><span id="toInfo">—</span></div>
-<div class="muted">舊版預設（WK82，10 m/s、2 km、14 g/kg）的 0–1 km 螺旋度只有約 120 m²/s²；現在預設 12 m/s、1 km、16 g/kg（約 280 m²/s²、CAPE 約 3200 J/kg、雲底約 0.9 km），是典型的強龍捲環境。/ The former default (WK82, 10 m/s over 2 km, 14 g/kg) has only about 120 m²/s² of 0–1 km helicity; the new default (12 m/s over 1 km, 16 g/kg: about 280 m²/s², CAPE about 3200 J/kg, cloud base about 0.9 km) is a typical significant-tornado environment.</div>
-<div class="controls"><button id="toApply">套用並重新開始 / Apply and restart</button></div>
-</div>
-<div id="axiPanel" hidden>
-<h2>颱風環境與參數 / Tropical-cyclone environment</h2>
-<div class="muted axOnly">只算半徑與高度（假設颱風左右對稱），同樣的方程與物理，快上百倍：先用它篩選參數，再到 3D 確認。改完按「套用並重新開始」。/ Radius and height only (the storm is assumed symmetric about its axis), same equations and physics, about a hundred times faster: screen parameters here, then confirm in 3-D. Press Apply to restart with the new values.</div>
-<div class="axgrid">
-<label for="axSst">海面溫度 / SST (°C)</label><input id="axSst" type="number" step="0.5" value="28" />
-<label for="axLat">緯度 / Latitude (°)</label><input id="axLat" type="number" step="1" value="20" />
-<label for="axDr" class="axOnly">徑向格距 / Radial spacing</label><select class="axOnly" id="axDr"><option value="4000" selected>4 km（最快 / fastest）</option><option value="2000">2 km</option><option value="1000">1 km（最細、較慢 / finest, slower）</option></select>
-<label for="axV0">初始渦旋最大風 / Initial vortex (m/s)</label><input id="axV0" type="number" step="1" value="15" />
-<label for="axLh" class="axOnly">水平混合長度 / Radial mixing length (m)</label><input class="axOnly" id="axLh" type="number" step="100" value="1000" />
-<label for="axLv" class="axOnly">垂直混合長度 / Vertical mixing length (m)</label><input class="axOnly" id="axLv" type="number" step="10" value="100" />
-<label for="axCk">焓交換係數 / Enthalpy exchange Ck (×10⁻³)</label><input id="axCk" type="number" step="0.1" value="1.2" />
-<label for="axVmin">地面通量最小風速（陣風）/ Minimum wind in surface fluxes (m/s)</label><input id="axVmin" type="number" step="0.5" value="1" />
-<label for="axSnd">環境探空 / Environment sounding</label><select id="axSnd" title="條件不穩定：像真實熱帶海洋，邊界層混合均勻、CAPE 約 1000 J/kg，外圍可以長出對流與雨帶；RE87：對濕對流中性、CAPE 為 0 的理想探空，只有眼牆有對流 / unstable: like real tropical oceans, well-mixed boundary layer, CAPE about 1000 J/kg, so the outer region can grow convection and rainbands; RE87: idealised sounding neutral to moist convection, zero CAPE, convection only in the eyewall"><option value="unstable" selected>條件不穩定 / unstable</option><option value="re87">RE87 中性 / neutral</option></select>
-<label for="axRadMode">輻射冷卻：固定晴空冷卻或向初始探空鬆弛（RE87）/ Radiative cooling: constant clear-sky or relax to the sounding (RE87)</label><select id="axRadMode" title="固定晴空冷卻（像真實熱帶大氣）或向初始探空鬆弛（RE87）/ constant clear-sky cooling (as in the real tropical atmosphere) or relaxation to the sounding (RE87)"><option value="const" selected>固定 / constant</option><option value="relax">鬆弛 / relax</option></select>
-<label for="axRad">冷卻率或上限 / Rate or cap (K/day)</label><input id="axRad" type="number" step="0.25" value="1.5" />
-<label for="axRh">12 km 相對濕度（RE87 探空）/ RH at 12 km (RE87 sounding) (%)</label><input id="axRh" type="number" step="5" value="40" />
-</div>
-<div class="muted">3D 颱風（15 km、5 km）使用同樣的海溫、濕度、輻射、最小風速與初始渦旋；改完按「套用並重新開始」。/ The 3-D tropical cyclones (15 km, 5 km) use the same SST, humidity, radiation, minimum wind and initial vortex; press Apply to restart.</div>
-<div class="controls"><button id="axApply">套用並重新開始 / Apply and restart</button></div>
-</div>
-<p><button id="run">執行 / Run</button> <button id="refine" disabled>細化 / Refine</button></p>
-<div class="muted">先粗後細：用粗網格快速跑到有趣的階段，再按「細化」接著用細網格算（15 km → 5 km 颱風、2 km → 1 km 超大胞、1 km → 250 m 龍捲盒子，自動對準風暴）。/ Coarse to fine: spin up quickly on the coarse grid, then press Refine to continue on the finer grid (the 250 m tornado box is centred on the storm).</div>
-<div class="controls"><button id="step1">單步 / Step</button></div>
-<label for="pace">目標速度 / Target speed</label>
-<select id="pace"><option value="0">全速 / Full speed</option><option value="1">×1 真實時間 / real time</option><option value="10">×10</option><option value="60">×60（1 模式分/秒 / 1 model-min/s）</option><option value="600">×600（10 模式分/秒）</option><option value="3600">×3600（1 模式小時/秒 / 1 model-h/s）</option></select>
-<label for="untilH">跑到指定時間後自動暫停 / Pause after</label>
-<div class="controls"><input id="untilH" type="number" min="0" step="0.5" value="1" style="width:6em" /><span style="align-self:center">模式小時 / model hours</span><button id="untilGo">執行並在時間到暫停 / Run, then pause</button></div>
-<label for="frames">畫面更新 / Display updates</label>
-<select id="frames"><option value="wall">每 0.5 秒 / every 0.5 s</option><option value="model:60">每 1 模式分鐘 / every model minute</option><option value="model:600">每 10 模式分鐘 / every 10 model minutes</option><option value="fast">快轉：每 5 秒 / fast-forward: every 5 s</option></select>
-<label for="speed">每輪計算量 / Work per tick</label><input id="speed" type="range" min="1" max="12" value="1" />
-<label><input id="adaptive" type="checkbox" checked /> 自動時間步長（依風速調整 Δt，GPU）/ Adaptive time step (Δt from the Courant number, GPU)</label>
-<label for="ground">地面場 / Ground field</label>
-<select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="wind">地面風速 / Surface wind speed</option><option value="theta">地面位溫擾動（冷池）/ Surface θ′ (cold pool)</option><option value="snow">累積降雪與霰（水當量）/ Accumulated snow + graupel (water equivalent)</option><option value="none">無（純地表，只看雲）/ None (plain surface, clouds only)</option></select>
+
+<details id="secSetup" open><summary>實驗設定 / Set-up</summary>
+<label class="f"><span>預設組合 / Preset</span><select id="preset"></select></label>
+<div class="grp">範圍與網格 / Domain and grid</div><div id="setupGrid" class="fields"></div>
+<div class="grp">環境 / Environment</div><div id="setupEnv" class="fields"></div>
+<div class="grp">初始 / Start</div><div id="setupInit" class="fields"></div>
+<label class="f"><span>計算後端 / Backend</span><select id="backendSel"><option value="auto">自動（WebGPU 優先）/ Auto</option><option value="cpu">CPU Float64</option></select></label>
+<div id="setupInfo" class="muted"></div>
+<div class="controls"><button id="apply" class="primary">套用並重新開始 / Apply and restart</button><button id="resetPreset">回到預設值 / Preset values</button></div>
+</details>
+
+<details id="secView" open><summary>顯示 / Display</summary>
+<label class="f"><span>地面 / Ground</span><select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="snow">累積雪與霰 / Snow + graupel</option><option value="wind">地面風速 / Surface wind</option><option value="theta">地面溫度擾動 / Surface θ′</option><option value="none">海陸（只看雲）/ Sea and land only</option></select></label>
 <div id="legend" class="muted"></div>
-<label for="cloudK">雲的不透明度 / Cloud opacity</label><input id="cloudK" type="range" min="2" max="80" value="35" />
-<h2>診斷 / Diagnostics</h2>
+<label class="f"><span>雲的不透明度 / Cloud opacity</span><input id="cloudK" type="range" min="2" max="80" value="35" /></label>
+</details>
+
+<details id="secDiag" open><summary>診斷 / Diagnostics</summary>
+<div class="row"><span>模式時間 / Time</span><span id="time">0</span></div>
 <div class="row"><span>網格 / Grid</span><span id="grid">—</span></div>
-<div class="row"><span>計算後端 / Backend</span><span id="backend">—</span></div>
-<div class="row"><span>模式時間 / Model time</span><span id="time">0</span></div>
+<div class="row"><span>後端 / Backend</span><span id="backend">—</span></div>
 <div class="row"><span>速度 / Speed</span><span id="rate">—</span></div>
-<div class="row"><span>垂直速度 / Vertical velocity</span><span id="w">—</span></div>
-<div class="row"><span>最大雲水＋雲冰 / Max cloud water + ice</span><span id="qc">—</span></div>
-<div class="row"><span>最大降水粒子 / Max rain + snow + graupel</span><span id="qr">—</span></div>
-<div class="row"><span>最大累積降水 / Max accumulated precipitation</span><span id="rainmax">—</span></div>
+<div class="row"><span>地表 / Surface</span><span id="surface">—</span></div>
+<div class="row"><span>垂直速度 / w</span><span id="w">—</span></div>
+<div class="row"><span>最大雲水＋冰 / Max cloud</span><span id="qc">—</span></div>
+<div class="row"><span>最大降水粒子 / Max precip. particles</span><span id="qr">—</span></div>
+<div class="row"><span>最大累積降水 / Max accumulation</span><span id="rainmax">—</span></div>
 <div class="row"><span>最大地面風 / Max surface wind</span><span id="vmax">—</span></div>
-<div class="row"><span>中心氣壓降 / Central pressure deficit</span><span id="dp">—</span></div>
-<div class="row"><span>眼牆（1.5 km 切向風極大）/ Eyewalls (1.5 km vt maxima)</span><span id="eyewalls">—</span></div>
-<div class="row" title="上一個模式小時的平均降雨率：核心 < 60 km、外圍 100–300 km（雨帶），以及外圍降雨 > 1 mm/h 的面積比 / mean rain rate over the last model hour: core < 60 km, outer 100–300 km (rainbands), and the outer area fraction above 1 mm/h"><span>雨量 核心 · 外圍 / Rain core · outer</span><span id="tcrain">—</span></div>
-<div class="row"><span>近地面最大渦度・對地風速 / Near-surface max vorticity · ground-relative wind</span><span id="zeta">—</span></div>
-<div class="row"><span>龍捲偵測（需 ≤ 500 m 網格）/ Tornado detector (grids ≤ 500 m)</span><span id="tornado">—</span></div>
-<h2>互動：只改條件 / Interaction: change the conditions</h2>
-<div class="muted">在「水平切面」或「合成圖」用滑鼠工具放暖泡、冷池，或塗海溫與陸地。這裡可以在模擬進行中突然改變環境的風切與中層濕度；之後怎麼發展完全由方程決定。模式沒有地形座標，所以不能放山。/ In the slice or composite view, use the mouse tool to place warm bubbles or cold pools, or paint sea temperature and land. Here you can change the environmental shear and mid-level humidity during a run; what happens next is up to the equations. The model has no terrain coordinate, so mountains are not possible.</div>
-<div class="axgrid">
-<label for="envDu">6 km 西風增加 / Add westerly wind at 6 km (m/s)</label><input id="envDu" type="number" step="1" value="5" />
-<label for="envRh">1–8 km 水氣倍數 / Multiply 1–8 km vapour by</label><input id="envRh" type="number" step="0.05" value="1.2" />
+<div class="row tcOnly"><span>中心氣壓降 / Pressure deficit</span><span id="dp">—</span></div>
+<div class="row tcOnly"><span>眼牆 / Eyewalls</span><span id="eyewalls">—</span></div>
+<div class="row tcOnly" title="上一個模式小時：核心 < 60 km、外圍 100–300 km 的平均雨率，與外圍 > 1 mm/h 的面積比 / last model hour: mean rain rate in the core (< 60 km) and the outer region (100–300 km), and the outer area above 1 mm/h"><span>雨量 核心 · 外圍 / Rain core · outer</span><span id="tcrain">—</span></div>
+<div class="row stormOnly"><span>近地面渦度 · 對地風 / ζ · ground wind</span><span id="zeta">—</span></div>
+<div class="row stormOnly"><span>龍捲 / Tornado</span><span id="tornado">—</span></div>
+</details>
+
+<details id="secInteract"><summary>互動 / Interaction</summary>
+<div class="muted">在「水平切面」或「合成圖」選工具點擊：暖泡、冷池、塗海溫、塗陸地或海洋。這裡可以在執行中改變整個環境。/ In the slice or composite view pick a tool: warm bubble, cold pool, paint sea temperature, land or sea. Here the whole environment can be changed during a run.</div>
+<div class="fields">
+<label class="f"><span>6 km 西風增加 / Westerly at 6 km (m/s)</span><input id="envDu" type="number" step="1" value="5" /></label>
+<label class="f"><span>1–8 km 水氣倍數 / 1–8 km vapour ×</span><input id="envRh" type="number" step="0.05" value="1.2" /></label>
 </div>
-<div class="controls"><button id="envApply">現在改變環境 / Change the environment now</button></div>
-<h2>挑戰任務 / Challenges</h2>
-<div class="muted">讓風暴自己達成目標：只能改條件（實驗、海溫、濕度、風切、暖泡、冷池、塗海溫或陸地），不能直接改結果。/ Get the storm to reach the goal by itself: change only the conditions (experiment, sea temperature, humidity, shear, bubbles, cold pools, painted sea or land), never the result.</div>
+<div class="controls"><button id="envApply">現在改變環境 / Change now</button></div>
+</details>
+
+<details id="secTiming"><summary>速度與時間 / Speed and timing</summary>
+<label class="f"><span>目標速度 / Target speed</span><select id="pace"><option value="0">全速 / Full speed</option><option value="1">×1 真實時間 / real time</option><option value="10">×10</option><option value="60">×60</option><option value="600">×600</option><option value="3600">×3600</option></select></label>
+<label class="f"><span>畫面更新 / Display updates</span><select id="frames"><option value="wall">每 0.5 秒 / every 0.5 s</option><option value="model:60">每模式分鐘 / every model minute</option><option value="model:600">每 10 模式分鐘 / every 10 model minutes</option><option value="fast">快轉：每 5 秒 / every 5 s</option></select></label>
+<label class="f"><span>每輪計算量 / Work per tick</span><input id="speed" type="range" min="1" max="12" value="1" /></label>
+<label class="f chk"><input id="adaptive" type="checkbox" checked /><span>自動時間步長 / Adaptive Δt</span></label>
+<div class="controls"><input id="untilH" type="number" min="0" step="0.5" value="1" style="width:5em" /><button id="untilGo">跑這麼多模式小時後暫停 / Run for these model hours</button></div>
+</details>
+
+<details id="secMissions"><summary>挑戰任務 / Challenges</summary>
+<div class="muted">只改條件，讓風暴自己達成目標。/ Change only the conditions; the storm has to get there by itself.</div>
 <div id="missions" class="missions"></div>
-<h2>無人值守實驗 / Unattended run</h2>
-<div class="muted">按一下就讓它自己跑：全速、快轉顯示，每隔固定模式時間記錄風暴統計，結束時自動存檔，報告存到雲端資料庫讓開發者直接讀取。/ Runs by itself at full speed, records the storm statistics at a fixed model-time interval, saves the final state and stores the report for the developer.</div>
-<div class="controls"><input id="runH" type="number" min="0.5" step="0.5" value="24" style="width:5em" /><span style="align-self:center">模式小時 / model hours</span>
-<select id="runEvery"><option value="5">每 5 模式分記錄 / every 5 min</option><option value="15" selected>每 15 模式分 / every 15 min</option><option value="60">每 1 模式小時 / every hour</option></select></div>
+</details>
+
+<details id="secRunner"><summary>無人值守實驗 / Unattended run</summary>
+<div class="controls"><input id="runH" type="number" min="0.5" step="0.5" value="24" style="width:5em" /><span style="align-self:center">模式小時 / model h</span>
+<select id="runEvery" style="width:auto"><option value="5">每 5 分記錄 / every 5 min</option><option value="15" selected>每 15 分 / every 15 min</option><option value="60">每小時 / hourly</option></select></div>
 <input id="runNote" placeholder="備註（選填）/ note (optional)" style="width:100%;box-sizing:border-box" />
-<label><input id="runSave" type="checkbox" checked /> 結束時自動存檔 / save the final state</label>
-<div class="controls"><button id="runStart">開始無人值守實驗 / Start</button><button id="runStop" disabled>停止 / Stop</button><button id="runCopy" disabled>複製報告 / Copy report</button></div>
+<label class="f chk"><input id="runSave" type="checkbox" checked /><span>結束時存檔 / save at the end</span></label>
+<div class="controls"><button id="runStart">開始 / Start</button><button id="runStop" disabled>停止 / Stop</button><button id="runCopy" disabled>複製報告 / Copy report</button></div>
 <div class="row"><span>狀態 / Status</span><span id="runStatus">—</span></div>
-<h2>存檔 / Saved simulations</h2>
-<div id="saves"></div>
-<h2>效能分析 / Profiling</h2>
-<p><button id="profile">分析各 GPU 程式耗時 / Time each GPU kernel</button></p>
-<div class="muted">跑 3 步並量測每個 GPU 程式的時間（模式會前進 3 步）。結果可以複製給開發者。/ Runs 3 steps and times every GPU kernel (the model advances 3 steps). The result can be copied for the developer.</div>
+</details>
+
+<details id="secSaves"><summary>存檔 / Saves</summary><div id="saves"></div></details>
+
+<details id="secProfile"><summary>效能分析 / Profiling</summary>
+<p><button id="profile">量測各 GPU 程式耗時（前進 3 步）/ Time each GPU kernel (3 steps)</button></p>
 <pre id="profileOut" class="log" style="max-height:320px;user-select:text"></pre>
+</details>
+
 <h2>紀錄 / Log</h2><div id="log" class="log"></div>
+<div class="muted foot">全可壓縮非靜力方程、C 網格、RK3 + 聲波分裂步、六類冰相微物理；白 = 雲，藍 = 降水粒子，垂直比例放大。/ Fully compressible non-hydrostatic equations, C-grid, RK3 with split acoustic steps, six-class ice microphysics; white = cloud, blue = precipitation, vertical scale exaggerated.</div>
 </section>
 <script>
 // Opened on its own, this page has no artifact runtime (database, downloads): only the main page gets
