@@ -4,7 +4,7 @@
 // on the CPU); this module only draws them and accumulates the time series.
 
 import { parcelAscent, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
-import type { CameraMode } from './volume.js';
+import type { CameraMode, Cut } from './volume.js';
 import type { StormNow } from '../../regional/storms.js';
 import { type ChartRequest, type RegionalFrame, type RegionalExperiment, type TcRain } from './protocol.js';
 import { INK, SERIES, FONT, FONT_SMALL, type Rect, type Scale, type ScaleKind, colorOf, niceCeil, ticks, fmt, drawField, drawColorbar, drawAxes, drawContours, drawArrow, drawBarb, haloText, tooltip } from './chartDraw.js';
@@ -116,6 +116,8 @@ export interface ChartsHooks {
   interact(kind: MapTool, x: number, y: number, radius: number): void;
   /** 3-D camera mode */
   camera(mode: CameraMode): void;
+  /** 3-D cutaway (null: none) */
+  cut(c: Cut | null): void;
 }
 
 /** The Chinese half of a bilingual label ('中文 / English', also '中文（…）/ English'). */
@@ -156,6 +158,8 @@ export class RegionalCharts {
   private tracerN = 0;
   private tool: MapTool = 'inspect';
   private cam: CameraMode = 'orbit';
+  /** cutaway of the 3-D view: plane kind, position (fraction of the domain or of the top) and side */
+  private cutSel: { kind: 'off' | Cut['kind']; pos: number; flip: boolean } = { kind: 'off', pos: 0.5, flip: false };
   private lastPaint: { x: number; y: number } | null = null;
   /** paint brush radius (m): 3 cells or a twentieth of the domain, whichever is larger */
   private get brush(): number { const g = this.grid!; return Math.max(3 * g.dx, Math.min(g.nx * g.dx, g.ny * g.dy) / 20); }
@@ -195,6 +199,7 @@ export class RegionalCharts {
     this.frame = null;
     this.buildBar();
     this.sendRequest();
+    this.sendCut();
   }
 
   /** Show the numbers of one storm in the time series (null: the domain maxima). */
@@ -303,6 +308,14 @@ export class RegionalCharts {
     this.redraw();
   }
 
+  /** Send the cutaway to the 3-D view (the section line in fractions of the domain). */
+  private sendCut(): void {
+    const c = this.cutSel, g = this.grid;
+    if (c.kind === 'off' || !g) { this.hooks.cut(null); return; }
+    const Lx = g.nx * g.dx, Ly = g.ny * g.dy, ln = this.line ?? this.defaultLine();
+    this.hooks.cut({ kind: c.kind, pos: c.pos, flip: c.flip, line: { x0: ln.x0 / Lx, y0: ln.y0 / Ly, x1: ln.x1 / Lx, y1: ln.y1 / Ly } });
+  }
+
   // ---------------------------------------------------------------- toolbar
 
   private buildBar(): void {
@@ -328,6 +341,29 @@ export class RegionalCharts {
         String(this.tracerN), (v) => { this.tracerN = Number(v); this.hooks.tracers(this.tracerN); this.buildBar(); }, '軌跡粒子 / Trajectory particles');
       sel([{ v: 'orbit', label: '相機：環繞 / Camera: orbit' }, { v: 'side', label: '相機：正側面 / Camera: side view' }, { v: 'top', label: '相機：正上方 / Camera: top view' }, { v: 'fly', label: '相機：自由飛行 / Camera: free flight' }],
         this.cam, (v) => { this.cam = v as CameraMode; this.hooks.camera(this.cam); this.buildBar(); }, '相機 / Camera');
+      const cs = this.cutSel;
+      sel([{ v: 'off', label: '剖面：關 / Cutaway: off' }, { v: 'x', label: '剖面：南北向，切掉東側 / Cutaway: north–south plane, east side removed' },
+        { v: 'y', label: '剖面：東西向，切掉南側 / Cutaway: east–west plane, south side removed' }, { v: 'z', label: '剖面：水平，切掉上方 / Cutaway: level, top removed' },
+        { v: 'line', label: '剖面：沿剖面線 A–B / Cutaway: along the section line A–B' }],
+        cs.kind, (v) => { cs.kind = v as typeof cs.kind; this.sendCut(); this.buildBar(); }, '剖面：切面一側變透明 / Cutaway: one side of a plane becomes transparent');
+      if (cs.kind !== 'off') {
+        const g = this.grid;
+        if (cs.kind !== 'line' && g) {
+          const r = document.createElement('input'); r.type = 'range'; r.min = '0'; r.max = '1000'; r.value = String(Math.round(cs.pos * 1000)); r.className = 'lvl';
+          r.title = '切面位置 / Plane position';
+          const lab = document.createElement('span'); lab.className = 'hint';
+          const upd = (): void => {
+            const L = cs.kind === 'x' ? g.nx * g.dx : cs.kind === 'y' ? g.ny * g.dy : g.nz * g.dz;
+            lab.textContent = `${cs.kind} = ${(cs.pos * L / 1000).toFixed(cs.kind === 'z' ? 1 : 0)} km`;
+          };
+          r.oninput = (): void => { cs.pos = Number(r.value) / 1000; upd(); this.sendCut(); };
+          upd(); b.append(r, lab);
+        }
+        const l = document.createElement('label'); l.className = 'chk';
+        const c = document.createElement('input'); c.type = 'checkbox'; c.checked = cs.flip; c.onchange = (): void => { cs.flip = c.checked; this.sendCut(); };
+        l.append(c, document.createTextNode(' 切掉另一側 / Remove the other side')); b.append(l);
+        if (cs.kind === 'line') hint('剖面線在合成圖或水平切面上拖曳畫出 / draw the line by dragging on a map');
+      }
       if (this.tracerN) hint('粒子：從低層 2 km 內出發，橘 = 低、淡黃 = 高；尾跡為最近幾個畫面 / particles start in the lowest 2 km; orange low, pale yellow high; trails show recent frames');
       if (this.cam !== 'fly') hint('拖曳移動 · 按住滾輪或右鍵拖曳（或 Ctrl＋拖曳）轉向與傾斜 · 滾輪縮放 · 雙擊放大 · 手機：單指移動、雙指縮放轉向、雙指上下傾斜 / drag: move · middle- or right-drag (or Ctrl+drag): turn and tilt · wheel: zoom · double-click: zoom in · touch: one finger moves, two fingers zoom and turn, move both up or down to tilt');
       if (this.cam === 'fly') hint('自由飛行：W/S 前後、A/D 左右、Q/E 上下（Shift 加速）、拖曳轉頭、滾輪前進後退 / free flight: W/S forward/back, A/D left/right, Q/E down/up (Shift: faster), drag to look, wheel to move');
@@ -504,6 +540,7 @@ export class RegionalCharts {
     }
     if (d.moved) {
       this.line = { x0: d.x0, y0: d.y0, x1: d.x1, y1: d.y1 };
+      if (this.cutSel.kind === 'line') this.sendCut();
       if (this.view !== 'section') this.note = '剖面線已設定：到「垂直剖面」查看 / Line set: see Cross-section';
     } else if (this.view !== 'section') {
       this.point = { x: d.x0, y: d.y0 };

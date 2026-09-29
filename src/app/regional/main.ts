@@ -51,6 +51,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
     else if (kind !== 'inspect') send({ type: 'paint', kind, x, y, radius });
   },
   camera: (mode) => { view.setCamera(mode); $('flyPad').hidden = mode !== 'fly'; },
+  cut: (c) => view.setCut(c),
   view: (v) => {
     $('view').hidden = v !== '3d'; $('chart').hidden = v === '3d';
     if (v === '3d') { const f = replayIdx !== null ? replay.frames[replayIdx] : lastVol; if (f) showVolume(f); }
