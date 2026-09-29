@@ -9,6 +9,7 @@ import { SetupForm } from './setupForm.js';
 import type { RegionalSetup } from './setup.js';
 import type { StormNow } from '../../regional/storms.js';
 import { Tools3D } from './tools3d.js';
+import { ReplayStore, type ReplayFrame } from './replay.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 const presetAxi = (s: RegionalSetup): boolean => s.preset === 'tc_axi';
@@ -29,10 +30,15 @@ let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } |
 // charts: the main view is either the 3-D volume or one of the 2-D charts
 const missions = new Missions($('missions'), (s) => log(s));
 let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
-let lastVol: { nx: number; ny: number; nz: number; cloud: Uint8Array; rain: Uint8Array; ground: Uint8Array } | null = null, refining = false;
+let lastVol: ReplayFrame | null = null, refining = false;
+// replay of the 3-D view: frames kept by the page (memory budget from the device memory when the browser tells it)
+const replay = new ReplayStore(Math.min(400, 64 * ((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 4)) * 1e6);
+let replayIdx: number | null = null, replayPlaying = false, replayAcc = 0;
+/** Show a stored or live display volume in the 3-D view. */
+function showVolume(f: ReplayFrame): void { view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, f.aspect, f.top); view.setGround(f.nx, f.ny, f.ground); }
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
   request: (req) => send({ type: 'charts', req }),
-  volMode: (mode) => send({ type: 'volMode', mode }),
+  volMode: (mode) => { send({ type: 'volMode', mode }); view.setMode(mode); },
   tracers: (n) => send({ type: 'tracers', n }),
   interact: (kind, x, y, radius) => {
     if (kind === 'warm' || kind === 'cold') send({ type: 'perturb', kind, x, y });
@@ -41,7 +47,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
   camera: (mode) => { view.setCamera(mode); $('flyPad').hidden = mode !== 'fly'; },
   view: (v) => {
     $('view').hidden = v !== '3d'; $('chart').hidden = v === '3d';
-    if (v === '3d' && lastVol) { view.setVolume(lastVol.nx, lastVol.ny, lastVol.nz, lastVol.cloud, lastVol.rain, aspect); view.setGround(lastVol.nx, lastVol.ny, lastVol.ground); }
+    if (v === '3d') { const f = replayIdx !== null ? replay.frames[replayIdx] : lastVol; if (f) showVolume(f); }
   },
 });
 
@@ -69,6 +75,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     showSurface();
     tools.setGrid({ Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, dx: m.dx, dz: m.dz, paint: m.setup ? m.setup.fluxes && !presetAxi(m.setup) : m.experiment === 'nest', interact: m.experiment !== 'tc_axi' });
     missions.reset({ e: m.experiment, tc: m.tc });
+    if (!refining) { replay.clear(); endReplay(); }
     refining = false;
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
@@ -76,7 +83,6 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     charts.onFrame(m);
     missions.check(m, { e: curExp, tc: curTc });
     const in3d = charts.view === '3d';
-    if (in3d) { view.setVolume(m.nx, m.ny, m.nz, m.cloud, m.rain, aspect); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     const [lo, hi] = m.groundRange, rgba = new Uint8Array(m.nx * m.ny * 4);
     // plain surface: sea (tropical cyclones, sea points of a nest) or land (convective storms, land points)
     const bare = (i: number): [number, number, number] => ((land ? !land[i] : curSea) ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]);
@@ -89,8 +95,10 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
-    if (in3d) view.setGround(m.nx, m.ny, rgba);
-    lastVol = { nx: m.nx, ny: m.ny, nz: m.nz, cloud: m.cloud, rain: m.rain, ground: rgba };
+    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, aspect, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [] };
+    replay.push(lastVol);
+    if (in3d && replayIdx === null) { showVolume(lastVol); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
+    replayBar();
     const s = m.stats, t = m.time;
     $('time').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h (${(t / 86400).toFixed(2)} d)`;
     $('ovTime').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`;
@@ -152,13 +160,16 @@ const compass = (u: number, v: number): string => {
   const d = ['東 E', '東北 NE', '北 N', '西北 NW', '西 W', '西南 SW', '南 S', '東南 SE'][Math.round(Math.atan2(v, u) / (Math.PI / 4) + 8) % 8]!;
   return `往${d} ${sp.toFixed(0)} m/s`;
 };
+const galeKm = (r: number | undefined): string => (r === undefined ? '—' : r > 0 ? `${(r / 1000).toFixed(0)} km` : '無');
 function stormLine(st: StormNow): string {
   const age = st.age < 7200 ? `${(st.age / 60).toFixed(0)} min` : `${(st.age / 3600).toFixed(1)} h`;
-  if (st.kind === 'vortex') return `${st.pmin?.toFixed(0) ?? '—'} hPa（−${st.dp?.toFixed(1) ?? '—'}）· ${st.vmax?.toFixed(0) ?? '—'} m/s · RMW ${st.rmw ? (st.rmw / 1000).toFixed(0) : '—'} km · ${compass(st.u, st.v)} · ${age}`;
+  if (st.kind === 'vortex') return `${st.pmin?.toFixed(0) ?? '—'} hPa（−${st.dp?.toFixed(1) ?? '—'}）· ${st.vmax?.toFixed(0) ?? '—'} m/s · RMW ${st.rmw ? (st.rmw / 1000).toFixed(0) : '—'} km · 七級 ${galeKm(st.r7)} · 十級 ${galeKm(st.r10)} · ${compass(st.u, st.v)} · ${age}`;
   return `w ${st.wmax?.toFixed(0) ?? '—'} m/s · UH ${st.uh?.toFixed(0) ?? '—'} · ${st.dbz?.toFixed(0) ?? '—'} dBZ · ${compass(st.u, st.v)} · ${age}`;
 }
 function showStorms(list: StormNow[], mainId: number | null, f: { nx: number; ny: number; nz: number; dx: number; dz: number }): void {
   stormsNow = list; stormFrame = f; stormMain = mainId;
+  const mv = list.find((s) => s.id === mainId && s.kind === 'vortex') ?? list.find((s) => s.kind === 'vortex');
+  $('gale').textContent = mv ? `${galeKm(mv.r7)} · ${galeKm(mv.r10)}` : '—';
   const box = $('stormList'), sel = charts.selectedStorm;
   $('stormCount').textContent = list.length ? `${list.length} 個 / ${list.length}` : '尚未形成 / none yet';
   // vortices first, strongest first; rows are reused (a click must survive the next frame's update)
@@ -186,12 +197,13 @@ function showStorms(list: StormNow[], mainId: number | null, f: { nx: number; ny
 }
 /** Labels above the storms in the 3-D view (redrawn every animation frame: the camera moves). */
 function placeStormLabels(): void {
-  const host = $('stormLabels');
-  if (charts.view !== '3d' || !stormFrame || !stormsNow.length) { if (host.childElementCount) host.replaceChildren(); return; }
-  const [bx, by, bz] = view.boxSize, f = stormFrame, Lx = f.nx * f.dx, Ly = f.ny * f.dx, off = $('view').offsetTop;
-  while (host.childElementCount < Math.min(12, stormsNow.length)) host.append(document.createElement('div'));
-  while (host.childElementCount > Math.min(12, stormsNow.length)) host.lastElementChild!.remove();
-  stormsNow.slice(0, 12).forEach((st, n) => {
+  const host = $('stormLabels'), rf = replayIdx !== null ? replay.frames[replayIdx] ?? null : null;
+  const list = rf ? rf.storms : stormsNow;
+  if (charts.view !== '3d' || !$<HTMLInputElement>('showLabels').checked || (!rf && !stormFrame) || !list.length) { if (host.childElementCount) host.replaceChildren(); return; }
+  const [bx, by, bz] = view.boxSize, Lx = rf ? rf.Lx : stormFrame!.nx * stormFrame!.dx, Ly = rf ? rf.Ly : stormFrame!.ny * stormFrame!.dx, off = $('view').offsetTop;
+  while (host.childElementCount < Math.min(12, list.length)) host.append(document.createElement('div'));
+  while (host.childElementCount > Math.min(12, list.length)) host.lastElementChild!.remove();
+  list.slice(0, 12).forEach((st, n) => {
     const el = host.children[n] as HTMLElement, p = view.project([st.xd / Lx * bx, st.yd / Ly * by, bz * 0.92]);
     if (!p) { el.hidden = true; return; }
     el.hidden = false;
@@ -232,7 +244,7 @@ document.querySelectorAll<HTMLDetailsElement>('details[id]').forEach((d) => {
 });
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
-$('cuShow').onchange = (): void => send({ type: 'cuShow', on: $<HTMLInputElement>('cuShow').checked });
+$('subgrid').onchange = (): void => send({ type: 'subgrid', on: $<HTMLInputElement>('subgrid').checked });
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 $('adaptive').onchange = (): void => send({ type: 'adaptive', on: $<HTMLInputElement>('adaptive').checked });
 // Nesting: embedded by the global page (in-page overlay, #nest...) or opened with ?nest=1; the
@@ -251,9 +263,55 @@ if (location.hash.startsWith('#nest') || new URLSearchParams(location.search).ha
 }
 if (window.parent !== window) { const back = document.getElementById('backLink'); if (back) back.hidden = true; }
 init();
+// ---------------- replay of the 3-D view
+const fmtT = (t: number): string => (t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`);
+function replayBar(): void {
+  const n = replay.length, sl = $<HTMLInputElement>('rpSlider');
+  sl.max = String(Math.max(0, n - 1));
+  if (replayIdx === null) return;
+  replayIdx = Math.min(replayIdx, n - 1);
+  sl.value = String(replayIdx);
+  const f = replay.frames[replayIdx];
+  $('rpTime').textContent = f ? `${fmtT(f.t)}（${replayIdx + 1}/${n}）` : '—';
+}
+function showReplay(i: number): void {
+  if (!replay.length) return;
+  replayIdx = Math.max(0, Math.min(replay.length - 1, i));
+  const f = replay.frames[replayIdx]!;
+  if (charts.view === '3d') { showVolume(f); view.setTracers(null, f.Lx, f.Ly, f.top); }
+  replayBar();
+}
+function endReplay(): void {
+  replayIdx = null; replayPlaying = false; $('replayBar').hidden = true; $('rpPlay').textContent = '▶';
+  if (lastVol && charts.view === '3d') showVolume(lastVol);
+}
+$('ovReplay').onclick = (): void => {
+  if (replayIdx !== null) { endReplay(); return; }
+  if (!replay.length) { log('還沒有可以重播的畫面 / nothing to replay yet'); return; }
+  $('replayBar').hidden = false; replayPlaying = false; showReplay(0);
+  log(`重播：${replay.length} 個畫面，${replay.megabytes.toFixed(0)} MB / replay: ${replay.length} frames`);
+};
+$('rpSlider').oninput = (): void => { replayPlaying = false; $('rpPlay').textContent = '▶'; showReplay(Number($<HTMLInputElement>('rpSlider').value)); };
+$('rpPlay').onclick = (): void => {
+  if (replayIdx === null) return;
+  if (!replayPlaying && replayIdx >= replay.length - 1) showReplay(0);
+  replayPlaying = !replayPlaying; replayAcc = 0; $('rpPlay').textContent = replayPlaying ? '⏸' : '▶';
+};
+$('rpLive').onclick = endReplay;
+$('compass').onclick = (): void => view.faceNorth();
+let lastTick = performance.now();
 function tick(): void {
-  const in3d = charts.view === '3d';
-  if (in3d) view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5);
+  const in3d = charts.view === '3d', now = performance.now(), dts = Math.min(0.2, (now - lastTick) / 1000); lastTick = now;
+  if (replayIdx !== null && replayPlaying) {
+    replayAcc += dts * Number($<HTMLSelectElement>('rpSpeed').value);
+    if (replayAcc >= 1) {
+      const next = replayIdx + Math.floor(replayAcc); replayAcc -= Math.floor(replayAcc);
+      if (next >= replay.length - 1) { showReplay(replay.length - 1); replayPlaying = false; $('rpPlay').textContent = '▶'; } else showReplay(next);
+    }
+  }
+  if (in3d) view.render(Number($<HTMLInputElement>('cloudK').value));
+  const cp = $('compass'); cp.hidden = !in3d;
+  if (in3d) { cp.style.top = `${$('view').offsetTop + 8}px`; $('compassG').setAttribute('transform', `rotate(${(view.northAngle * 180 / Math.PI).toFixed(1)})`); }
   placeStormLabels();
   // tools and their overlay sit on the 3-D view (below the chart bar)
   const v = $('view'), fx = $('fx'), tl = $('tools');

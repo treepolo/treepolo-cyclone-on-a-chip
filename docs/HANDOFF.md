@@ -117,7 +117,14 @@
    20% 留在雲頂當冰（外流卷雲來源）；太乾時用 Frierson 的淺對流把邊界層水氣往上送；尺度感知 3 km 以下關、12 km 以上全開）。
    GPU kernel 在每步開頭（順序：邊界層擾動→積雲→持續風，與 CPU pre-step 相同）。3D 的次網格積雲只是顯示：每個對流格柱依雲量
    機率（每 30 分鐘重抽）畫一根塔，可在「顯示」關掉。熱帶預設（tc 系列）預設開啟。
-- 測試：`node dist/tests/regional.js` 36 項；GPU `?only=rbasic` 15 項（含陣風＋信風、積雲、持續風）、`?only=charts` 9 項（含新雲圖）。
+7. 使用者回饋（第 27 版後）：次網格對流塔顯示已拿掉（使用者覺得閃爍、很怪）；七級／十級暴風半徑（`storms.ts` `galeRadii`，
+   16 方向最外圈平均，最低層對地風）；3D 重播（`replay.ts`，依裝置記憶體上限、大網格存半解析度、滿了就隔一張丟）；
+   可見光雲圖（`charts.ts` `drawVisible`：雲反照率＋光學厚度 1 的雲頂高度做坡度光照與陰影，細化插值）；
+   次網格雲量（`src/regional/display.ts`，Smith 1990 三角分布，RHc 依格距 15 km 0.85→1 km 0.96，只畫出來）；
+   3D 渲染改成依消光係數（雲水 150、冰 55、雪 27 m²/kg…，byte = (β/0.3)^(1/3)），光照在頁面每個新畫面預先算
+   （往太陽方向一次掃描＋往上一次；`volume.ts` `computeLight`），不再逐像素往太陽取樣；地圖式相機（左鍵抓地面、右鍵轉向傾斜、
+   滾輪往游標縮放，畫面上方跟著方位，正上方不鎖定）、預設北方朝上、指北針（點一下北方朝上）、風暴標籤開關。
+- 測試：`node dist/tests/regional.js` 37 項；GPU `?only=rbasic` 15 項（含陣風＋信風、積雲、持續風）、`?only=charts` 9 項（含新雲圖）。
 
 ## 文件截圖
 - `docs/results/charts_*.png`（RESULTS 4.6）：在 Node 用 CPU 跑出成熟狀態存檔（超大胞 `packSave`；軸對稱用 `AxiDriver`＋`packSave`），

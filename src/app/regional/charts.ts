@@ -238,6 +238,7 @@ export class RegionalCharts {
     if (v === 'slice') req.slice = { k: this.level, vars: [...new Set<SliceVar>([this.sel.slice, 'u', 'v'])] };
     if (v === 'composite') {
       const maps = new Set<MapVar>([this.sel.composite]);
+      if (this.sel.composite === 'vis') maps.add('visZ');
       if (this.show.isobars) maps.add('slp');
       if (this.show.sfcWind) { maps.add('sfcU'); maps.add('sfcV'); }
       req.maps = [...maps];
@@ -309,6 +310,7 @@ export class RegionalCharts {
       sel([{ v: 'orbit', label: '相機：環繞 / Camera: orbit' }, { v: 'side', label: '相機：正側面 / Camera: side view' }, { v: 'top', label: '相機：正上方 / Camera: top view' }, { v: 'fly', label: '相機：自由飛行 / Camera: free flight' }],
         this.cam, (v) => { this.cam = v as CameraMode; this.hooks.camera(this.cam); this.buildBar(); }, '相機 / Camera');
       if (this.tracerN) hint('粒子：從低層 2 km 內出發，橘 = 低、淡黃 = 高；尾跡為最近幾個畫面 / particles start in the lowest 2 km; orange low, pale yellow high; trails show recent frames');
+      if (this.cam !== 'fly') hint('拖曳移動 · 右鍵拖曳（或 Ctrl＋拖曳）轉向與傾斜 · 滾輪縮放 · 雙擊放大 · 手機：單指移動、雙指縮放轉向、雙指上下傾斜 / drag: move · right-drag (or Ctrl+drag): turn and tilt · wheel: zoom · double-click: zoom in · touch: one finger moves, two fingers zoom and turn, move both up or down to tilt');
       if (this.cam === 'fly') hint('自由飛行：W/S 前後、A/D 左右、Q/E 上下（Shift 加速）、拖曳轉頭、滾輪前進後退 / free flight: W/S forward/back, A/D left/right, Q/E down/up (Shift: faster), drag to look, wheel to move');
     }
     if (vv === 'slice') {
@@ -539,7 +541,7 @@ export class RegionalCharts {
     const mp = this.frame!.charts!.maps, name = this.sel.composite, data = mp[name];
     if (!data) { this.waiting(area); return; }
     const info = VI[name]!;
-    const mf = this.drawPlan(area, name, data, `${info.label} · ${this.timeLabel()}`);
+    const mf = name === 'vis' && mp.visZ ? this.drawVisible(area, data, mp.visZ) : this.drawPlan(area, name, data, `${info.label} · ${this.timeLabel()}`);
     const g = this.grid!, X = (i: number): number => mf.r.x + (i + 0.5) / g.nx * mf.r.w, Y = (j: number): number => mf.r.y + mf.r.h - (j + 0.5) / g.ny * mf.r.h;
     const slp = mp.slp;
     if (this.show.isobars && slp) {
@@ -553,6 +555,68 @@ export class RegionalCharts {
     if (this.show.sfcWind && mp.sfcU && mp.sfcV) this.drawWind(mf, mp.sfcU, mp.sfcV);
     this.drawMarks(mf);
     this.mapReadout(mf, (i, j) => [`${zh(info.label)}: ${fmt(data[j * g.nx + i]!, info.digits)} ${info.unit}`, ...(slp ? [`SLP ${fmt(slp[j * g.nx + i]!, 1)} hPa`] : [])]);
+  }
+
+  /**
+   * Visible satellite picture: cloud albedo over a dark sea / land, sunlit from the north-west 40 degrees up. The cloud
+   * top (where the optical depth from the top reaches 1) is shaded by its slope and casts shadows on lower cloud and the
+   * surface; the picture is interpolated to a finer raster so the cloud edges and shading are smooth.
+   */
+  private drawVisible(area: Rect, alb: Float32Array, top: Float32Array): MapFrame {
+    const ctx = this.ctx, g = this.grid!, mf = this.mapFrame(area, false), m = mf.r;
+    const up = Math.max(1, Math.min(4, Math.round(480 / Math.max(g.nx, g.ny)))), W = g.nx * up, Hh = g.ny * up, dxs = g.dx / up, dys = g.dy / up;
+    // bilinear samples of the albedo and the cloud-top height on the fine raster (cell centres at (i + 0.5) / up)
+    const A = new Float32Array(W * Hh), Z = new Float32Array(W * Hh);
+    for (let J = 0; J < Hh; J++) {
+      const y = Math.max(0, Math.min(g.ny - 1, (J + 0.5) / up - 0.5)), j0 = Math.min(g.ny - 2, Math.floor(y)), fy = g.ny > 1 ? y - j0 : 0;
+      for (let I = 0; I < W; I++) {
+        const x = Math.max(0, Math.min(g.nx - 1, (I + 0.5) / up - 0.5)), i0 = Math.min(g.nx - 2, Math.floor(x)), fx = g.nx > 1 ? x - i0 : 0;
+        const a = j0 * g.nx + i0, b = (p: Float32Array): number => (p[a]! * (1 - fx) + p[a + 1]! * fx) * (1 - fy) + (p[a + g.nx]! * (1 - fx) + p[a + g.nx + 1]! * fx) * fy;
+        const al = b(alb); A[J * W + I] = al; Z[J * W + I] = al > 0.02 ? b(top) : 0;
+      }
+    }
+    // sun from the north-west: unit vector toward it and the height gained per metre toward it
+    const az = 315 * Math.PI / 180, el = 40 * Math.PI / 180, sx = Math.sin(az), sy = Math.cos(az), rise = Math.tan(el);
+    const stepI = sx, stepJ = sy, stepM = Math.hypot(sx * dxs, sy * dys), maxZ = Math.max(...Z), nsteps = Math.min(200, Math.ceil(maxZ / rise / stepM) + 1);
+    const lit = (I: number, J: number, z0: number): boolean => {
+      for (let s = 1; s <= nsteps; s++) {
+        const ii = Math.round(I + s * stepI), jj = Math.round(J + s * stepJ);
+        if (ii < 0 || jj < 0 || ii >= W || jj >= Hh) return true;
+        const zr = z0 + s * stepM * rise;
+        if (zr > maxZ) return true;
+        if (Z[jj * W + ii]! > zr + 200) return false;
+      }
+      return true;
+    };
+    const img = new ImageData(W, Hh), d = img.data, land = g.land;
+    for (let J = 0; J < Hh; J++) for (let I = 0; I < W; I++) {
+      const c = J * W + I, al = A[c]!, z = Z[c]!;
+      // slope shading of the cloud top (vertical scale doubled so that towers and overshooting tops stand out)
+      const hx = ((Z[J * W + Math.min(W - 1, I + 1)]! - Z[J * W + Math.max(0, I - 1)]!) / (2 * dxs)) * 2;
+      const hy = ((Z[Math.min(Hh - 1, J + 1) * W + I]! - Z[Math.max(0, J - 1) * W + I]!) / (2 * dys)) * 2;
+      const nl = Math.hypot(hx, hy, 1), ndots = (-hx * sx * Math.cos(el) - hy * sy * Math.cos(el) + Math.sin(el)) / nl;
+      const shade = Math.max(0.25, Math.min(1.5, ndots / Math.sin(el)));
+      const cloudLit = al > 0.02 ? (lit(I, J, z) ? 1 : 0.5) : 1, sfcLit = lit(I, J, 0) ? 1 : 0.4;
+      const ci = Math.min(g.nx - 1, Math.floor(I / up)), cj = Math.min(g.ny - 1, Math.floor(J / up)), isLand = land ? !!land[cj * g.nx + ci] : !g.sea;
+      const sfc: [number, number, number] = isLand ? [0.14, 0.15, 0.10] : [0.035, 0.055, 0.09];
+      const cl = al * (1 + (shade - 1) * Math.min(1, al * 1.6)) * cloudLit, tr = (1 - al) * (1 - al) * sfcLit;
+      for (let ch = 0; ch < 3; ch++) {
+        // a touch of blue in the shaded cloud, display gamma for the darker clouds
+        const v = cl * (ch === 2 ? 1 : cloudLit < 1 ? 0.93 : 1) + tr * sfc[ch]!;
+        d[4 * ((Hh - 1 - J) * W + I) + ch] = Math.round(255 * Math.pow(Math.min(1, v), 1 / 1.7));
+      }
+      d[4 * ((Hh - 1 - J) * W + I) + 3] = 255;
+    }
+    const off = document.createElement('canvas'); off.width = W; off.height = Hh;
+    off.getContext('2d')!.putImageData(img, 0, 0);
+    ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(off, m.x, m.y, m.w, m.h); ctx.restore();
+    drawAxes(ctx, m, { lo: 0, hi: mf.Lx / 1000, label: 'x (km)' }, { lo: 0, hi: mf.Ly / 1000, label: 'y (km)' });
+    ctx.font = FONT; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+    ctx.fillText(`可見光雲圖 / Visible satellite · ${this.timeLabel()}`, m.x, m.y - 8);
+    ctx.font = FONT_SMALL; ctx.fillStyle = INK.secondary; ctx.textBaseline = 'top';
+    ctx.fillText('太陽在西北方 40° / sun from the north-west, 40° up', m.x, m.y + m.h + 30);
+    this.mapF = mf;
+    return mf;
   }
 
   private waiting(r: Rect, more = ''): void { this.centerText('等待資料… / Waiting for data…' + (more ? ` / ${more}` : ''), r); }
@@ -850,6 +914,8 @@ export class RegionalCharts {
       { label: '最大地面風（150 km 內）/ Max surface wind', unit: 'm/s', get: (s) => s.vmax ?? null, digits: 1 },
       { label: '最大風速半徑 / Radius of max wind', unit: 'km', get: (s) => (s.rmw === undefined ? null : s.rmw / 1000), digits: 0 },
       { label: '中心氣壓 / Central pressure', unit: 'hPa', get: (s) => s.pmin ?? null, digits: 1 },
+      { label: '七級暴風半徑 / Beaufort 7 radius', unit: 'km', get: (s) => (s.r7 === undefined ? null : s.r7 / 1000), digits: 0 },
+      { label: '十級暴風半徑 / Beaufort 10 radius', unit: 'km', get: (s) => (s.r10 === undefined ? null : s.r10 / 1000), digits: 0 },
     ] : [
       { label: '最大上升速度 / Max updraft', unit: 'm/s', get: (s) => s.wmax ?? null, digits: 1 },
       { label: '上升氣流螺旋度（2–5 km）/ Updraft helicity', unit: 'm²/s²', get: (s) => s.uh ?? null, digits: 0 },

@@ -6,7 +6,9 @@
 import { AxisymModel, HA, type AxisymConfig } from '../../regional/axisym.js';
 import { IceMicrophysics, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { tcSounding, eyewallPeaks, type TcSounding } from '../../regional/tropical.js';
-import { SECTION_VARS, WV_PATH, sectionValues, parcelAscent, pressure, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
+import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, albedo } from '../../regional/display.js';
+import { GALE7, GALE10 } from '../../regional/storms.js';
+import { SECTION_VARS, WV_PATH, qsatW, sectionValues, parcelAscent, pressure, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { ChartData, ChartRequest, GroundField, RegionalFrame, TcRain } from './protocol.js';
 
 /** User-adjustable parameters of the axisymmetric experiment. */
@@ -99,6 +101,22 @@ export class AxiDriver {
     return z;
   }
 
+  /** draw sub-grid cloud (display.ts) */
+  private subgrid = true;
+  /** Display extinctions (1/m) of cloud and precipitation at radius index i, level k (display.ts, as the 3-D model). */
+  private ext(i: number, k: number): { c: number; p: number; T: number } {
+    const ax = this.ax, q = ax.idx(i, 0, k), S = ax.scalars, rho = ax.rho0[k]!, pi = ax.pi0[k]! + ax.pp[q]!, T = ax.th[q]! * pi;
+    const qsub = this.subgrid && S[QC]![q]! <= 1e-8 ? subgridCloud(S[0]![q]!, qsatW(T, pressure(pi)), subgridRHc(ax.a.dr)) : 0;
+    return { c: cloudExtinction(rho, S[QC]![q]!, qsub, S[QI]![q]!, S[QS]![q]!, T), p: precipExtinction(rho, S[QR]![q]!, S[QG]![q]!), T };
+  }
+
+  /** Outermost radius (m) of lowest-level wind of at least `v` m/s (the axisymmetric gale radius; 0 where none). */
+  private galeRadius(v: number): number {
+    const ax = this.ax; let r = 0;
+    for (let i = 0; i < ax.a.nr; i++) { const q = ax.idx(i, 0, 0); if (Math.hypot(0.5 * (ax.u[q]! + ax.u[q + 1]!), ax.v[q]!) >= v) r = ax.rc[i + HA]!; }
+    return r;
+  }
+
   /** Sea-level pressure at the centre (hPa), reduced from the lowest level as in storms.ts. */
   private centralSlp(): number {
     const ax = this.ax, q = ax.idx(0, 0, 0), pi = ax.pi0[0]! + ax.pp[q]!;
@@ -106,18 +124,18 @@ export class AxiDriver {
   }
 
   /** Column composites per radius (same meaning as the 3-D column records). */
-  private columns(): { dbz: Float64Array; ctopT: Float64Array; ctopZ: Float64Array; uh: Float64Array; wMax: Float64Array; cape: Float64Array; cin: Float64Array; vis: Float64Array; pw: Float64Array; wvT: Float64Array; wmin: number; cmax: number; pmax: number } {
+  private columns(): { dbz: Float64Array; ctopT: Float64Array; ctopZ: Float64Array; uh: Float64Array; wMax: Float64Array; cape: Float64Array; cin: Float64Array; vis: Float64Array; visZ: Float64Array; pw: Float64Array; wvT: Float64Array; wmin: number; cmax: number; pmax: number } {
     const ax = this.ax, { nz, dz } = ax.a, nr = this.nDisp;
-    const vis = new Float64Array(nr), pw = new Float64Array(nr), wvT = new Float64Array(nr);
+    const vis = new Float64Array(nr), visZ = new Float64Array(nr), pw = new Float64Array(nr), wvT = new Float64Array(nr), bet = new Float64Array(nz);
     const dbz = new Float64Array(nr).fill(-30), ctopT = new Float64Array(nr), ctopZ = new Float64Array(nr), uh = new Float64Array(nr), wMax = new Float64Array(nr), cape = new Float64Array(nr), cin = new Float64Array(nr);
     const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz);
     const zs = Array.from({ length: nz }, (_, k) => (ax.zc[k]! >= 2000 && ax.zc[k]! <= 5000 ? this.zeta(k) : null));
     let wmin = 0, cmax = 0, pmax = 0;
     for (let i = 0; i < nr; i++) {
-      let zmax = 0, lwp = 0, iwp = 0, swp = 0;
+      let zmax = 0, tau = 0;
       for (let k = 0; k < nz; k++) {
         const q = ax.idx(i, 0, k), rho = ax.rho0[k]!, S = ax.scalars;
-        lwp += rho * dz * Math.max(0, S[QC]![q]!); iwp += rho * dz * Math.max(0, S[QI]![q]!); swp += rho * dz * Math.max(0, S[QS]![q]!); pw[i] = pw[i]! + rho * dz * Math.max(0, S[0]![q]!);
+        bet[k] = this.ext(i, k).c; tau += bet[k]! * dz; pw[i] = pw[i]! + rho * dz * Math.max(0, S[0]![q]!);
         const qr = Math.max(S[QR]![q]!, 0), qs = Math.max(S[QS]![q]!, 0), qg = Math.max(S[QG]![q]!, 0);
         zmax = Math.max(zmax, 3.63e9 * Math.pow(rho * qr, 1.75) + 9.80e8 * Math.pow(rho * qs, 1.75) + 4.33e10 * Math.pow(rho * qg, 1.75));
         const pi = ax.pi0[k]! + ax.pp[q]!;
@@ -135,9 +153,12 @@ export class AxiDriver {
       let above = pw[i]!, zEmit = ax.zc[nz - 1]!; wvT[i] = T[nz - 1]!;
       for (let k = 0; k < nz; k++) { above -= ax.rho0[k]! * dz * Math.max(0, qv[k]!); if (above < WV_PATH) { wvT[i] = T[k]!; zEmit = ax.zc[k]!; break; } }
       if (ctopZ[i]! > zEmit) wvT[i] = ctopT[i]!;
-      const tau = 150 * lwp + 41 * iwp + 20 * swp; vis[i] = tau / (tau + 7.7);
+      vis[i] = albedo(tau);
+      let below = 0, zw = 0;
+      for (let k = 0; k < nz; k++) { const d = bet[k]! * dz; if (tau - below >= 1) visZ[i] = ax.zc[k]!; zw += d * ax.zc[k]!; below += d; }
+      if (tau < 1) visZ[i] = tau > 1e-3 ? zw / tau : 0;
     }
-    return { dbz, ctopT, ctopZ, uh, wMax, cape, cin, vis, pw, wvT, wmin, cmax, pmax };
+    return { dbz, ctopT, ctopZ, uh, wMax, cape, cin, vis, visZ, pw, wvT, wmin, cmax, pmax };
   }
 
   // ---------------------------------------------------------------- revolving onto the display grid
@@ -170,7 +191,8 @@ export class AxiDriver {
 
   // ---------------------------------------------------------------- frames
 
-  frame(req: ChartRequest | null, ground: GroundField, volMode: number, stepsPerSecond: number, origin: { x: number; y: number }): { msg: RegionalFrame; transfer: ArrayBuffer[] } {
+  frame(req: ChartRequest | null, ground: GroundField, volMode: number, stepsPerSecond: number, origin: { x: number; y: number }, subgrid = true): { msg: RegionalFrame; transfer: ArrayBuffer[] } {
+    this.subgrid = subgrid;
     const ax = this.ax, { nr, nz, dr, dz } = ax.a, N = this.N, S = ax.scalars;
     // precipitation rate from the accumulation change
     const acc = Float64Array.from(this.mp.rainAcc);
@@ -194,10 +216,10 @@ export class AxiDriver {
     let wmax = 0, qcmax = 0, qrmax = 0;
     for (let k = 0; k < nz; k++) for (let i = 0; i < nr; i++) {
       const q = ax.idx(i, 0, k);
-      // snow drawn with the cloud (as the 3-D experiments), channel 2 rain + graupel
-      const cl = Math.max(0, S[QC]![q]! + S[QI]![q]!), pr = Math.max(0, S[QR]![q]! + S[QS]![q]! + S[QG]![q]!);
-      cb[k * nr + i] = Math.min(255, Math.round(Math.sqrt((cl + Math.max(0, S[QS]![q]!)) / 3e-3) * 255));
-      let v2 = Math.sqrt(Math.max(0, S[QR]![q]! + S[QG]![q]!) / 8e-3);
+      // extinction bytes as the 3-D experiments (display.ts): cloud with snow and sub-grid cloud, channel 2 rain + graupel
+      const cl = Math.max(0, S[QC]![q]! + S[QI]![q]!), pr = Math.max(0, S[QR]![q]! + S[QS]![q]! + S[QG]![q]!), e = this.ext(i, k);
+      cb[k * nr + i] = extByte(e.c);
+      let v2 = extByte(e.p) / 255;
       if (volMode === 1) v2 = Math.sqrt(Math.max(0.5 * (ax.w[q]! + ax.w[q + ax.sx]!), 0) / 40);
       else if (volMode === 2) v2 = Math.sqrt(Math.max(zetaL[k]![i]!, 0) / 0.05);
       pb[k * nr + i] = Math.min(255, Math.round(v2 * 255));
@@ -235,7 +257,7 @@ export class AxiDriver {
         storm: { x: origin.x + this.D, y: origin.y + this.D }, vtProfile: { dr, vt }, tornado: null, tcRain: this.tcRain,
         // the one storm of the axisymmetric model: the vortex on the axis
         storms: [{ id: 1, kind: 'vortex', name: 'TC1', x: origin.x + this.D, y: origin.y + this.D, xd: this.D, yd: this.D, u: 0, v: 0, age: ax.time,
-          pmin: this.centralSlp(), dp: -mt.dp, vmax: mt.vmax, rmw: mt.rmw }], mainId: 1 },
+          pmin: this.centralSlp(), dp: -mt.dp, vmax: mt.vmax, rmw: mt.rmw, r7: this.galeRadius(GALE7), r10: this.galeRadius(GALE10) }], mainId: 1 },
       origin, charts, tracers: null, stepsPerSecond, dt: ax.a.dt,
     };
     return { msg, transfer };
@@ -261,6 +283,7 @@ export class AxiDriver {
         case 'cape': prof = col.cape; break;
         case 'cin': prof = col.cin; break;
         case 'vis': prof = col.vis; break;
+        case 'visZ': prof = col.visZ; break;
         case 'pw': prof = col.pw; break;
         case 'wvT': prof = col.wvT.map((x) => x - 273.15); break;
         case 'rain': prof = this.mp.rainAcc; break;

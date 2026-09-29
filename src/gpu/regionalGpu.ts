@@ -10,7 +10,8 @@ import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } 
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
 import { COL, WV_PATH } from '../regional/diagnostics.js';
 import { FORCING_TAU, MAX_FORCINGS, forcingTable, type WindForcing } from '../regional/forcing.js';
-import { CU_TAU, CU_RH, CU_MIN_DEPTH, CU_DETRAIN, CU_DETRAIN_DEPTH, CU_TOWER, CU_SHALLOW, CU_DRAW_PERIOD, cumulusScale } from '../regional/cumulus.js';
+import { CU_TAU, CU_RH, CU_MIN_DEPTH, CU_DETRAIN, CU_DETRAIN_DEPTH, cumulusScale } from '../regional/cumulus.js';
+import { EXT, EXT_MAX, subgridRHc } from '../regional/display.js';
 import type { TracerParams } from '../regional/tracers.js';
 
 const WG = 64;
@@ -651,7 +652,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * (m^2/s^2), surface-based CAPE and CIN (J/kg; same steps as parcelAscent); `planes`: every prognostic
    * field at the requested levels (w also at the level above); accumulated rain and snow at level 0.
    */
-  async readDisplay(levels: number[], volMode = 0, cuShow = true): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, DisplayPlanes>; rain: Float32Array; snow: Float32Array; tracers: Float32Array | null; cu: Float32Array | null }> {
+  async readDisplay(levels: number[], volMode = 0, subgrid = true): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, DisplayPlanes>; rain: Float32Array; snow: Float32Array; tracers: Float32Array | null; cu: Float32Array | null }> {
     const m = this.cpu, { nx, ny, nz, dx, dy } = m.c, n = nx * ny * nz, dev = this.device, PL = m.plane, SIZE = m.size, NFp = this.nf;
     if (!this.disp) {
       const code = `
@@ -662,17 +663,30 @@ const DX: f32 = ${dx}; const DY: f32 = ${dy}; const COL: u32 = ${COL}u;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @group(0) @binding(3) var<storage, read> LB: array<f32>;     // per level: pi0, rho0, zc, dz
 @group(0) @binding(4) var<uniform> MODE: vec4<u32>;
-@group(0) @binding(5) var<storage, read> CUD: array<f32>;       // cumulus state per column (kb, kt, rate mm/h, CAPE)
-const CUON: bool = ${this.cuScale > 0};
-fn pcgd(v: u32) -> u32 { let s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+const RHC: f32 = ${subgridRHc(dx)};
 fn cs(f: u32, q: u32) -> f32 { return select(0.0, S[f * SIZE + q], MOIST); }
+// display extinction (1/m; cloudExtinction / precipExtinction / subgridCloud in src/regional/display.ts)
+fn extc(k: u32, q: u32, sub: bool) -> f32 {
+  let pik = LB[4u * k] + S[4u * SIZE + q]; let T = S[3u * SIZE + q] * pik; let rho = LB[4u * k + 1u];
+  let qc = max(cs(6u, q), 0.0);
+  var qsub = 0.0;
+  if (MOIST && sub && cs(6u, q) <= 1e-8) {
+    let p = 1e5 * pow(pik, 1004.5 / 287.05); let es = 611.2 * exp(17.67 * (T - 273.15) / (T - 29.65));
+    let qsat = 0.622 * es / max(p - es, 1.0); let rh = cs(5u, q) / qsat;
+    if (rh > RHC && rh < 1.0) { let a = 1.0 + (rh - 1.0) / (1.0 - RHC); qsub = (1.0 - RHC) * qsat * a * a * a / 6.0; }
+  }
+  var e = ${EXT.liquid.toFixed(1)} * qc + select(${EXT.ice.toFixed(1)}, ${EXT.liquid.toFixed(1)}, T > 253.15) * qsub;
+  if (ICE) { e += ${EXT.ice.toFixed(1)} * max(S[8u * SIZE + q], 0.0) + ${EXT.snow.toFixed(1)} * max(S[9u * SIZE + q], 0.0); }
+  return rho * e;
+}
+fn extb(beta: f32) -> u32 { if (beta <= 0.0) { return 0u; } return u32(min(255.0, round(255.0 * pow(beta / ${EXT_MAX}, 1.0 / 3.0)))); }
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
   if (t >= NX * NY) { return; }
   let j = t / NX; let i = t % NX;
   var wmax = 0.0; var wmin = 0.0; var cmax = 0.0; var pmax = 0.0; var zmax = 0.0; var ctz = 0.0; var ctt = 0.0; var uh = 0.0;
-  var lwp = 0.0; var iwp = 0.0; var swp = 0.0; var pw = 0.0;
+  var pw = 0.0; var tau = 0.0; var bet: array<f32, ${nz}>;
   // surface-based parcel (parcelAscent in src/regional/diagnostics.ts)
   var pth = 0.0; var pq = 0.0; var cape = 0.0; var cin = 0.0; var lcl = false; var lfc = false;
   for (var k = 0u; k < NZ; k++) {
@@ -683,8 +697,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     cl = max(cl, 0.0); pr = max(pr, 0.0);
     let rho = LB[4u * k + 1u];
     let rdz = rho * LB[4u * k + 3u];
-    lwp += rdz * max(cs(6u, q), 0.0); pw += rdz * max(cs(5u, q), 0.0);
-    if (ICE) { iwp += rdz * max(S[8u * SIZE + q], 0.0); swp += rdz * qs; }
+    pw += rdz * max(cs(5u, q), 0.0);
     // reflectivity factor (mm^6 m^-3) from rain, snow and graupel contents (kg m^-3)
     let zr = 3.63e9 * pow(rho * max(cs(7u, q), 0.0), 1.75) + 9.80e8 * pow(rho * qs, 1.75) + 4.33e10 * pow(rho * qg, 1.75);
     zmax = max(zmax, zr);
@@ -694,22 +707,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let zc = LB[4u * k + 2u];
     if (zc >= 2000.0 && zc <= 5000.0) { uh += wc * zeta * LB[4u * k + 3u]; }
     if (cl > 1e-5) { ctz = zc; ctt = S[3u * SIZE + q] * (LB[4u * k] + S[4u * SIZE + q]); }
-    // 3-D view: snow is drawn with the cloud (anvils and the outflow shield are mostly snow in this scheme),
-    // channel 2 with rain and graupel
-    var cb = u32(min(255.0, round(sqrt((cl + qs) / 3e-3) * 255.0)));
-    // parameterized convection (MODE.y = 1): a translucent tower from the cloud base to the top, denser with more rain;
-    // shallow convection as thin cumulus (cumulusCloud in src/regional/cumulus.ts)
-    if (CUON && MODE.y == 1u) {
-      let kb = CUD[4u * t]; let kt = CUD[4u * t + 1u];
-      let r = f32(pcgd(t ^ pcgd(MODE.z + 0x9e37u))) / 4294967296.0;
-      var top = kt; var cover = min(0.6, 0.1 + 0.08 * CUD[4u * t + 2u]); var qc2 = ${CU_TOWER};
-      if (kt < -1.5) { top = -kt - 2.0; cover = 0.15; qc2 = ${CU_SHALLOW}; }
-      if (kb >= 0.0 && f32(k) >= kb && f32(k) <= top && r < cover) { cb = max(cb, u32(min(255.0, round(sqrt(qc2 / 3e-3) * 255.0)))); }
-    }
-    var v2 = sqrt(max(pr - qs, 0.0) / 8e-3);
-    if (MODE.x == 1u) { v2 = sqrt(max(wc, 0.0) / 40.0); }
-    if (MODE.x == 2u) { v2 = sqrt(max(zeta, 0.0) / 0.05); }
-    let pb = u32(min(255.0, round(v2 * 255.0)));
+    // 3-D view: extinction of cloud water, sub-grid cloud (MODE.y), ice and snow (anvils are mostly snow in this
+    // scheme); channel 2: extinction of rain and graupel, or updraft, or cyclonic vorticity
+    let bc = extc(k, q, MODE.y == 1u);
+    bet[k] = bc; tau += bc * LB[4u * k + 3u];
+    let cb = extb(bc);
+    var pb = extb(rho * (${EXT.rain.toFixed(1)} * max(cs(7u, q), 0.0) + ${EXT.graupel.toFixed(1)} * qg));
+    if (MODE.x == 1u) { pb = u32(min(255.0, round(sqrt(max(wc, 0.0) / 40.0) * 255.0))); }
+    if (MODE.x == 2u) { pb = u32(min(255.0, round(sqrt(max(zeta, 0.0) / 0.05) * 255.0))); }
     D[(k * NY + j) * NX + i] = cb | (pb << 8u);
     let w = S[2u * SIZE + q];
     wmax = max(wmax, w); wmin = min(wmin, w); cmax = max(cmax, cl); pmax = max(pmax, pr);
@@ -755,8 +760,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   if (!found) { let q = (NZ - 1u) * PL + (j + HH) * SX + (i + HH); wvT = S[3u * SIZE + q] * (LB[4u * (NZ - 1u)] + S[4u * SIZE + q]); }
   if (ctz > zEmit) { wvT = ctt; }
-  let tau = 150.0 * lwp + 41.0 * iwp + 20.0 * swp;
-  C[COL * t + 10u] = tau / (tau + 7.7); C[COL * t + 11u] = pw; C[COL * t + 12u] = wvT;
+  // visible image: cloud albedo of the column optical depth, and the height where the optical depth from the top reaches 1
+  // (the tau-weighted mean height of thinner columns); columnDiagnostics in src/regional/diagnostics.ts
+  var below = 0.0; var zvis = 0.0; var zw = 0.0;
+  for (var k = 0u; k < NZ; k++) {
+    let dt = bet[k] * LB[4u * k + 3u];
+    if (tau - below >= 1.0) { zvis = LB[4u * k + 2u]; }
+    zw += dt * LB[4u * k + 2u]; below += dt;
+  }
+  if (tau < 1.0) { zvis = select(0.0, zw / tau, tau > 1e-3); }
+  C[COL * t + 10u] = tau / (tau + 7.7); C[COL * t + 11u] = pw; C[COL * t + 12u] = wvT; C[COL * t + 13u] = zvis;
 }`;
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
       const D = dev.createBuffer({ size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -766,11 +779,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const LB = dev.createBuffer({ size: lb.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       dev.queue.writeBuffer(LB, 0, lb);
       const MODE = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const bind = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: D } }, { binding: 2, resource: { buffer: C } }, { binding: 3, resource: { buffer: LB } }, { binding: 4, resource: { buffer: MODE } }, { binding: 5, resource: { buffer: this.ensureCuBuf() } }] });
+      const bind = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: D } }, { binding: 2, resource: { buffer: C } }, { binding: 3, resource: { buffer: LB } }, { binding: 4, resource: { buffer: MODE } }] });
       this.disp = { pipe, bind, D, C, LB, MODE };
     }
     const d = this.disp, planeBytes = PL * 4;
-    dev.queue.writeBuffer(d.MODE, 0, new Uint32Array([volMode, cuShow ? 1 : 0, Math.floor(this.time / CU_DRAW_PERIOD) >>> 0, 0]));
+    dev.queue.writeBuffer(d.MODE, 0, new Uint32Array([volMode, subgrid ? 1 : 0, 0, 0]));
     const perLevel = NFp + 1;
     const trBytes = this.trK ? this.trK.n * 16 : 0;
     const cuBytes = this.cuScale > 0 ? 16 * nx * ny : 0;

@@ -19,7 +19,6 @@
 // full strength on 12 km grids and coarser, none at 3 km and finer, where the model resolves convection itself.
 
 import type { RegionalModel } from './core.js';
-import { pcg } from './tracers.js';
 
 export const CU_TAU = 7200, CU_RH = 0.7, CU_MIN_DEPTH = 3000, CU_DETRAIN = 0.2, CU_DETRAIN_DEPTH = 2000;
 const CP = 1004.5, LV = 2.5e6, RD = 287.05, G = 9.80665;
@@ -82,21 +81,6 @@ export function cumulusColumn(T: ArrayLike<number>, p: ArrayLike<number>, q: Arr
   const c = (P - PT) * LV / (CP * mass);
   for (let k = 0; k <= kt; k++) { dT[k] = sc * (dT[k]! + c); dq[k] = sc * dq[k]!; }
   return { P: sc * P, kb, kt, cape, deep };
-}
-
-/** Display of parameterized convection in the 3-D view (display only; condensate-equivalent kg/kg, drawn like cloud).
- *  The scheme stands for clouds covering part of the grid box, so each convecting column shows a tower with a
- *  probability equal to that cover (a Monte-Carlo picture of the cloud fraction, redrawn every CU_DRAW_PERIOD s): deep
- *  convection min(0.6, 0.1 + 0.08 rate) (rate in mm/h), towers of CU_TOWER; shallow convection 0.15, cumulus of
- *  CU_SHALLOW. Scattered towers with clear gaps instead of a haze over every convecting column. */
-export const CU_TOWER = 1.2e-3, CU_SHALLOW = 4e-4, CU_DRAW_PERIOD = 1800;
-/** Uniform number in [0, 1) of column c in draw period `epoch` (the GPU display kernel uses the same hash). */
-export const cumulusDraw = (c: number, epoch: number): number => pcg((c ^ pcg((epoch + 0x9e37) >>> 0)) >>> 0) / 4294967296;
-/** Display condensate of a column at level k (kb, kt, rate as in CumulusInfo; r from cumulusDraw). */
-export function cumulusCloud(kb: number, kt: number, rate: number, k: number, r: number): number {
-  if (kb < 0 || kt === -1) return 0;
-  const shallow = kt < -1, top = shallow ? -kt - 2 : kt, cover = shallow ? 0.15 : Math.min(0.6, 0.1 + 0.08 * rate);
-  return k >= kb && k <= top && r < cover ? (shallow ? CU_SHALLOW : CU_TOWER) : 0;
 }
 
 /** Per-column state of the scheme for display: cloud base level, top level (shallow convection: -top - 2; none: -1),

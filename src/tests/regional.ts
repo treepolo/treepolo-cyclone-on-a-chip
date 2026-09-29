@@ -381,10 +381,18 @@ void DRY_AIR;
   const { tcSounding } = await import('../regional/tropical.js');
   const mm = new RegionalModel({ ...base, nx: 4, ny: 4, nz: 50, dx: 5000, dy: 5000, dz: 500, dt: 10 }, tcSounding('unstable', 301.15), 6);
   for (let k = 0; k < mm.c.nz; k++) for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) mm.scalars[0]![mm.idx(i, j, k)] = mm.qv0[k]!;
-  const cd = columnDiagnostics(mm), o = COL * 5;
+  const cd = columnDiagnostics(mm, false), o = COL * 5;
   const vis = cd[o + C.vis]!, pw = cd[o + C.pw]!, wv = cd[o + C.wvT]! - 273.15;
   check('satellite columns: clear tropical column: albedo 0, precipitable water 45-75 mm, water-vapour channel -45 to -10 °C', vis === 0 && pw > 45 && pw < 75 && wv > -45 && wv < -10,
     `albedo ${vis.toFixed(2)}, PW ${pw.toFixed(1)} mm, WV ${wv.toFixed(1)} °C`);
+  // sub-grid cloud: none below RHc, a thin deck at 95 % on a 15 km grid, the visible top at that level
+  const { subgridCloud, subgridRHc, qsatW: qsw } = await import('../regional/display.js');
+  const qs0 = qsw(290, 9e4), rhc = subgridRHc(15000), c90 = subgridCloud(0.84 * qs0, qs0, rhc), c95 = subgridCloud(0.95 * qs0, qs0, rhc);
+  for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) { const q = mm.idx(i, j, 3); const pi = mm.pi0[3]! + mm.pp[q]!; mm.scalars[0]![q] = 0.97 * qsw(mm.th[q]! * pi, 1e5 * Math.pow(pi, 1004.5 / 287.05)); }
+  const cs = columnDiagnostics(mm, true);
+  check('sub-grid cloud: none at 84 % (RHc 0.85), 0.05-0.3 g/kg at 95 %; a humid layer gives albedo > 0.1 with its top at that level',
+    c90 === 0 && c95 > 5e-5 && c95 < 3e-4 && cs[o + C.vis]! > 0.1 && Math.abs(cs[o + C.visZ]! - mm.zc[3]!) < 1,
+    `${(c95 * 1e3).toFixed(3)} g/kg, albedo ${cs[o + C.vis]!.toFixed(2)}, top ${cs[o + C.visZ]!.toFixed(0)} m`);
 }
 
 // Wind interactions: a push once adds its speed at the centre; a lasting push relaxes the wind toward the target

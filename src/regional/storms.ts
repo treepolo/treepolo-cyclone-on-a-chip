@@ -14,6 +14,8 @@ import type { RegionalModel } from './core.js';
 import { C, COL } from './diagnostics.js';
 
 export const VORTEX_DP = 2, VORTEX_VT = 3, CELL_W = 10;
+/** Beaufort 7 and 10 (lower bounds, m/s): the gale radii of Taiwan's typhoon reports (七級 / 十級暴風半徑) */
+export const GALE7 = 13.9, GALE10 = 24.5;
 const LOST_VORTEX = 3 * 3600, LOST_CELL = 900, SAMPLE_VORTEX = 600, SAMPLE_CELL = 60;
 
 export type StormKind = 'vortex' | 'cell';
@@ -27,6 +29,8 @@ export interface StormNow {
   /** vortices: minimum sea-level pressure (hPa), deficit below the domain median (hPa), maximum surface wind within
    *  150 km (m/s), radius of maximum azimuthal-mean tangential wind (m) */
   pmin?: number; dp?: number; vmax?: number; rmw?: number;
+  /** vortices: radii of Beaufort 7 and 10 winds (m; mean over 16 directions of the outermost such wind, 0 where none) */
+  r7?: number; r10?: number;
   /** cells: maximum updraft (m/s), 2-5 km updraft helicity with the larger magnitude (m^2/s^2), maximum
    *  reflectivity (dBZ), area of updraft above CELL_W (km^2) */
   wmax?: number; uh?: number; dbz?: number; area?: number;
@@ -106,9 +110,36 @@ export function findVortices(m: RegionalModel, frame: { u: number; v: number }):
     for (let k = 0; k < nb; k++) if (cnt[k]! > 0) { const v = sign * vt[k]! / cnt[k]!; tot += vt[k]!; tn += cnt[k]!; if (v > best) { best = v; rmw = (k + 0.5) * dx; } }
     const mean = tn ? sign * tot / tn : 0;
     if (mean < VORTEX_VT && !(f === 0 && -mean >= VORTEX_VT)) continue;
-    out.push({ kind: 'vortex', xd: (ic + 0.5) * dx, yd: (jc + 0.5) * dy, strength: median - pmin, data: { pmin, dp: median - pmin, vmax, rmw } });
+    const { r7, r10 } = galeRadii(m, ic, jc, frame, rmw);
+    out.push({ kind: 'vortex', xd: (ic + 0.5) * dx, yd: (jc + 0.5) * dy, strength: median - pmin, data: { pmin, dp: median - pmin, vmax, rmw, r7, r10 } });
   }
   return out;
+}
+
+/**
+ * Gale radii of a vortex centred on cell (ic, jc): along 16 directions, the outermost distance with a ground-relative
+ * lowest-level wind of at least GALE7 (GALE10) m/s, following the wind outward across gaps of up to 60 km (3 cells on
+ * coarser grids) and through the calmer eye; averaged over the directions (a direction without such wind counts 0).
+ */
+export function galeRadii(m: RegionalModel, ic: number, jc: number, frame: { u: number; v: number }, rmw: number): { r7: number; r10: number } {
+  const { nx, ny, dx, dy } = m.c, sx = m.sx, periodic = m.c.lateral !== 'open';
+  const Rg = Math.min(800000, 0.45 * Math.min(nx * dx, ny * dy)), step = 0.5 * Math.min(dx, dy), gap = Math.max(60000, 3 * dx), inner = Math.max(1.5 * rmw, gap);
+  let s7 = 0, s10 = 0;
+  for (let a = 0; a < 16; a++) {
+    const ca = Math.cos(a * Math.PI / 8), sa = Math.sin(a * Math.PI / 8);
+    let l7 = 0, l10 = 0;
+    for (let r = step; r <= Rg; r += step) {
+      let i = Math.floor(((ic + 0.5) * dx + r * ca) / dx), j = Math.floor(((jc + 0.5) * dy + r * sa) / dy);
+      if (periodic) { i = ((i % nx) + nx) % nx; j = ((j % ny) + ny) % ny; } else if (i < 0 || j < 0 || i >= nx || j >= ny) break;
+      const q = m.idx(i, j, 0), sp = Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!) + frame.u, 0.5 * (m.v[q]! + m.v[q + sx]!) + frame.v);
+      const open7 = r - l7 <= gap || (l7 === 0 && r <= inner), open10 = r - l10 <= gap || (l10 === 0 && r <= inner);
+      if (sp >= GALE7 && open7) l7 = r;
+      if (sp >= GALE10 && open10) l10 = r;
+      if (!open7 && !open10) break;
+    }
+    s7 += l7; s10 += l10;
+  }
+  return { r7: s7 / 16, r10: s10 / 16 };
 }
 
 /** Convective-cell detections from the column composites (COL values per column, see diagnostics.ts). */

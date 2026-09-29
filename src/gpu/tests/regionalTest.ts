@@ -388,8 +388,8 @@ export async function regionalChartsTest(): Promise<void> {
   };
   const basic = [C.wmax, C.wmin, C.cmax, C.pmax, C.ctopT].map(rel);
   gcheck('charts: GPU column extremes and cloud-top temperature match the CPU (rel L2 < 1e-4)', basic.every((x) => x < 1e-4), basic.map((x) => x.toExponential(1)).join(' '));
-  const sat = [C.vis, C.pw, C.wvT].map(rel);
-  gcheck('charts: GPU cloud albedo, precipitable water and water-vapour channel match the CPU (rel L2 < 1e-3)', sat.every((x) => x < 1e-3), sat.map((x) => x.toExponential(1)).join(' '));
+  const sat = [C.vis, C.pw, C.wvT, C.visZ].map(rel);
+  gcheck('charts: GPU cloud albedo, precipitable water, water-vapour channel and visible cloud top match the CPU (rel L2 < 1e-3)', sat.every((x) => x < 1e-3), sat.map((x) => x.toExponential(1)).join(' '));
   let dz2 = 0, ctzMis = 0;
   for (let q = 0; q < nx * nx; q++) {
     if (cpu[COL * q + C.dbz]! > 0) dz2 = Math.max(dz2, Math.abs(d.col[COL * q + C.dbz]! - cpu[COL * q + C.dbz]!));

@@ -49,8 +49,8 @@ export type ToRegionalWorker =
   | { type: 'charts'; req: ChartRequest | null }
   /** second channel of the 3-D view: 0 precipitation, 1 updraft, 2 cyclonic vertical vorticity */
   | { type: 'volMode'; mode: number }
-  /** draw the parameterized convection (cumulus scheme) in the 3-D view */
-  | { type: 'cuShow'; on: boolean }
+  /** draw sub-grid (partial) cloud in the 3-D view and the visible image (display.ts) */
+  | { type: 'subgrid'; on: boolean }
   /** tracer particles for the 3-D view (0: off) */
   | { type: 'tracers'; n: number }
   /** interaction (conditions only): a warm bubble or a cold pool centred at (x, y) m in domain coordinates, optionally

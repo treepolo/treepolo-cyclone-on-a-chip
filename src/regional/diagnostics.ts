@@ -4,6 +4,7 @@
 // versions here serve the CPU backend and the GPU-vs-CPU tests.
 
 import { H, type RegionalModel } from './core.js';
+import { albedo, cloudExtinction, subgridCloud, subgridRHc } from './display.js';
 
 const RD = 287.05, CP = 1004.5, P0 = 1e5, LV = 2.5e6, G = 9.80665;
 
@@ -35,11 +36,12 @@ const zFactor = (rho: number, qr: number, qs: number, qg: number): number =>
 // ---------------------------------------------------------------- variables
 
 /** Values per column in the display composites (GPU readDisplay and columnDiagnostics). */
-export const COL = 13;
+export const COL = 14;
 /** Offsets in a column record. */
-export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 6, uh: 7, cape: 8, cin: 9, vis: 10, pw: 11, wvT: 12 } as const;
-/** Satellite-like column values: cloud albedo from the optical depth tau = 150 LWP + 41 IWP + 20 SWP (kg/m^2; effective
- *  radii about 10 um water, 40 um ice, larger snow) as tau / (tau + 7.7); the water-vapour channel as the temperature
+export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 6, uh: 7, cape: 8, cin: 9, vis: 10, pw: 11, wvT: 12, visZ: 13 } as const;
+/** Satellite-like column values: cloud albedo of the column optical depth (display.ts extinctions, sub-grid cloud
+ *  included) and the height where the optical depth from the top reaches 1 (the visible image's cloud top, for its
+ *  shading; the optical-depth-weighted mean height of thinner columns); the water-vapour channel as the temperature
  *  where the water-vapour path above first falls below WV_PATH kg/m^2 (upper-tropospheric humidity), or the cloud top
  *  when a cloud reaches above that level. */
 export const WV_PATH = 0.3;
@@ -49,7 +51,7 @@ export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh',
 /** Fields of a cross-section or sounding (per level). */
 export const SECTION_VARS = ['dbz', 'w', 'u', 'v', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'T', 'Td', 'p', 'qv', 'pp'] as const;
 /** Composite (column / surface) maps. */
-export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'wvT', 'pw', 'cuRain'] as const;
+export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'visZ', 'wvT', 'pw', 'cuRain'] as const;
 /** Azimuthal-mean (radius-height) fields. */
 export const RZ_VARS = ['vt', 'vr', 'w', 'thp', 'cond'] as const;
 export type SliceVar = (typeof SLICE_VARS)[number];
@@ -117,15 +119,14 @@ export function sectionValues(c: CellState, b: LevelBase, out: Float32Array, o: 
  *  w max / min, condensate and precipitation maxima, column-max reflectivity (dBZ), cloud-top height (m)
  *  and temperature (K; the lowest-level temperature where there is no cloud), 2-5 km updraft helicity
  *  (m^2/s^2), surface-based CAPE and CIN (J/kg). */
-export function columnDiagnostics(m: RegionalModel): Float32Array {
+export function columnDiagnostics(m: RegionalModel, subgrid = true): Float32Array {
   const { nx, ny, nz, dx, dy, dz } = m.c, sc = m.scalars, ns = sc.length, sx = m.sx, pl = m.plane;
   const out = new Float32Array(nx * ny * COL);
-  const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz);
+  const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz), bet = new Float64Array(nz), rhc = subgridRHc(dx);
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    let wmax = 0, wmin = 0, cmax = 0, pmax = 0, zmax = 0, ctz = 0, ctt = 0, uh = 0, lwp = 0, iwp = 0, swp = 0, pw = 0;
+    let wmax = 0, wmin = 0, cmax = 0, pmax = 0, zmax = 0, ctz = 0, ctt = 0, uh = 0, pw = 0, tau = 0;
     for (let k = 0; k < nz; k++) {
       const q = m.idx(i, j, k), rdz = m.rho0[k]! * dz;
-      lwp += rdz * Math.max(0, ns > 1 ? sc[1]![q]! : 0); iwp += rdz * Math.max(0, ns > 5 ? sc[3]![q]! : 0); swp += rdz * Math.max(0, ns > 5 ? sc[4]![q]! : 0);
       pw += rdz * Math.max(0, ns > 0 ? sc[0]![q]! : 0);
       const qr = ns > 2 ? Math.max(sc[2]![q]!, 0) : 0, qs = ns > 5 ? Math.max(sc[4]![q]!, 0) : 0, qg = ns > 5 ? Math.max(sc[5]![q]!, 0) : 0;
       const cl = Math.max(0, (ns > 1 ? sc[1]![q]! : 0) + (ns > 5 ? sc[3]![q]! : 0)), pr = Math.max(0, (ns > 2 ? sc[2]![q]! : 0) + (ns > 5 ? qs + qg : 0));
@@ -138,6 +139,8 @@ export function columnDiagnostics(m: RegionalModel): Float32Array {
       const pi = m.pi0[k]! + m.pp[q]!;
       T[k] = m.th[q]! * pi; p[k] = pressure(pi); qv[k] = ns > 0 ? sc[0]![q]! : 0;
       if (cl > 1e-5) { ctz = zc; ctt = T[k]!; }
+      const qcw = ns > 1 ? sc[1]![q]! : 0, qsub = subgrid && ns > 0 && qcw <= 1e-8 ? subgridCloud(qv[k]!, qsatW(T[k]!, p[k]!), rhc) : 0;
+      bet[k] = cloudExtinction(m.rho0[k]!, qcw, qsub, ns > 5 ? sc[3]![q]! : 0, qs, T[k]!); tau += bet[k]! * dz;
       const w = m.w[q]!;
       wmax = Math.max(wmax, w); wmin = Math.min(wmin, w); cmax = Math.max(cmax, cl); pmax = Math.max(pmax, pr);
     }
@@ -147,9 +150,12 @@ export function columnDiagnostics(m: RegionalModel): Float32Array {
     let above = pw, wvT = T[nz - 1]!, zEmit = m.zc[nz - 1]!;
     for (let k = 0; k < nz; k++) { above -= m.rho0[k]! * dz * Math.max(0, qv[k]!); if (above < WV_PATH) { wvT = T[k]!; zEmit = m.zc[k]!; break; } }
     if (ctz > zEmit) wvT = ctt;
-    const tau = 150 * lwp + 41 * iwp + 20 * swp;
+    // visible image: albedo and the height where the optical depth from the top reaches 1
+    let below = 0, zvis = 0, zw = 0;
+    for (let k = 0; k < nz; k++) { const d = bet[k]! * dz; if (tau - below >= 1) zvis = m.zc[k]!; zw += d * m.zc[k]!; below += d; }
+    if (tau < 1) zvis = tau > 1e-3 ? zw / tau : 0;
     const o = COL * (j * nx + i);
-    out[o + 10] = tau / (tau + 7.7); out[o + 11] = pw; out[o + 12] = wvT;
+    out[o + 10] = albedo(tau); out[o + 11] = pw; out[o + 12] = wvT; out[o + 13] = zvis;
     out[o] = wmax; out[o + 1] = wmin; out[o + 2] = cmax; out[o + 3] = pmax; out[o + 4] = 10 * Math.log10(Math.max(zmax, 1e-3));
     out[o + 5] = ctz; out[o + 6] = ctt; out[o + 7] = uh; out[o + 8] = pc.cape; out[o + 9] = pc.cin;
   }
@@ -256,6 +262,7 @@ export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPla
         case 'cape': x = col[o + C.cape]!; break;
         case 'cin': x = col[o + C.cin]!; break;
         case 'vis': x = col[o + C.vis]!; break;
+        case 'visZ': x = col[o + C.visZ]!; break;
         case 'pw': x = col[o + C.pw]!; break;
         case 'wvT': x = col[o + C.wvT]! - 273.15; break;
         case 'rain': x = acc.rain[c]!; break;

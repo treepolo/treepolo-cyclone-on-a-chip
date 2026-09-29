@@ -17,7 +17,7 @@ import { Pacer } from '../pacer.js';
 import { StormTracker, type TornadoEnv } from '../../regional/supercell.js';
 import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.js';
 import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcing.js';
-import { cumulusCloud, cumulusDraw, CU_DRAW_PERIOD } from '../../regional/cumulus.js';
+import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
@@ -95,8 +95,8 @@ function frameDue(): boolean {
 let nestSource: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
 // charts: what the page wants in each frame, the 3-D view's second channel
 let chartReq: ChartRequest | null = null, volMode = 0;
-/** draw the parameterized convection in the 3-D view; its rain rate per column (mm/h) of the last frame, null without the scheme */
-let cuShow = true, cuRate: Float32Array | null = null;
+/** draw sub-grid cloud (display.ts) in the 3-D view; the cumulus scheme's rain rate per column (mm/h) of the last frame, null without it */
+let subgrid = true, cuRate: Float32Array | null = null;
 // ground-relative position of the domain origin: advances with the frame velocity, jumps with rolls and refinement
 let origin = { x: 0, y: 0 }, originT = 0;
 function advanceOrigin(): void { const t = modelNow(); origin.x += frameVel.u * (t - originT); origin.y += frameVel.v * (t - originT); originT = t; }
@@ -405,7 +405,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'ground') { ground = msg.field; await refreshFrame(); }
     else if (msg.type === 'charts') { chartReq = msg.req; await refreshFrame(); }
     else if (msg.type === 'volMode') { volMode = msg.mode | 0; await refreshFrame(); }
-    else if (msg.type === 'cuShow') { cuShow = msg.on; await refreshFrame(); }
+    else if (msg.type === 'subgrid') { subgrid = msg.on; await refreshFrame(); }
     else if (msg.type === 'tracers') {
       while (busy) await new Promise((r) => setTimeout(r, 5));
       tracerN = Math.max(0, Math.min(65536, msg.n | 0)); setupTracers(); await refreshFrame();
@@ -862,7 +862,7 @@ async function sendFrame(): Promise<void> {
 async function sendFrameRaw(): Promise<void> {
   if (axi) {
     lastFrame = performance.now(); lastFrameModel = modelNow();
-    const { msg, transfer } = axi.frame(chartReq, ground, volMode, rate, { ...origin });
+    const { msg, transfer } = axi.frame(chartReq, ground, volMode, rate, { ...origin }, subgrid);
     post(msg, transfer);
     return;
   }
@@ -883,7 +883,7 @@ async function sendFrameRaw(): Promise<void> {
   if (gpu) {
     // GPU: packed display bytes, column composites and the few horizontal planes the diagnostics need
     const levels = [...new Set([0, k15, ...(sliceK >= 0 ? [sliceK] : [])])];
-    const d = await gpu.readDisplay(levels, volMode, cuShow);
+    const d = await gpu.readDisplay(levels, volMode, subgrid);
     cuRate = d.cu ? Float32Array.from({ length: nx * ny }, (_, c) => d.cu![4 * c + 2]!) : null;
     const tNow = gpu.time, sNow = gpu.steps;
     for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; }
@@ -906,27 +906,28 @@ async function sendFrameRaw(): Promise<void> {
     for (let q = 0; q < m.size && !bad; q += 97) if (!Number.isFinite(m.w[q]!) || Math.abs(m.w[q]!) > W_BLOWUP || !Number.isFinite(m.th[q]!)) bad = true;
     if (bad) { blowPending = true; return; }
     const qc = m.scalars[QC]!, qr = m.scalars[QR]!, qi = m.scalars[QI]!, qs = m.scalars[QS]!, qg = m.scalars[QG]!;
-    const vm = volMode, cu = phys?.cu ?? null, cuEpoch = Math.floor(m.time / CU_DRAW_PERIOD);
+    const vm = volMode, cu = phys?.cu ?? null, qv = m.scalars[QV]!, rhc = subgridRHc(dx);
     cuRate = cu ? Float32Array.from(cu.rate) : null;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const q = m.idx(i, j, k), o = (k * ny + j) * nx + i;
-      // cloud: liquid and ice cloud and snow (anvils are mostly snow); channel 2: precipitation (rain + graupel), updraft or vorticity
-      const cl = Math.max(0, qc[q]! + qi[q]!), pr = Math.max(0, qr[q]! + qs[q]! + qg[q]!);
-      cloud[o] = Math.min(255, Math.round(Math.sqrt((cl + Math.max(0, qs[q]!)) / 3e-3) * 255));
-      let v2 = Math.sqrt(Math.max(0, qr[q]! + qg[q]!) / 8e-3);
+      // cloud: extinction of cloud water, sub-grid cloud, ice and snow (anvils are mostly snow); channel 2: extinction of
+      // precipitation (rain + graupel), updraft or vorticity (display.ts; the GPU display kernel packs the same bytes)
+      const cl = Math.max(0, qc[q]! + qi[q]!), pr = Math.max(0, qr[q]! + qs[q]! + qg[q]!), rho = m.rho0[k]!;
+      const pi = m.pi0[k]! + m.pp[q]!, T = m.th[q]! * pi;
+      const qsub = subgrid && qc[q]! <= 1e-8 ? subgridCloud(qv[q]!, qsatW(T, 1e5 * Math.pow(pi, 1004.5 / 287.05)), rhc) : 0;
+      cloud[o] = extByte(cloudExtinction(rho, qc[q]!, qsub, qi[q]!, qs[q]!, T));
+      let v2 = extByte(precipExtinction(rho, qr[q]!, qg[q]!)) / 255;
       if (vm === 1) v2 = Math.sqrt(Math.max(0.5 * (m.w[q]! + m.w[q + m.plane]!), 0) / 40);
       else if (vm === 2) {
         const zeta = 0.25 * ((m.v[q + 1]! + m.v[q + 1 + m.sx]!) - (m.v[q - 1]! + m.v[q - 1 + m.sx]!)) / dx - 0.25 * ((m.u[q + m.sx]! + m.u[q + m.sx + 1]!) - (m.u[q - m.sx]! + m.u[q - m.sx + 1]!)) / m.c.dy;
         v2 = Math.sqrt(Math.max(zeta, 0) / 0.05);
       }
       rain[o] = Math.min(255, Math.round(v2 * 255));
-      // parameterized convection (same drawing as the GPU display kernel)
-      if (cu && cuShow) { const c = j * nx + i, qd = cumulusCloud(cu.kb[c]!, cu.kt[c]!, cu.rate[c]!, k, cumulusDraw(c, cuEpoch)); if (qd > 0) cloud[o] = Math.max(cloud[o]!, Math.min(255, Math.round(Math.sqrt(qd / 3e-3) * 255))); }
       qcmax = Math.max(qcmax, cl); qrmax = Math.max(qrmax, pr);
       const w = m.w[q]!; wmax = Math.max(wmax, w); wmin = Math.min(wmin, w);
     }
     if (req) {
-      col = columnDiagnostics(m);
+      col = columnDiagnostics(m, subgrid);
       planeAt.set(0, modelPlanes(m, 0));
       if (sliceK >= 0) planeAt.set(sliceK, modelPlanes(m, sliceK));
       charts = await buildCharts(req, col, planeAt, sliceK, null);
