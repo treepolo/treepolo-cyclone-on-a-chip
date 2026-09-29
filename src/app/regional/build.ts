@@ -19,7 +19,7 @@ export interface Built {
   frame: { u: number; v: number };
   /** keeps the storm near the domain centre (null: the domain stays put) */
   tracker: StormTracker | null;
-  /** surface pressure of the undisturbed environment (hPa), for pressure deficits */
+  /** sea-level pressure of the undisturbed environment (hPa, reduced from the lowest level as storms.ts), for pressure deficits */
   dpEnv: number;
   /** the set-up actually built (a GPU-only grid runs coarser on the CPU) */
   setup: RegionalSetup;
@@ -95,7 +95,7 @@ export function buildModel(input: RegionalSetup, gpuOk: boolean): Built {
       if (!sea) { physics.z0 = 0.1; land = new Uint8Array(n2).fill(1); }
     }
   }
-  const dpEnv = 1e5 * Math.pow(m.pi0[0]!, 1004.5 / 287.05) / 100;
+  const dpEnv = 1e5 * Math.pow(m.pi0[0]!, 1004.5 / 287.05) / 100 * Math.exp(9.80665 * m.zc[0]! / (287.05 * m.th0[0]! * m.pi0[0]! * (1 + 0.61 * m.qv0[0]!)));
   const tracker = s.follow ? new StormTracker(s.init === 'vortex' ? 'vortex' : 'updraft') : null;
   const p = presetById(s.preset);
   return { model: m, physics, frame, tracker, dpEnv, setup: s, land, description: `${p && s.preset !== 'custom' ? p.label.split(' / ')[0] + '：' : ''}${describe(s)}` };

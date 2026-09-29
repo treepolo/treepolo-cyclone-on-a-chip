@@ -466,7 +466,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         mm.scalars.forEach((a, i) => a.set(arrays[`s${i}`] as Float32Array));
         mpp.rainAcc.set(arrays.rain as Float32Array); mpp.snowAcc.set(arrays.snow as Float32Array);
         mm.time = M.time; mm.steps = M.steps;
-        if (M.dpEnv) dpEnv = M.dpEnv;
+        // the environment's pressure comes from the rebuilt base state (saves before sea-level pressures stored the lowest level's)
         let note = `已載入存檔 / save loaded (t = ${(M.time / 3600).toFixed(2)} h)`;
         if (device) {
           const reason = await tryGpu(device);
