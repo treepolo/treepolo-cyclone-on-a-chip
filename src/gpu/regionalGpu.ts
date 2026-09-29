@@ -7,7 +7,7 @@
 
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
-import { ICE, LF, gammaFn } from '../regional/ice.js';
+import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
 import { COL } from '../regional/diagnostics.js';
 import type { TracerParams } from '../regional/tracers.js';
 
@@ -1432,6 +1432,17 @@ const PI_: f32 = 3.14159265;
 fn lam(rhox: f32, n0: f32, rq: f32) -> f32 { return pow(PI_ * rhox * n0 / max(rq, 1e-15), 0.25); }
 fn n0snow(T: f32) -> f32 { return min(2e8, 2e6 * exp(0.12 * max(0.0, T0 - T))); }
 fn inum(rqi: f32) -> f32 { return min(1e6, max(1e3, 5.38e7 * pow(max(rqi, 1e-20), 0.75))); }
+var<private> KA1: array<f32, 31> = array<f32, 31>(${KOENIG_A1.map((v) => v.toExponential(4)).join(', ')});
+var<private> KA2: array<f32, 31> = array<f32, 31>(${KOENIG_A2.map((v) => v.toFixed(4)).join(', ')});
+// Bergeron-process snow production (bergeron() in src/regional/ice.ts): (psfi, psfw)
+fn bergeron(T: f32, qi: f32, qc: f32, rho: f32, dt: f32) -> vec2<f32> {
+  if (!(T < T0 && T > T0 - 31.0) || qc <= 1e-8 || qi <= 1e-12) { return vec2<f32>(0.0, 0.0); }
+  let it = u32(clamp(round(T0 - T) - 1.0, 0.0, 30.0));
+  let a1 = KA1[it]; let a2 = KA2[it];
+  let dt1 = (pow(4.8e-7, 1.0 - a2) - pow(2.46e-7, 1.0 - a2)) / (a1 * (1.0 - a2));
+  let ni50 = qi / 4.8e-10 * min(1.0, dt / dt1);
+  return vec2<f32>(qi / dt1, ni50 * (a1 * pow(4.8e-7, a2) * 1e-3 + PI_ * rho * qc * 2.5e-9));
+}
 fn qvsw(T: f32, pr: f32) -> f32 { return 380.0 / pr * exp(17.27 * (T - 273.15) / (T - 35.86)); }
 fn qvsi(T: f32, pr: f32) -> f32 { return 380.0 / pr * exp(21.875 * (T - 273.15) / (T - 7.66)); }
 fn vfall(sp: u32, q: f32, rho: f32, rhoS: f32, T: f32) -> f32 {
@@ -1510,7 +1521,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (lG > 0.0) { kG = PI_ / 4.0 * N0G * AG * G3G / pow(lG, 3.0 + BG) * dens; vG = 0.78 / (lG * lG) + 0.31 * sc3 * sqrt(AG / nu) * G5G * dens4 / pow(lG, (BG + 5.0) / 2.0); }
     if (lR > 0.0) { kR = PI_ / 4.0 * N0R * AR * G3R / pow(lR, 3.0 + BR) * dens; }
     var pidep = 0.0; var pigen = 0.0; var psdep = 0.0; var pgdep = 0.0; var psaut = 0.0; var pgaut = 0.0;
-    var psaci = 0.0; var pgaci = 0.0; var praci = 0.0; var psacw = 0.0; var pgacw = 0.0; var pgfrz = 0.0; var psmlt = 0.0; var pgmlt = 0.0;
+    var psaci = 0.0; var pgaci = 0.0; var praci = 0.0; var psacw = 0.0; var pgacw = 0.0; var pgfrz = 0.0; var psmlt = 0.0; var pgmlt = 0.0; var psfi = 0.0; var psfw = 0.0;
     let cold = T < T0;
     if (cold) {
       let eci = exp(0.05 * (T - T0));
@@ -1522,6 +1533,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let rqi = rho * qi; let ni = inum(rqi); let di = 11.9 * sqrt(rqi / ni);
         pidep = 4.0 * di * ni * si / (rho * (Ai + Bi));
         psaut = max(0.0, 1e-3 * exp(0.025 * (T - T0)) * (qi - QI0));
+        let bg = bergeron(T, qi, qc, rho, dt); psfi = bg.x; psfw = bg.y;
         psaci = kS * eci * qi; pgaci = kG * eci * qi; praci = kR * qi;
       }
       if (lS > 0.0) { psdep = 4.0 * n0s * si * vS / (rho * (Ai + Bi)); }
@@ -1536,21 +1548,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let vSink = max(pidep, 0.0) + pigen + max(psdep, 0.0) + max(pgdep, 0.0);
     let fv = select(1.0, qv / (vSink * dt), vSink * dt > qv);
-    let iSink = max(-pidep, 0.0) + psaut + psaci + pgaci + praci;
+    let iSink = max(-pidep, 0.0) + psaut + psfi + psaci + pgaci + praci;
     let fi = select(1.0, qi / (iSink * dt), iSink * dt > qi);
     let sSink = max(-psdep, 0.0) + pgaut + psmlt;
     let fs = select(1.0, qs / (sSink * dt), sSink * dt > qs);
     let gSink = max(-pgdep, 0.0) + pgmlt;
     let fg = select(1.0, qg / (gSink * dt), gSink * dt > qg);
-    let cSink = psacw + pgacw;
+    let cSink = psacw + psfw + pgacw;
     let fc = select(1.0, qc / (cSink * dt), cSink * dt > qc);
     let fr = select(1.0, qr / (pgfrz * dt), pgfrz * dt > qr);
     let t_vi = (max(pidep, 0.0) + pigen) * fv * dt; let t_iv = max(-pidep, 0.0) * fi * dt;
     let t_vs = max(psdep, 0.0) * fv * dt; let t_sv = max(-psdep, 0.0) * fs * dt;
     let t_vg = max(pgdep, 0.0) * fv * dt; let t_gv = max(-pgdep, 0.0) * fg * dt;
-    let t_is = (psaut + psaci) * fi * dt; let t_ig = (pgaci + praci) * fi * dt;
+    let t_is = (psaut + psfi + psaci) * fi * dt; let t_ig = (pgaci + praci) * fi * dt;
     let t_sg = pgaut * fs * dt; let t_sr = psmlt * fs * dt; let t_gr = pgmlt * fg * dt;
-    let t_cs = psacw * fc * dt; let t_cg = pgacw * fc * dt; let t_rg = pgfrz * fr * dt;
+    let t_cs = (psacw + psfw) * fc * dt; let t_cg = pgacw * fc * dt; let t_rg = pgfrz * fr * dt;
     let cf = select(0.0, 1.0, cold);
     qv += -t_vi + t_iv - t_vs + t_sv - t_vg + t_gv;
     qi += t_vi - t_iv - t_is - t_ig;

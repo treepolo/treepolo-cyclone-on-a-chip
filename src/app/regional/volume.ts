@@ -23,7 +23,9 @@ bool hitBox(vec3 ro, vec3 rd, out float t0, out float t1){
   t0 = max(max(mn.x,mn.y),mn.z); t1 = min(min(mx.x,mx.y),mx.z);
   return t1 > max(t0,0.0);
 }
-vec2 dens(vec3 p){ vec2 s = texture(uVol, p/uBox).rg; return vec2(s.r*s.r*uCloudK, s.g*s.g*uRainK); }
+// cloud extinction grows with the square root of the condensate (the byte is sqrt(q / 3 g/kg)), so thin ice cloud and
+// cirrus stay visible next to dense cores; precipitation linearly
+vec2 dens(vec3 p){ vec2 s = texture(uVol, p/uBox).rg; return vec2(s.r*uCloudK, s.g*s.g*uRainK); }
 void main(){
   vec4 ndc = vec4(vUv*2.0-1.0, 1.0, 1.0);
   vec4 wp = uInvVP*ndc; vec3 rd = normalize(wp.xyz/wp.w - uEye); vec3 ro = uEye;

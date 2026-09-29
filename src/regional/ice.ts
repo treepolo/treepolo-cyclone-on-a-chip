@@ -12,7 +12,8 @@
 //     graupel with ventilation, driven by the supersaturation over ice (this drives the
 //     Wegener–Bergeron–Findeisen process: cloud water evaporates while ice grows)
 //   * collection: snow and graupel rime cloud water, collect cloud ice; rain collects cloud ice
-//   * autoconversion ice -> snow and snow -> graupel (Lin 1983 forms)
+//   * autoconversion ice -> snow and snow -> graupel (Lin 1983 forms); Bergeron-process snow production from
+//     cloud ice and cloud water in mixed-phase cloud (Lin 1983 Psfi, Psfw)
 //   * Bigg (1953) freezing of rain to graupel; homogeneous freezing below -40 °C; melting of snow and
 //     graupel by conduction and ventilation (Rutledge & Hobbs 1983); instant melting of cloud ice above 0 °C
 //   * mass-weighted sedimentation of rain, snow, graupel and cloud ice (flux form, sub-stepped)
@@ -38,6 +39,28 @@ export const ICE = {
   BIGG_B: 100, BIGG_A: 0.66,                        // Bigg (1953) freezing: B' (m^-3 s^-1), A' (K^-1)
 } as const;
 export const LF = ICE.LS - ICE.LV;
+
+/** Koenig (1971) depositional growth of ice crystals, dm/dt = a1 m^a2 (cgs), at -1 ... -31 °C (as tabulated for
+ *  Hsie et al. 1980 and Lin et al. 1983); used by the Bergeron-process snow production below. */
+export const KOENIG_A1 = [0.7939e-7, 0.7841e-6, 0.3369e-5, 0.4336e-5, 0.5285e-5, 0.3728e-5, 0.1852e-5, 0.2991e-6, 0.4248e-6, 0.7434e-6, 0.1812e-5, 0.4394e-5, 0.9145e-5,
+  0.1725e-4, 0.3348e-4, 0.1725e-4, 0.9175e-5, 0.4412e-5, 0.2252e-5, 0.9115e-6, 0.4876e-6, 0.3473e-6, 0.4758e-6, 0.6306e-6, 0.8573e-6, 0.7868e-6, 0.7192e-6, 0.6513e-6, 0.5956e-6, 0.5333e-6, 0.4834e-6];
+export const KOENIG_A2 = [0.4006, 0.4831, 0.5320, 0.5307, 0.5319, 0.5249, 0.4888, 0.3894, 0.4047, 0.4318, 0.4771, 0.5183, 0.5463, 0.5651, 0.5813, 0.5655, 0.5478, 0.5203, 0.4906, 0.4447,
+  0.4126, 0.3960, 0.4149, 0.4320, 0.4506, 0.4483, 0.4460, 0.4433, 0.4413, 0.4382, 0.4361];
+
+/**
+ * Bergeron-process snow production (Lin et al. 1983, after Hsie et al. 1980) in mixed-phase cloud (cloud water present,
+ * -31 °C < T < 0 °C): cloud-ice crystals growing by deposition from 40 to 50 um radius in dt1 seconds become snow
+ * (psfi = qi / dt1), and those crystals collect cloud water on the way (psfw). kg/kg/s. Without liquid water (anvils,
+ * cirrus) cloud ice only becomes snow by autoconversion above QI0 and by collection.
+ */
+export function bergeron(T: number, qi: number, qc: number, rho: number, dt: number): { psfi: number; psfw: number } {
+  if (!(T < ICE.T0 && T > ICE.T0 - 31) || qc <= 1e-8 || qi <= 1e-12) return { psfi: 0, psfw: 0 };
+  const it = Math.min(30, Math.max(0, Math.round(ICE.T0 - T) - 1)), a1 = KOENIG_A1[it]!, a2 = KOENIG_A2[it]!;
+  const mi40 = 2.46e-7, mi50 = 4.8e-7;                                                     // crystal masses (g)
+  const dt1 = (Math.pow(mi50, 1 - a2) - Math.pow(mi40, 1 - a2)) / (a1 * (1 - a2));        // growth time (s)
+  const ni50 = qi / 4.8e-10 * Math.min(1, dt / dt1);                                       // 50 um crystals per kg of air
+  return { psfi: qi / dt1, psfw: ni50 * (a1 * Math.pow(mi50, a2) * 1e-3 + Math.PI * rho * qc * 2.5e-9 * 1.0) };
+}
 
 /** Lanczos approximation of the gamma function (x > 0). */
 export function gammaFn(x: number): number {
@@ -170,7 +193,7 @@ export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: num
   const vG = lamG > 0 ? 0.78 / (lamG * lamG) + 0.31 * sc3 * Math.sqrt(ICE.AG / nu) * G5G * dens4 / Math.pow(lamG, (ICE.BG + 5) / 2) : 0;
 
   let pidep = 0, pigen = 0, psdep = 0, pgdep = 0, psaut = 0, pgaut = 0, psaci = 0, pgaci = 0, praci = 0;
-  let psacw = 0, pgacw = 0, pgfrz = 0, psmlt = 0, pgmlt = 0;
+  let psacw = 0, pgacw = 0, pgfrz = 0, psmlt = 0, pgmlt = 0, psfi = 0, psfw = 0;
   if (T < T0) {
     const eci = Math.exp(0.05 * (T - T0));
     // nucleation: N = 1e3 exp(0.1 (T0 - T)) m^-3 (HDC04-type, capped at 1e6), crystals of mass MI0
@@ -183,6 +206,7 @@ export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: num
       const rqi = rho * s.qi, ni = iceNumber(rqi), di = 11.9 * Math.sqrt(rqi / ni);
       pidep = 4 * di * ni * si / (rho * (Ai + Bi));
       psaut = Math.max(0, 1e-3 * Math.exp(0.025 * (T - T0)) * (s.qi - ICE.QI0));                      // Lin 1983
+      const b = bergeron(T, s.qi, s.qc, rho, dt); psfi = b.psfi; psfw = b.psfw;
       psaci = kS * eci * s.qi;
       pgaci = kG * eci * s.qi;
       praci = kR * s.qi;
@@ -207,24 +231,24 @@ export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: num
   const dep = (x: number): number => Math.max(x, 0), sub = (x: number): number => Math.max(-x, 0);
   const vSink = dep(pidep) + pigen + dep(psdep) + dep(pgdep);
   const fv = vSink * dt > s.qv ? s.qv / (vSink * dt) : 1;
-  const iSink = sub(pidep) + psaut + psaci + pgaci + praci;
+  const iSink = sub(pidep) + psaut + psfi + psaci + pgaci + praci;
   const fi = iSink * dt > s.qi ? s.qi / (iSink * dt) : 1;
   const sSink = sub(psdep) + pgaut + psmlt;
   const fs = sSink * dt > s.qs ? s.qs / (sSink * dt) : 1;
   const gSink = sub(pgdep) + pgmlt;
   const fg = gSink * dt > s.qg ? s.qg / (gSink * dt) : 1;
-  const cSink = psacw + pgacw;
+  const cSink = psacw + psfw + pgacw;
   const fc = cSink * dt > s.qc ? s.qc / (cSink * dt) : 1;
   const rSink = pgfrz;
   const fr = rSink * dt > s.qr ? s.qr / (rSink * dt) : 1;
   // transfers over dt (kg/kg)
+  const cold = T < T0;
   const t_vi = (dep(pidep) + pigen) * fv * dt, t_iv = sub(pidep) * fi * dt;
   const t_vs = dep(psdep) * fv * dt, t_sv = sub(psdep) * fs * dt;
   const t_vg = dep(pgdep) * fv * dt, t_gv = sub(pgdep) * fg * dt;
-  const t_is = (psaut + psaci) * fi * dt, t_ig = (pgaci + praci) * fi * dt;
+  const t_is = (psaut + psfi + psaci) * fi * dt, t_ig = (pgaci + praci) * fi * dt;
   const t_sg = pgaut * fs * dt, t_sr = psmlt * fs * dt, t_gr = pgmlt * fg * dt;
-  const t_cs = psacw * fc * dt, t_cg = pgacw * fc * dt, t_rg = pgfrz * fr * dt;
-  const cold = T < T0;
+  const t_cs = (psacw + (cold ? psfw : 0)) * fc * dt, t_cg = pgacw * fc * dt, t_rg = pgfrz * fr * dt;
   s.qv += -t_vi + t_iv - t_vs + t_sv - t_vg + t_gv;
   s.qi += t_vi - t_iv - t_is - t_ig;
   s.qs += t_vs - t_sv + t_is - t_sg - t_sr + (cold ? t_cs : 0);
