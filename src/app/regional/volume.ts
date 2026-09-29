@@ -4,7 +4,6 @@
 // Tracer particles (with short trails) are drawn first into an offscreen buffer that keeps, per pixel, the
 // nearest particle colour and its distance from the eye; the ray march composites that colour where the
 // ray passes that distance, so clouds in front hide the particles behind them.
-import { attachOrbit } from '../orbitControls.js';
 
 const VS = `#version 300 es
 in vec2 aPos; out vec2 vUv;
@@ -126,23 +125,117 @@ export class VolumeView {
     gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
     this.vol = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
-    attachOrbit(canvas, {
-      rotate: (dx, dy) => {
-        if (this.fly) { this.fly.yaw -= dx * 0.004; this.fly.pitch = Math.max(-1.4, Math.min(1.4, this.fly.pitch - dy * 0.004)); }
-        else { this.yaw -= dx * 0.006; this.pitch = Math.max(0.05, Math.min(1.5, this.pitch + dy * 0.006)); }
-        this.dirty = true;
-      },
-      zoom: (f) => {
-        if (this.fly) this.moveFly(0.8 * (1 - f), 0, 0);   // wheel toward the screen (f < 1) flies forward
-        else this.dist = Math.max(0.6, Math.min(6, this.dist * f));
-        this.dirty = true;
-      },
+    this.controls();
+  }
+
+  // ---------------------------------------------------------------- camera controls
+  // Orbit camera around a movable target: drag to turn, right-drag / Shift-drag / two fingers to pan, wheel or pinch to
+  // zoom, double-click / double-tap to fly to a point on the ground, arrow keys / WASD to pan. Free flight: WASD / QE or
+  // the on-screen buttons move, dragging turns the head.
+  /** orbit target (box units); null: the domain centre */
+  private tgt: V3 | null = null;
+  /** inverse view-projection and eye of the last drawn frame (picking) */
+  private lastInv: Float32Array | null = null; private lastEye: V3 = [0, 0, 0];
+  /** tap on the view (no drag): screen position, for interaction tools; returns true when it used the tap */
+  onTap: ((clientX: number, clientY: number) => boolean) | null = null;
+  private controls(): void {
+    const canvas = this.canvas, pts = new Map<number, { x: number; y: number }>();
+    let mode: 'rotate' | 'pan' = 'rotate', moved = 0, spread0 = 0, cx0 = 0, cy0 = 0, lastTap = 0;
+    const spreadC = (): [number, number, number] => { const p = [...pts.values()]; if (p.length < 2) return [0, 0, 0]; return [Math.hypot(p[0]!.x - p[1]!.x, p[0]!.y - p[1]!.y), (p[0]!.x + p[1]!.x) / 2, (p[0]!.y + p[1]!.y) / 2]; };
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('pointerdown', (e) => {
+      canvas.setPointerCapture(e.pointerId);
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 1) { moved = 0; mode = e.button === 2 || e.shiftKey || e.button === 1 ? 'pan' : 'rotate'; }
+      if (pts.size === 2) { [spread0, cx0, cy0] = spreadC(); moved = 99; }
     });
-    // free-flight keys (ignored while typing in a form field)
+    const end = (e: PointerEvent): void => {
+      const was = pts.get(e.pointerId);
+      pts.delete(e.pointerId);
+      if (!was || pts.size > 0 || moved >= 6) return;
+      const now = performance.now();
+      if (now - lastTap < 350) { lastTap = 0; this.focusAt(e.clientX, e.clientY); return; }
+      lastTap = now;
+      this.onTap?.(e.clientX, e.clientY);
+    };
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
+    canvas.addEventListener('pointermove', (e) => {
+      const p = pts.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (pts.size >= 2) {
+        const [s, cx, cy] = spreadC();
+        if (spread0 > 0 && s > 0) this.zoomBy(spread0 / s);
+        this.pan(cx - cx0, cy - cy0);
+        spread0 = s; cx0 = cx; cy0 = cy;
+        return;
+      }
+      moved += Math.abs(dx) + Math.abs(dy);
+      if (mode === 'pan' && !this.fly) this.pan(dx, dy);
+      else this.turn(dx, dy);
+    });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); this.zoomBy(Math.exp(e.deltaY * 0.0012)); }, { passive: false });
+    // keys: free flight WASD / QE (Shift faster); orbit: arrows / WASD pan, Q / E zoom (ignored while typing in a form field)
     const typing = (): boolean => { const a = document.activeElement; return !!a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA'); };
-    window.addEventListener('keydown', (e) => { if (this.fly && !typing()) { this.keys.add(e.key.toLowerCase()); if ('wasdqe'.includes(e.key.toLowerCase())) e.preventDefault(); } });
+    const KEYS = ['w', 'a', 's', 'd', 'q', 'e', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'shift'];
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      if (typing() || !KEYS.includes(k) || this.canvas.hidden) return;
+      this.keys.add(k); if (k !== 'shift') e.preventDefault(); this.dirty = true;
+    });
     window.addEventListener('keyup', (e) => { this.keys.delete(e.key.toLowerCase()); });
     window.addEventListener('blur', () => this.keys.clear());
+  }
+  /** press / release a movement key from an on-screen button (w a s d q e) */
+  setKey(k: string, down: boolean): void { if (down) this.keys.add(k); else this.keys.delete(k); this.dirty = true; }
+  private target(): V3 { const [bx, by, bz] = this.box; return this.tgt ?? [bx / 2, by / 2, bz * 0.3]; }
+  private turn(dx: number, dy: number): void {
+    if (this.fly) { this.fly.yaw -= dx * 0.004; this.fly.pitch = Math.max(-1.45, Math.min(1.45, this.fly.pitch - dy * 0.004)); }
+    else { this.yaw -= dx * 0.006; this.pitch = Math.max(0.02, Math.min(Math.PI / 2, this.pitch + dy * 0.006)); }
+    this.dirty = true;
+  }
+  private zoomBy(f: number): void {
+    if (this.fly) this.moveFly(0.6 * (1 - f) * Math.max(0.05, this.fly.eye[2] * 4), 0, 0);   // toward the screen (f < 1) flies forward
+    else this.dist = Math.max(0.03, Math.min(6, this.dist * f));
+    this.dirty = true;
+  }
+  /** move the orbit target by a screen-space drag (pixels): the point under the cursor follows it */
+  private pan(dx: number, dy: number): void {
+    if (this.fly) { this.moveFly(0, -dx * 0.002, dy * 0.002); return; }
+    const t = this.target(), k = this.dist * 1.2 / Math.max(1, this.canvas.clientHeight);
+    const rx = Math.sin(this.yaw), ry = -Math.cos(this.yaw);                   // screen right on the ground
+    const fx = -Math.cos(this.yaw), fy = -Math.sin(this.yaw);                  // away from the eye on the ground
+    const up = Math.max(0.2, Math.sin(this.pitch));                            // looking down: vertical drags move along the ground
+    this.tgt = [t[0] - k * dx * rx + k * dy * fx / up, t[1] - k * dx * ry + k * dy * fy / up, t[2]];
+    this.dirty = true;
+  }
+  /** Ray through a screen point (client coordinates) from the eye of the last frame, box units. */
+  pickRay(clientX: number, clientY: number): { o: V3; d: V3 } | null {
+    const inv = this.lastInv; if (!inv) return null;
+    const r = this.canvas.getBoundingClientRect(), nx = (clientX - r.left) / r.width * 2 - 1, ny = 1 - (clientY - r.top) / r.height * 2;
+    const x = inv[0]! * nx + inv[4]! * ny + inv[8]! + inv[12]!, y = inv[1]! * nx + inv[5]! * ny + inv[9]! + inv[13]!;
+    const z = inv[2]! * nx + inv[6]! * ny + inv[10]! + inv[14]!, w = inv[3]! * nx + inv[7]! * ny + inv[11]! + inv[15]!;
+    const e = this.lastEye, d: V3 = [x / w - e[0], y / w - e[1], z / w - e[2]], l = Math.hypot(d[0], d[1], d[2]);
+    return { o: [e[0], e[1], e[2]], d: [d[0] / l, d[1] / l, d[2] / l] };
+  }
+  /** Where the ray through a screen point meets the horizontal plane at height zb (box units), or null. */
+  pickPlane(clientX: number, clientY: number, zb = 0): V3 | null {
+    const r = this.pickRay(clientX, clientY); if (!r || Math.abs(r.d[2]) < 1e-6) return null;
+    const t = (zb - r.o[2]) / r.d[2]; if (t <= 0) return null;
+    return [r.o[0] + t * r.d[0], r.o[1] + t * r.d[1], zb];
+  }
+  /** fraction of the box height per model metre (to convert heights) and the box size */
+  get boxSize(): V3 { return [this.box[0], this.box[1], this.box[2]]; }
+  /** Fly the orbit camera to the ground point under the cursor (double-click / double-tap). */
+  private focusAt(clientX: number, clientY: number): void {
+    const p = this.pickPlane(clientX, clientY, 0);
+    if (!p || this.fly) return;
+    const [bx, by, bz] = this.box;
+    this.tgt = [Math.max(0, Math.min(bx, p[0])), Math.max(0, Math.min(by, p[1])), bz * 0.3];
+    this.dist = Math.max(0.08, this.dist * 0.6);
+    this.dirty = true;
   }
 
   /** free-flight camera: eye position (box units) and look direction; null = orbit camera */
@@ -151,12 +244,12 @@ export class VolumeView {
   private lastT = 0;
   setCamera(mode: CameraMode): void {
     // fixed views of the whole domain: level from the south side, or straight down from above (dragging turns them back into the orbit view)
-    if (mode === 'side') { this.fly = null; this.yaw = -Math.PI / 2; this.pitch = 0; this.dist = 1.0; this.dirty = true; return; }
-    if (mode === 'top') { this.fly = null; this.yaw = -Math.PI / 2; this.pitch = Math.PI / 2; this.dist = 0.85; this.dirty = true; return; }
-    if (mode === 'orbit') { this.fly = null; this.yaw = -0.9; this.pitch = 0.35; this.dist = 1.35; this.dirty = true; return; }
+    if (mode === 'side') { this.fly = null; this.tgt = null; this.yaw = -Math.PI / 2; this.pitch = 0; this.dist = 1.0; this.dirty = true; return; }
+    if (mode === 'top') { this.fly = null; this.tgt = null; this.yaw = -Math.PI / 2; this.pitch = Math.PI / 2; this.dist = 0.85; this.dirty = true; return; }
+    if (mode === 'orbit') { this.fly = null; this.tgt = null; this.yaw = -0.9; this.pitch = 0.35; this.dist = 1.35; this.dirty = true; return; }
     if (this.fly) return;
     // start where the orbit camera is, looking at the same point
-    const [bx, by, bz] = this.box, c = [bx / 2, by / 2, bz * 0.3];
+    const c = this.target();
     const eye: [number, number, number] = [c[0]! + this.dist * Math.cos(this.pitch) * Math.cos(this.yaw), c[1]! + this.dist * Math.cos(this.pitch) * Math.sin(this.yaw), c[2]! + this.dist * Math.sin(this.pitch)];
     const d = [c[0]! - eye[0], c[1]! - eye[1], c[2]! - eye[2]], l = Math.hypot(d[0]!, d[1]!, d[2]!);
     this.fly = { eye, yaw: Math.atan2(d[1]!, d[0]!), pitch: Math.asin(d[2]! / l) };
@@ -182,6 +275,8 @@ export class VolumeView {
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
     const ax = 1, ay = ny / nx;
+    // a new domain shape: back to the domain centre
+    if (ax !== this.box[0] || ay !== this.box[1] || Math.abs(aspectZ - this.box[2]) > 1e-9) this.tgt = null;
     this.box = [ax, ay, aspectZ];
     this.dirty = true;
   }
@@ -284,9 +379,18 @@ export class VolumeView {
     const gl = this.gl, c = this.canvas;
     // free flight: move with the pressed keys (0.25 box widths per second, 4x with Shift)
     const now = performance.now(), dts = Math.min(0.1, (now - (this.lastT || now)) / 1000); this.lastT = now;
-    if (this.fly && this.keys.size) {
-      const k = this.keys, v = 0.25 * dts * (k.has('shift') ? 4 : 1);
-      this.moveFly(((k.has('w') ? 1 : 0) - (k.has('s') ? 1 : 0)) * v, ((k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0)) * v, ((k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0)) * v);
+    if (this.keys.size) {
+      const k = this.keys, fb = (k.has('w') || k.has('arrowup') ? 1 : 0) - (k.has('s') || k.has('arrowdown') ? 1 : 0);
+      const lr = (k.has('d') || k.has('arrowright') ? 1 : 0) - (k.has('a') || k.has('arrowleft') ? 1 : 0), ud = (k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0);
+      if (this.fly) {
+        // speed grows with the height above the ground (slow near the surface, fast high up)
+        const v = dts * (k.has('shift') ? 4 : 1) * Math.max(0.03, Math.min(0.4, this.fly.eye[2] * 2));
+        this.moveFly(fb * v, lr * v, ud * v);
+      } else if (fb || lr || ud) {
+        const px = 600 * dts * (k.has('shift') ? 3 : 1);
+        this.pan(-lr * px, fb * px);
+        if (ud) this.zoomBy(Math.exp(-ud * 1.5 * dts));
+      }
     }
     // cap the ray-marched pixel count (about 0.9 megapixels): the ray march is the costly part
     const cssW = Math.max(1, c.clientWidth), cssH = Math.max(1, c.clientHeight);
@@ -299,7 +403,7 @@ export class VolumeView {
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);
     const [bx, by, bz] = this.box;
-    let ctr: [number, number, number] = [bx / 2, by / 2, bz * 0.3];
+    let ctr: [number, number, number] = this.target();
     let eye: [number, number, number] = [
       ctr[0] + this.dist * Math.cos(this.pitch) * Math.cos(this.yaw),
       ctr[1] + this.dist * Math.cos(this.pitch) * Math.sin(this.yaw),
@@ -312,6 +416,7 @@ export class VolumeView {
     }
     const vp = viewProj(eye, ctr, w / h);
     const inv = invert4(vp);
+    this.lastInv = inv; this.lastEye = eye;
     const trOn = this.tracerPass(vp, eye, w, h);
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);

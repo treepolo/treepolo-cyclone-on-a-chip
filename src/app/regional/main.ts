@@ -36,7 +36,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
     if (kind === 'warm' || kind === 'cold') send({ type: 'perturb', kind, x, y });
     else if (kind !== 'inspect') send({ type: 'paint', kind, x, y, radius });
   },
-  camera: (mode) => view.setCamera(mode),
+  camera: (mode) => { view.setCamera(mode); $('flyPad').hidden = mode !== 'fly'; },
   view: (v) => {
     $('view').hidden = v !== '3d'; $('chart').hidden = v === '3d';
     if (v === '3d' && lastVol) { view.setVolume(lastVol.nx, lastVol.ny, lastVol.nz, lastVol.cloud, lastVol.rain, aspect); view.setGround(lastVol.nx, lastVol.ny, lastVol.ground); }
@@ -85,6 +85,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     lastVol = { nx: m.nx, ny: m.ny, nz: m.nz, cloud: m.cloud, rain: m.rain, ground: rgba };
     const s = m.stats, t = m.time;
     $('time').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h (${(t / 86400).toFixed(2)} d)`;
+    $('ovTime').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`;
     const ms = m.stepsPerSecond * m.dt;
     $('rate').textContent = `${m.stepsPerSecond.toFixed(m.stepsPerSecond < 10 ? 2 : 1)} 步/s steps/s · ${ms < 60 ? `${ms.toFixed(1)} 模式秒/s model-s/s` : `${(ms / 60).toFixed(1)} 模式分/s model-min/s`} · Δt ${m.dt.toFixed(1)} s`;
     $('w').textContent = `${s.wmin.toFixed(1)} … ${s.wmax.toFixed(1)} m/s`;
@@ -101,7 +102,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('legend').textContent = m.groundField === 'none' ? '' : `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); if (runner.running) void runner.abort(`error: ${m.message}`); }
   else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
-  else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; if (runner.running) void runner.end('done'); }
+  else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; $('ovRun').textContent = '▶'; if (runner.running) void runner.end('done'); }
   else if (m.type === 'log') log(m.text);
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
 };
@@ -118,8 +119,21 @@ function tornadoWatch(t: number, d: { zeta: number; v: number; ef: number; x: nu
     $('tornado').textContent = dx > 500 ? '（網格太粗 / grid too coarse）' : tEvent?.logged ? `上次 / last: EF${tEvent.ef}` : '無 / none';
   }
 }
-function sync(): void { $('run').textContent = running ? '暫停 / Pause' : '執行 / Run'; send({ type: 'run', running }); }
+function sync(): void { $('run').textContent = running ? '暫停 / Pause' : '執行 / Run'; $('ovRun').textContent = running ? '⏸' : '▶'; send({ type: 'run', running }); }
 $('run').onclick = (): void => { running = !running; sync(); };
+$('ovRun').onclick = (): void => { running = !running; sync(); };
+$('ovStep').onclick = (): void => { if (!running) send({ type: 'step1' }); };
+// space bar: run / pause (not while typing in a form field)
+window.addEventListener('keydown', (e) => {
+  const a = document.activeElement;
+  if (e.key !== ' ' || (a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA' || a.tagName === 'BUTTON'))) return;
+  e.preventDefault(); running = !running; sync();
+});
+// free-flight buttons: hold to move
+document.querySelectorAll<HTMLButtonElement>('#flyPad button').forEach((b) => {
+  const k = b.dataset.k!, on = (e: PointerEvent): void => { e.preventDefault(); b.setPointerCapture(e.pointerId); view.setKey(k, true); }, off = (): void => view.setKey(k, false);
+  b.addEventListener('pointerdown', on); b.addEventListener('pointerup', off); b.addEventListener('pointercancel', off); b.addEventListener('lostpointercapture', off);
+});
 const init = (): void => {
   running = false; sync();
   const exp = $<HTMLSelectElement>('exp').value as RegionalExperiment, backend = $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu';

@@ -62,7 +62,7 @@ let chartReq: ChartRequest | null = null, volMode = 0;
 // ground-relative position of the domain origin: advances with the frame velocity, jumps with rolls and refinement
 let origin = { x: 0, y: 0 }, originT = 0;
 function advanceOrigin(): void { const t = modelNow(); origin.x += frameVel.u * (t - originT); origin.y += frameVel.v * (t - originT); originT = t; }
-function resetOrigin(x = 0, y = 0): void { origin = { x, y }; originT = modelNow(); prevAcc = null; tcAcc = null; tcRain = null; }
+function resetOrigin(x = 0, y = 0): void { origin = { x, y }; originT = modelNow(); prevAcc = null; tcAcc = null; tcRain = null; undo = null; envDu = 0; }
 // precipitation rate from the change of the accumulation between frames
 let prevAcc: { t: number; rain: Float32Array } | null = null, lastRate: Float32Array | null = null;
 const currentGpu = (): GpuRegional | null => gpu;
@@ -106,6 +106,67 @@ const EXP_LABEL: Record<RegionalExperiment, string> = {
 // acoustic limit keeps the horizontal sound Courant number of the split steps c_s dt / (n_s dx) <= 0.45.
 const CFL_TARGET = 0.8, CFL_MAX = 1.1;
 let adaptive = true, dt0 = 0;
+// Safety net for interactions: the state just before the last change (float32 copies, models up to 4 M cells) and the
+// model time of the change; a blow-up within a model hour of it restores this state and pauses.
+let undo: { t: number; arrays: Float32Array[]; rain: Float32Array; snow: Float32Array; ub: Float64Array; vb: Float64Array; bu: Float64Array | null; bqv: Float64Array | null; envDu: number } | null = null;
+/** accumulated wind change of 'environment' interactions at 6 km (bounded to +-ENV_DU_MAX) */
+let envDu = 0;
+const ENV_DU_MAX = 30;
+/** largest plausible |w| (m/s): beyond it the state is treated as numerically unstable */
+const W_BLOWUP = 200;
+/** CPU adaptive time step: the same Courant rule as the GPU, checked every tick */
+function cpuAdaptDt(): void {
+  if (!m || gpu || !adaptive) return;
+  const { nx, ny, nz, dx, dy, dz } = m.c;
+  let rate = 0;
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const q = m.idx(i, j, k);
+    rate = Math.max(rate, Math.abs(m.u[q]!) / dx + Math.abs(m.v[q]!) / dy + Math.abs(m.w[q]!) / dz);
+  }
+  if (!Number.isFinite(rate)) return;
+  // the CPU never goes above the configured step (its acoustic sub-steps are sized for it)
+  const cur = m.c.dt, lo = 0.25 * dt0;
+  let next = Math.min(dt0, CFL_TARGET / Math.max(rate, 1e-9));
+  if (rate * cur > CFL_MAX) next = Math.min(next, 0.7 / rate);
+  else if (next > cur) next = Math.min(next, 1.1 * cur);
+  next = Math.max(lo, next);
+  if (Math.abs(next - cur) > 0.02 * cur) m.c.dt = next;
+}
+/** Keep the state before an interaction (see undo). */
+function takeUndo(): void {
+  if (!m || !mp || m.size * (5 + m.scalars.length) > 4e6 * 11) { undo = null; return; }
+  undo = { t: m.time, arrays: [m.u, m.v, m.w, m.th, m.pp, ...m.scalars].map((a) => Float32Array.from(a)), rain: Float32Array.from(mp.rainAcc), snow: Float32Array.from(mp.snowAcc),
+    ub: Float64Array.from(m.ub), vb: Float64Array.from(m.vb), bu: m.boundary ? Float64Array.from(m.boundary.u) : null, bqv: m.boundary?.qv ? Float64Array.from(m.boundary.qv) : null, envDu };
+}
+/** Restore the state before the last interaction (after a blow-up); returns false without one. */
+async function restoreUndo(): Promise<boolean> {
+  if (!undo || !m || !mp) return false;
+  const u = undo; undo = null;
+  [m.u, m.v, m.w, m.th, m.pp, ...m.scalars].forEach((a, f) => a.set(u.arrays[f]!));
+  mp.rainAcc.set(u.rain); mp.snowAcc.set(u.snow);
+  m.ub.set(u.ub); m.vb.set(u.vb);
+  if (m.boundary && u.bu) { m.boundary.u.set(u.bu); if (m.boundary.qv && u.bqv) m.boundary.qv.set(u.bqv); }
+  envDu = u.envDu;
+  m.time = u.t; m.c.dt = dt0;
+  if (gpu) {
+    const device = gpu.device, tp = gpu.tracerCount ? await gpu.readTracers() : null;
+    gpu.destroy();
+    gpu = new GpuRegional(device, m, { moist: true, physics: physCfg, ice: true });
+    gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
+    gpu.setDt(dt0);
+    if (tp) gpu.initTracers(tp);
+  }
+  gpuBatch = 1;
+  return true;
+}
+/** After a numerical blow-up: undo the last interaction if it was recent, else stop with an error. */
+async function blowUp(): Promise<void> {
+  running = false;
+  if (undo && modelNow() - undo.t < 3600 && await restoreUndo()) {
+    post({ type: 'paused', reason: '數值不穩定：上一個互動太強，已自動還原到互動前並暫停 / numerical instability right after the last change: the state before it was restored and the run paused' });
+    await sendFrame();
+  } else post({ type: 'error', message: '數值發散 / numerical blow-up' });
+}
 function dtLimits(): { lo: number; hi: number } {
   const c = m!.c;
   const ac = c.nsound * 0.45 * Math.min(c.dx, c.dy) / 350;
@@ -499,6 +560,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try {
         const note = await interact(msg);
         if (note) post({ type: 'log', text: note });
+        if (gpu) await adaptDt(); else cpuAdaptDt();
         if (!running) await sendFrame();
       } catch (e) { post({ type: 'error', message: String(e) }); }
       busy = false;
@@ -555,6 +617,7 @@ async function loop(): Promise<void> {
           if (ns === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
           for (let s = 0; s < ns; s++) { m.step(); mp.apply(m.c.dt); rateSteps++; }
           advectTracers(ns * m.c.dt, ns);
+          cpuAdaptDt();
         }
         advanceOrigin();
         if (pacer.reached(modelNow())) {
@@ -621,18 +684,26 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     return '';
   }
   await syncFromGpu();
+  takeUndo();
+  gpuBatch = 1;
   if (msg.type === 'perturb') {
-    // warm bubble (+3 K centred at 1.5 km) or cold pool (-6 K at the ground), horizontal radius 10 km (at least 4 cells, at most L/8)
-    const rh = Math.max(4 * dx, Math.min(10000, L / 8)), warm = msg.kind === 'warm', zc = warm ? 1500 : 0, rz = 1500, amp = warm ? 3 : -6;
+    // warm bubble (+3 K centred at 1.5 km) or cold pool (-6 K at the ground), horizontal radius 10 km (at least 4 cells, at most L/8).
+    // Repeated clicks add up only to +6 K / -10 K relative to the base state (they never weaken an existing anomaly).
+    const rh = Math.max(4 * dx, Math.min(10000, L / 8)), warm = msg.kind === 'warm', zc = warm ? 1500 : 0, rz = 1500, amp = warm ? 3 : -6, cap = warm ? 6 : -10;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const r = Math.sqrt((((i + 0.5) * dx - msg.x) / rh) ** 2 + (((j + 0.5) * dy - msg.y) / rh) ** 2 + ((mm.zc[k]! - zc) / rz) ** 2);
-      if (r < 1) { const q = mm.idx(i, j, k); mm.th[q] = mm.th[q]! + amp * Math.cos(0.5 * Math.PI * r) ** 2; }
+      if (r >= 1) continue;
+      const q = mm.idx(i, j, k), d = amp * Math.cos(0.5 * Math.PI * r) ** 2, room = mm.th0[k]! + cap - mm.th[q]!;
+      mm.th[q] = mm.th[q]! + (warm ? Math.max(0, Math.min(d, room)) : Math.min(0, Math.max(d, room)));
     }
     if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
     return `${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km`;
   }
-  // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km
-  const du = (z: number): number => msg.du6 * Math.min(1, z / 6000);
+  // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km;
+  // the accumulated change at 6 km stays within +-ENV_DU_MAX
+  const du6 = Math.max(-ENV_DU_MAX - envDu, Math.min(ENV_DU_MAX - envDu, msg.du6));
+  envDu += du6;
+  const du = (z: number): number => du6 * Math.min(1, z / 6000);
   const hf = (z: number): number => 1 + (msg.humidity - 1) * Math.max(0, Math.min(1, (z - 500) / 500, (8500 - z) / 500));
   const qv = mm.scalars[QV]!;
   for (let k = 0; k < nz; k++) {
@@ -658,7 +729,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     gpu.setDt(dtNow);
     if (tp) gpu.initTracers(tp);
   }
-  return `改變環境 / environment changed: ${msg.du6 >= 0 ? '+' : ''}${msg.du6} m/s westerly at 6 km, 1-8 km humidity x${msg.humidity}`;
+  return `改變環境 / environment changed: ${du6 >= 0 ? '+' : ''}${du6.toFixed(0)} m/s westerly at 6 km (total ${envDu >= 0 ? '+' : ''}${envDu.toFixed(0)}, limit ±${ENV_DU_MAX}), 1-8 km humidity x${msg.humidity}`;
 }
 
 /** Copy the GPU state into the CPU model arrays (display and diagnostics reuse the CPU code). */
@@ -672,7 +743,15 @@ async function syncFromGpu(): Promise<void> {
   m.time = gpu.time; m.steps = gpu.steps;
 }
 
+/** set by sendFrameRaw when the state is numerically unstable */
+let blowPending = false;
+/** Post a frame of the current state; a numerically unstable state is handled by blowUp instead. */
 async function sendFrame(): Promise<void> {
+  blowPending = false;
+  await sendFrameRaw();
+  if (blowPending) { blowPending = false; await blowUp(); }
+}
+async function sendFrameRaw(): Promise<void> {
   if (axi) {
     lastFrame = performance.now(); lastFrameModel = modelNow();
     const { msg, transfer } = axi.frame(chartReq, ground, volMode, rate, { ...origin });
@@ -707,14 +786,16 @@ async function sendFrame(): Promise<void> {
     }
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = m.idx(i, j, 0); mp.rainAcc[j * nx + i] = d.rain[q]!; mp.snowAcc[j * nx + i] = d.snow[q]!; }
     m.time = tNow; m.steps = sNow;
-    if (!Number.isFinite(wmax)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
-    if (req && Number.isFinite(wmax)) charts = await buildCharts(req, col, planeAt, sliceK, gpu);
+    if (!Number.isFinite(wmax) || !Number.isFinite(wmin) || Math.max(wmax, -wmin) > W_BLOWUP) { blowPending = true; return; }
+    if (req) charts = await buildCharts(req, col, planeAt, sliceK, gpu);
     advanceOrigin();
     // keep the GPU busy while this frame is unpacked on the CPU
     if (running) { const dtb = gpu.dt; gpu.step(gpuBatch); rateSteps += gpuBatch; advectTracers(gpuBatch * dtb, gpuBatch); }
     trOut = d.tracers ? d.tracers.slice() : null;
   } else {
-    if (!Number.isFinite(m.w[m.idx(0, 0, 1)]!)) { running = false; post({ type: 'error', message: '數值發散 / numerical blow-up' }); }
+    let bad = false;
+    for (let q = 0; q < m.size && !bad; q += 97) if (!Number.isFinite(m.w[q]!) || Math.abs(m.w[q]!) > W_BLOWUP || !Number.isFinite(m.th[q]!)) bad = true;
+    if (bad) { blowPending = true; return; }
     const qc = m.scalars[QC]!, qr = m.scalars[QR]!, qi = m.scalars[QI]!, qs = m.scalars[QS]!, qg = m.scalars[QG]!;
     const vm = volMode;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {

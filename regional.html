@@ -8,7 +8,12 @@
 :root{--bg:#05070a;--panel:#0a0e13;--line:#26303b;--fg:#dbe5ef;--muted:#8da0b3}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif}
 body{display:grid;grid-template-columns:minmax(0,1fr) 380px}
-#stage{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%}
+#stage{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;position:relative}
+.ov{position:absolute;left:10px;bottom:10px;display:flex;gap:6px;align-items:center;z-index:2}
+.ov button{background:rgba(10,14,19,.82);min-width:40px;height:36px;font-size:15px}
+.ov .t{background:rgba(10,14,19,.72);padding:6px 8px;border-radius:4px;font-size:12px;font-variant-numeric:tabular-nums;color:var(--fg)}
+.flypad{position:absolute;right:10px;bottom:10px;display:grid;grid-template-columns:repeat(3,40px);gap:4px;z-index:2}
+.flypad button{background:rgba(10,14,19,.82);height:40px;padding:0;font-size:14px;touch-action:none;user-select:none}
 .chartbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:6px 8px;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px}
 .chartbar select{width:auto;max-width:100%}.chartbar .chk{display:inline-flex;align-items:center;gap:3px;margin:0;color:var(--fg)}
 .chartbar .hint{color:var(--muted)}.chartbar .lvl{width:160px}
@@ -36,7 +41,10 @@ a{color:#8fc1ff}
 </style>
 </head>
 <body>
-<div id="stage"><div id="chartBar" class="chartbar"></div><canvas id="view"></canvas><canvas id="chart" hidden></canvas></div>
+<div id="stage"><div id="chartBar" class="chartbar"></div><canvas id="view"></canvas><canvas id="chart" hidden></canvas>
+<div class="ov"><button id="ovRun" title="執行 / 暫停 (空白鍵) / run / pause (space)">▶</button><button id="ovStep" title="單步 / one step">⏭</button><span class="t" id="ovTime">0 min</span></div>
+<div class="flypad" id="flyPad" hidden><span></span><button data-k="w" title="前進 / forward">▲</button><button data-k="e" title="上升 / up">⤒</button><button data-k="a" title="左 / left">◀</button><button data-k="s" title="後退 / back">▼</button><button data-k="d" title="右 / right">▶</button><span></span><span></span><button data-k="q" title="下降 / down">⤓</button></div>
+</div>
 <section class="panel">
 <h1>區域非靜力模式 / Regional Non-hydrostatic Model</h1>
 <div class="muted">全可壓縮非靜力方程、笛卡兒 C 網格、RK3 + 聲波分裂步、六類冰相微物理（水氣、雲水、雨、雲冰、雪、霰）。雲（白：雲水＋雲冰）與降水粒子（藍：雨＋雪＋霰）以體積光線追蹤繪製，垂直比例放大。 / Fully compressible non-hydrostatic equations, Cartesian C-grid, RK3 with split acoustic steps, six-class ice microphysics (vapour, cloud water, rain, cloud ice, snow, graupel). Cloud (white: water + ice) and precipitation (blue: rain + snow + graupel) are volume ray-marched; vertical scale exaggerated.</div>
