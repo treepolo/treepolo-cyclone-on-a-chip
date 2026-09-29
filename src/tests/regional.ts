@@ -290,4 +290,22 @@ void DRY_AIR;
   check('diagnostics: azimuthal-mean tangential wind of solid-body rotation (om r within 10 %)', Math.abs(az[5 * (2 * 20 + 3)]! - om * 2500) < 0.1 * om * 2500 && Math.abs(az[5 * (2 * 20 + 3) + 1]!) < 0.1 * om * 2500, `${az[5 * (2 * 20 + 3)]!.toFixed(3)} m/s vs ${(om * 2500).toFixed(3)}`);
 }
 
+// Tropical-cyclone environments: the neutral RE87 sounding has no surface-parcel CAPE; the unstable one has a
+// well-mixed moist boundary layer and CAPE like the tropical oceans (so the outer region can sustain convection)
+{
+  const { parcelAscent, pressure } = await import('../regional/diagnostics.js');
+  const { tcSounding } = await import('../regional/tropical.js');
+  const nz = 50, dz = 500;
+  const env = (kind: 'unstable' | 're87') => {
+    const m = new RegionalModel({ ...base, nx: 4, ny: 4, nz, dx: 5000, dy: 5000, dz, dt: 10 }, tcSounding(kind, 301.15), 6);
+    const T = new Float64Array(nz), p = new Float64Array(nz), q = new Float64Array(nz);
+    for (let k = 0; k < nz; k++) { T[k] = m.th0[k]! * m.pi0[k]!; p[k] = pressure(m.pi0[k]!); q[k] = m.qv0[k]!; }
+    return { ...parcelAscent(T, p, q, dz), q0: q[0]! };
+  };
+  const n = env('re87'), u = env('unstable');
+  check('tropical: the RE87 sounding is neutral (no surface-parcel CAPE)', n.cape === 0, n.cape);
+  check('tropical: the unstable sounding has CAPE 700-1500 J/kg and a moist mixed boundary layer (qv > 17 g/kg at 250 m)', u.cape > 700 && u.cape < 1500 && u.q0 > 0.017,
+    `CAPE ${u.cape.toFixed(0)} J/kg, CIN ${u.cin.toFixed(0)}, qv ${(u.q0 * 1e3).toFixed(1)} g/kg`);
+}
+
 summary('regional');

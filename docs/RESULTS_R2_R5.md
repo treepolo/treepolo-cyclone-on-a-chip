@@ -256,6 +256,31 @@ eyewall outflow covers the whole domain and may suppress outer convection. Defau
 
 ![rain d6](results/tc15_ice_rain_d6.svg)
 
+### 4.3e 雨帶的真正原因：環境探空沒有對流能量 / The real cause: an environment without convective energy
+使用者在 GPU 上跑 5 km 十天以上（最大風 70 m/s 以上、900–915 hPa），外圍也幾乎沒有雨，只有極少、很矮的雲，所以不是解析度問題。
+原因在初始探空：RE87 式的中性探空把氣溫設成地面空氣的濕絕熱線，水氣又照相對濕度往上遞減，模式最低層（250 m）比地面空氣乾
+約 2.2 g/kg（15.8 對 18.0 g/kg），最低層氣塊抬升後比環境冷，**CAPE = 0**；輻射又把大氣一直拉回這個狀態。外圍空氣沒有對流能量，
+只有眼牆下面強風造成的強海面通量能長出深對流。真實熱帶海洋的邊界層混合均勻，地面氣塊 CAPE 約 1000–2000 J/kg。
+The user's 5 km GPU runs (over ten days, above 70 m/s, 900–915 hPa) also had almost no outer rain, only a few very low clouds, so it
+is not resolution. The cause is the initial sounding: the RE87-style neutral sounding puts the temperature on the surface air's moist
+adiabat and lets water vapour decrease with relative humidity, so the lowest model level (250 m) is about 2.2 g/kg drier than the surface
+air (15.8 vs 18.0 g/kg): a parcel lifted from it is colder than its surroundings, **CAPE = 0**, and the radiation keeps relaxing the
+atmosphere back to that state. The outer region has no convective energy; only the strong sea-surface fluxes under the eyewall can build
+deep convection. Over real tropical oceans the boundary layer is well mixed and the surface-parcel CAPE is about 1000–2000 J/kg.
+
+修正（新的預設，舊存檔仍用舊環境）：`unstableTropicalSounding`，邊界層水氣混合均勻到 600 m，1–15 km 的對流層比濕絕熱線冷
+3 K·sin（中層最多 3 K），28 °C 時 CAPE 約 1000 J/kg；輻射改為固定晴空冷卻 1.5 K/day。軸對稱 4 km 測試：颱風約 40 小時就成熟
+（原本 4.5 天），最大風 75–83 m/s；成熟後 60–100 km 仍有 0.05–5.6 mm/h 的對流雨、100–300 km 0.05–0.4 mm/h（原本約 0.03），
+剖面上外圍有深達 14 km 的對流雨帶（軸對稱模式裡是一圈圈的環）。3D 的螺旋雨帶要在 GPU 5 km／3 km 確認。
+Fix (the new default; older saves keep the old environment): `unstableTropicalSounding`, boundary-layer water vapour well mixed to
+600 m and the 1–15 km troposphere 3 K·sin cooler than the moist adiabat (at most 3 K at mid levels), CAPE about 1000 J/kg at 28 °C;
+radiation as constant clear-sky cooling of 1.5 K/day. Axisymmetric 4 km test: the storm matures in about 40 hours (formerly 4.5 days)
+at 75–83 m/s; after that 60–100 km still has 0.05–5.6 mm/h of convective rain and 100–300 km 0.05–0.4 mm/h (formerly about 0.03), with
+deep (14 km) outer convective bands in the cross-section (rings in the axisymmetric model). Spiral rainbands in 3-D are to be confirmed at
+5 km / 3 km on the GPU.
+
+![section](results/tc_unstable_axisym_section.png)
+
 ### 4.4 單向巢狀：全球模式中的區域預報 / One-way nest inside the Earth model
 `node dist/tools/runNest.js results/EARTH_T21 auto 30 24 20`
 

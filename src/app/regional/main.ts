@@ -134,7 +134,8 @@ function axiParams(): AxiParams {
   const lat = Math.max(1, Math.min(60, Math.abs(num('axLat', 20))));
   return { sst: num('axSst', 28) + 273.15, dr: num('axDr', 2000), lh: Math.max(0, num('axLh', 1000)), lv: Math.max(0, num('axLv', 100)), ck: Math.max(0, num('axCk', 1.2)) * 1e-3,
     vmin: Math.max(0, num('axVmin', 1)), vmax0: Math.max(1, num('axV0', 15)), f: 2 * 7.292e-5 * Math.sin(lat * Math.PI / 180),
-    radMax: Math.max(0, num('axRad', 2)), radConst: $<HTMLSelectElement>('axRadMode').value === 'const' ? Math.max(0, num('axRad', 1)) : 0, rhTop: Math.max(0.05, Math.min(1, num('axRh', 40) / 100)) };
+    radMax: Math.max(0, num('axRad', 2)), radConst: $<HTMLSelectElement>('axRadMode').value === 'const' ? Math.max(0, num('axRad', 1.5)) : 0, rhTop: Math.max(0.05, Math.min(1, num('axRh', 40) / 100)),
+    snd: $<HTMLSelectElement>('axSnd').value === 're87' ? 're87' : 'unstable' };
 }
 /** Tornado environment from the panel, and its 0-1 / 0-3 km storm-relative helicity, shear and CAPE. */
 function tornadoParams(): TornadoEnv {

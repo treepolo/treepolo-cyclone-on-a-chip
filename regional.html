@@ -80,9 +80,10 @@ a{color:#8fc1ff}
 <label for="axLv" class="axOnly">垂直混合長度 / Vertical mixing length (m)</label><input class="axOnly" id="axLv" type="number" step="10" value="100" />
 <label for="axCk">焓交換係數 / Enthalpy exchange Ck (×10⁻³)</label><input id="axCk" type="number" step="0.1" value="1.2" />
 <label for="axVmin">地面通量最小風速（陣風）/ Minimum wind in surface fluxes (m/s)</label><input id="axVmin" type="number" step="0.5" value="1" />
-<label for="axRadMode">輻射冷卻：向初始探空鬆弛（RE87）或固定晴空冷卻 / Radiative cooling: relax to the sounding (RE87) or constant clear-sky</label><select id="axRadMode" title="向初始探空鬆弛（RE87）或固定晴空冷卻 / relax to the sounding (RE87) or constant clear-sky cooling"><option value="relax" selected>鬆弛 / relax</option><option value="const">固定 / constant</option></select>
-<label for="axRad">冷卻率或上限 / Rate or cap (K/day)</label><input id="axRad" type="number" step="0.25" value="2" />
-<label for="axRh">12 km 相對濕度 / RH at 12 km (%)</label><input id="axRh" type="number" step="5" value="40" />
+<label for="axSnd">環境探空 / Environment sounding</label><select id="axSnd" title="條件不穩定：像真實熱帶海洋，邊界層混合均勻、CAPE 約 1000 J/kg，外圍可以長出對流與雨帶；RE87：對濕對流中性、CAPE 為 0 的理想探空，只有眼牆有對流 / unstable: like real tropical oceans, well-mixed boundary layer, CAPE about 1000 J/kg, so the outer region can grow convection and rainbands; RE87: idealised sounding neutral to moist convection, zero CAPE, convection only in the eyewall"><option value="unstable" selected>條件不穩定 / unstable</option><option value="re87">RE87 中性 / neutral</option></select>
+<label for="axRadMode">輻射冷卻：固定晴空冷卻或向初始探空鬆弛（RE87）/ Radiative cooling: constant clear-sky or relax to the sounding (RE87)</label><select id="axRadMode" title="固定晴空冷卻（像真實熱帶大氣）或向初始探空鬆弛（RE87）/ constant clear-sky cooling (as in the real tropical atmosphere) or relaxation to the sounding (RE87)"><option value="const" selected>固定 / constant</option><option value="relax">鬆弛 / relax</option></select>
+<label for="axRad">冷卻率或上限 / Rate or cap (K/day)</label><input id="axRad" type="number" step="0.25" value="1.5" />
+<label for="axRh">12 km 相對濕度（RE87 探空）/ RH at 12 km (RE87 sounding) (%)</label><input id="axRh" type="number" step="5" value="40" />
 </div>
 <div class="muted">3D 颱風（15 km、5 km）使用同樣的海溫、濕度、輻射、最小風速與初始渦旋；改完按「套用並重新開始」。/ The 3-D tropical cyclones (15 km, 5 km) use the same SST, humidity, radiation, minimum wind and initial vortex; press Apply to restart.</div>
 <div class="controls"><button id="axApply">套用並重新開始 / Apply and restart</button></div>

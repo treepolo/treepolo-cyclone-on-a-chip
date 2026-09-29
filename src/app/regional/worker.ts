@@ -4,13 +4,13 @@ import { RegionalModel } from '../../regional/core.js';
 import { weismanKlemp } from '../../regional/kessler.js';
 import { IceMicrophysics, QV, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { RegionalPhysics } from '../../regional/physics.js';
-import { tropicalSounding, insertVortex, tcMetrics, eyewallProfile } from '../../regional/tropical.js';
+import { tcSounding, insertVortex, tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { refineInto } from '../../regional/refine.js';
 import { Tracers, type TracerParams } from '../../regional/tracers.js';
-import { AxiDriver, AXI_DEFAULTS, type AxiParams } from './axiDriver.js';
+import { AxiDriver, AXI_DEFAULTS, LEGACY_TC, tcEnvText, type AxiParams } from './axiDriver.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { tornadoExperiment, StormTracker, TORNADO_DEFAULT, TORNADO_WK82, type TornadoEnv } from '../../regional/supercell.js';
@@ -199,16 +199,15 @@ function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; descripti
     const hr = exp === 'tc_hr' || exp === 'tc_3', P = { ...AXI_DEFAULTS, ...(tcEnv ?? {}) };
     // 3 km needs a discrete GPU; without one the 3 km experiment runs on the 5 km grid
     const L = 1200000, dx = exp === 'tc_3' && gpuOk ? 3000 : hr ? 5000 : 15000, nx = L / dx, nz = hr ? 50 : 25, dz = hr ? 500 : 1000, f = P.f, sst = P.sst, dtm = dx === 3000 ? 18 : hr ? 30 : 60;
-    m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: dtm, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, tropicalSounding(sst, 200, P.rhTop), 6);
+    m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: dtm, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, tcSounding(P.snd, sst, P.rhTop), 6);
     mp = new IceMicrophysics(m);
     // the mixing lengths stay those of the 3-D set-up (the panel's lh / lv apply to the axisymmetric version)
     physCfg = { lh: 0.2 * dx, lv: 100, sst, ck: P.ck, radTau: 12 * 3600, radMax: P.radMax / 86400, vmin: P.vmin, radConst: P.radConst / 86400 };
     phys = new RegionalPhysics(m, physCfg);
     insertVortex(m, f, P.vmax0);
     dpEnv = 1e5 * Math.pow(m.pi0[0]!, 1004.5 / 287.05) / 100;
-    const env = `${(sst - 273.15).toFixed(1)}°C、${P.radConst ? `固定冷卻 ${P.radConst} K/day` : 'RE87 輻射鬆弛'}、最小風速 ${P.vmin} m/s、12 km RH ${Math.round(100 * P.rhTop)}%`;
-    const envEn = `${(sst - 273.15).toFixed(1)} °C, ${P.radConst ? `constant cooling ${P.radConst} K/day` : 'RE87 radiative relaxation'}, minimum wind ${P.vmin} m/s, RH ${Math.round(100 * P.rhTop)}% at 12 km`;
-    return { dt: dtm, description: `熱帶氣旋 / tropical cyclone：海面上的弱渦旋（f 平面，Δx ${dx / 1000} km；${env}）/ weak vortex over the sea (f-plane; ${envEn})` };
+    const e = tcEnvText(P);
+    return { dt: dtm, description: `熱帶氣旋 / tropical cyclone：海面上的弱渦旋（f 平面，Δx ${dx / 1000} km；${e.zh}）/ weak vortex over the sea (f-plane; ${e.en})` };
   }
 }
 
@@ -381,7 +380,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         if (meta.kind !== 'regional') throw new Error('不是區域模式存檔 / not a regional save');
         if (M.experiment === 'tc_axi') {
           gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null; experiment = 'tc_axi'; frameVel = { u: 0, v: 0 };
-          axi = new AxiDriver({ ...AXI_DEFAULTS, ...((meta as unknown as { axi?: AxiParams }).axi ?? {}) });
+          axi = new AxiDriver({ ...AXI_DEFAULTS, ...LEGACY_TC, ...((meta as unknown as { axi?: AxiParams }).axi ?? {}) });
           axi.restore(arrays as Record<string, Float32Array>, M.time, M.steps);
           resetOrigin(); stormDomain = null; tracers = null;
           post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu', note: `已載入存檔 / save loaded (t = ${(M.time / 3600).toFixed(2)} h)`, refineTo: null });
@@ -402,7 +401,8 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           info = buildNest(payload, n.lat0, n.lon0, n.size, M.builtGpu);
           nestSource = { payload, lat0: n.lat0, lon0: n.lon0, size: n.size };
         } else {
-          tcEnv = (meta as unknown as { tcEnv?: Partial<AxiParams> | null }).tcEnv ?? null;
+          // saves from before the unstable sounding used the neutral sounding with radiative relaxation
+          tcEnv = { ...LEGACY_TC, ...((meta as unknown as { tcEnv?: Partial<AxiParams> | null }).tcEnv ?? {}) };
           tornadoEnv = { ...((meta as unknown as { tornadoEnv?: TornadoEnv }).tornadoEnv ?? TORNADO_WK82) };
           info = build(M.experiment, M.builtGpu); nestSource = null;
         }

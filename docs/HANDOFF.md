@@ -76,8 +76,11 @@
   `tropicalSounding(sst, Ttrop, rhTop)`。worker 的 `tcEnv`（頁面面板送來、存檔裡保存）套用到 tc／tc_hr／tc_3。
 - 工具：`runAxisym.js ... cases='base|vmin:4|radc:1.5+vmin:4'`（CSV 有核心／外圍雨量與雨環數）；
   `runTropicalCyclone.js 8 15000 1200000 out ice vmin=4 radc=1.5 rh12=0.6`（每 3 小時印核心／外圍雨量與外圍降雨面積比）。
-- 結果：軸對稱篩選與雙眼牆見 RESULTS 4.3c，3D 15 km 三組對照見 RESULTS 4.3d。結論：15 km 在成熟期三種設定都沒有雨帶
-  （外圍只有零星單格對流），預設不變；要在 5 km／3 km（使用者的 GPU）確認。
+- 結果：軸對稱篩選與雙眼牆見 RESULTS 4.3c，3D 15 km 三組對照見 RESULTS 4.3d。使用者 5 km 也沒有雨帶。
+- **真正原因與修正（RESULTS 4.3e）**：RE87 中性探空 CAPE = 0。新預設 `snd: 'unstable'`（`unstableTropicalSounding`：邊界層混合均勻、
+  對流層冷 3 K·sin、CAPE 約 1000 J/kg）＋ `radConst` 1.5 K/day；`LEGACY_TC`（RE87＋鬆弛）合併在舊存檔參數底下，舊存檔不變。
+  命令列工具的預設仍是 RE87（文件裡的舊結果可重現），加 `snd=unstable radc=1.5`（3D）或 `unstable=1 radc=1.5`（軸對稱）用新環境。
+  使用者覺得長時間的背景測試太慢：能用短測試證明的就不要跑幾小時的對照。
 - 雨帶統計：颱風實驗的每個畫面帶 `stats.tcRain`（上一個模式小時的核心 < 60 km／外圍 100–300 km 平均降雨率、外圍 > 1 mm/h
   面積比；3D 在 worker 的 `tcRainUpdate`，軸對稱在 `AxiDriver.frame`）；頁面資訊列、時間序列「外圍雨量」、CSV、
   無人值守報告（`rain_core`、`rain_outer`、`wet_outer`）都有。
@@ -98,7 +101,7 @@
 
 ## 下一步
 - 等使用者在 GPU 上的結果（用 ArtifactData 讀 `runs` 集合）：
-  1. 雨帶：5 km（tc_hr）預設 vs vmin 4（「颱風環境與參數」面板），看 `rain_outer`／`wet_outer`。
+  1. 雨帶：5 km（tc_hr）用新預設（條件不穩定探空），看有沒有螺旋雨帶、`rain_outer`／`wet_outer`。
   2. 雙眼牆：tc → 細化 tc_hr → 細化 tc_3，成熟後跑 2–3 天，看 `ew2r`（第二眼牆）與 Hovmöller。
 - 若 5 km 仍沒有雨帶：可試較大的區域（1800–2400 km，週期區域的外流下沉）或較小的水平混合長度（目前 0.2·Δx）。
 - 要問使用者：龍捲的地面附近垂直加密（約 50 m）；「放山」需要地形座標（大改動）；颱風預設要不要改（目前建議不改）。

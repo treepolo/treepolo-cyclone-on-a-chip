@@ -5,7 +5,7 @@
 
 import { AxisymModel, HA, type AxisymConfig } from '../../regional/axisym.js';
 import { IceMicrophysics, QC, QR, QI, QS, QG } from '../../regional/ice.js';
-import { tropicalSounding, eyewallPeaks } from '../../regional/tropical.js';
+import { tcSounding, eyewallPeaks, type TcSounding } from '../../regional/tropical.js';
 import { SECTION_VARS, sectionValues, parcelAscent, pressure, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { ChartData, ChartRequest, GroundField, RegionalFrame, TcRain } from './protocol.js';
 
@@ -18,11 +18,22 @@ export interface AxiParams {
   vmin: number;         // minimum surface wind in the fluxes (m/s)
   radMax: number;       // maximum radiative cooling (K/day)
   radConst: number;     // constant clear-sky tropospheric cooling (K/day; 0 = Newtonian relaxation, RE87)
-  rhTop: number;        // relative humidity of the sounding at 12 km (0.4 standard, 0.6 moist)
+  rhTop: number;        // relative humidity of the sounding at 12 km (0.4 standard, 0.6 moist; RE87 sounding only)
+  snd: TcSounding;      // environment: conditionally unstable tropical sounding or the neutral RE87 sounding
   vmax0: number;        // initial vortex maximum wind (m/s)
   f: number;            // Coriolis parameter (s^-1)
 }
-export const AXI_DEFAULTS: AxiParams = { sst: 301.15, dr: 4000, lh: 1000, lv: 100, ck: 1.2e-3, vmin: 1, radMax: 2, radConst: 0, rhTop: 0.4, vmax0: 15, f: 5e-5 };
+export const AXI_DEFAULTS: AxiParams = { sst: 301.15, dr: 4000, lh: 1000, lv: 100, ck: 1.2e-3, vmin: 1, radMax: 2, radConst: 1.5, rhTop: 0.4, snd: 'unstable', vmax0: 15, f: 5e-5 };
+/** Environment of saves made before the unstable sounding (neutral RE87 sounding, radiative relaxation): merged under saved parameters. */
+export const LEGACY_TC: Pick<AxiParams, 'snd' | 'radConst'> = { snd: 're87', radConst: 0 };
+/** Short bilingual description of the TC environment. */
+export function tcEnvText(p: AxiParams): { zh: string; en: string } {
+  const snd = p.snd === 'unstable' ? { zh: '條件不穩定熱帶探空（CAPE 約 1000 J/kg）', en: 'conditionally unstable tropical sounding (CAPE about 1000 J/kg)' } : { zh: `RE87 中性探空（12 km RH ${Math.round(100 * p.rhTop)}%）`, en: `neutral RE87 sounding (RH ${Math.round(100 * p.rhTop)}% at 12 km)` };
+  return {
+    zh: `${(p.sst - 273.15).toFixed(1)} °C、${snd.zh}、${p.radConst ? `固定冷卻 ${p.radConst} K/day` : `輻射鬆弛（上限 ${p.radMax} K/day）`}、最小風速 ${p.vmin} m/s`,
+    en: `${(p.sst - 273.15).toFixed(1)} °C, ${snd.en}, ${p.radConst ? `constant cooling ${p.radConst} K/day` : `radiative relaxation (cap ${p.radMax} K/day)`}, minimum wind ${p.vmin} m/s`,
+  };
+}
 
 const NV = SECTION_VARS.length;
 const SV = Object.fromEntries(SECTION_VARS.map((v, i) => [v, i])) as Record<SectionVar, number>;
@@ -44,7 +55,7 @@ export class AxiDriver {
       nr, nz, dr: p.dr, dz, dt: Math.min(20, 7.5 * p.dr / 1000), nsound: 6, f: p.f, dampDepth: 6000, dampRate: 1 / 300,
       spongeWidth: 150000, spongeRate: 1 / 900, lh: p.lh, lv: p.lv, sst: p.sst, ck: p.ck, vmin: p.vmin, radTau: 12 * 3600, radMax: p.radMax / 86400, radConst: (p.radConst ?? 0) / 86400,
     };
-    this.ax = new AxisymModel(cfg, tropicalSounding(p.sst, 200, p.rhTop ?? 0.4));
+    this.ax = new AxisymModel(cfg, tcSounding(p.snd ?? 're87', p.sst, p.rhTop ?? 0.4));
     this.mp = new IceMicrophysics(this.ax);
     this.ax.insertVortex(p.vmax0, 20000);
     this.D = 240000; this.dxv = 2 * this.D / this.N;
@@ -53,9 +64,9 @@ export class AxiDriver {
   get time(): number { return this.ax.time; }
   get dt(): number { return this.ax.a.dt; }
   description(): string {
-    const p = this.p;
-    return `軸對稱颱風快速版 / Axisymmetric TC (fast)：${(p.sst - 273.15).toFixed(1)} °C 海面、Δr ${p.dr / 1000} km、半徑 800 km、高 25 km；混合長度 ${p.lh} / ${p.lv} m、Ck ${p.ck.toExponential(1)}、最小風速 ${p.vmin} m/s、${p.radConst ? `固定冷卻 ${p.radConst} K/day` : `輻射冷卻上限 ${p.radMax} K/day`}、12 km 相對濕度 ${Math.round(100 * (p.rhTop ?? 0.4))}% ` +
-      `/ ${(p.sst - 273.15).toFixed(1)} °C sea, Δr ${p.dr / 1000} km, 800 km radius, 25 km deep; mixing lengths ${p.lh} / ${p.lv} m, Ck ${p.ck.toExponential(1)}, minimum wind ${p.vmin} m/s, ${p.radConst ? `constant cooling ${p.radConst} K/day` : `cooling cap ${p.radMax} K/day`}, RH at 12 km ${Math.round(100 * (p.rhTop ?? 0.4))}%. 顯示時繞軸旋轉成 3D / revolved about the axis for display`;
+    const p = this.p, e = tcEnvText({ ...LEGACY_TC, ...p });
+    return `軸對稱颱風快速版 / Axisymmetric TC (fast)：Δr ${p.dr / 1000} km、半徑 800 km、高 25 km；${e.zh}；混合長度 ${p.lh} / ${p.lv} m、Ck ${p.ck.toExponential(1)} ` +
+      `/ Δr ${p.dr / 1000} km, 800 km radius, 25 km deep; ${e.en}; mixing lengths ${p.lh} / ${p.lv} m, Ck ${p.ck.toExponential(1)}. 顯示時繞軸旋轉成 3D / revolved about the axis for display`;
   }
 
   step(n: number): void { for (let s = 0; s < n; s++) { this.ax.step(); this.mp.apply(this.ax.a.dt); } }

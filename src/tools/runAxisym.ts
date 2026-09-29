@@ -4,7 +4,8 @@
 //
 // Usage: node dist/tools/runAxisym.js days=4 [key=value ...] [sweep=key:v1,v2,...] [out=results/axisym]
 //   keys: sst (deg C), dr (m), lh, lv (m), ck (x1e-3), vmin (m/s), rad (K/day cap of the relaxation),
-//         radc (K/day constant tropospheric cooling; 0 = relaxation), rh12 (RH at 12 km, 0-1), vmax0 (m/s), lat (deg)
+//         radc (K/day constant tropospheric cooling; 0 = relaxation), rh12 (RH at 12 km, 0-1), vmax0 (m/s), lat (deg),
+//         unstable (1 = the conditionally unstable sounding instead of the neutral RE87 one)
 // The CSV also has the mean precipitation rate (mm/h) in the core (r < 60 km) and in the outer region
 // (100-300 km) over each 3-hour interval, and the number of rain rings (local maxima above 0.5 mm/h) beyond 80 km.
 // Examples: node dist/tools/runAxisym.js days=5 sweep=vmin:1,3,5
@@ -14,9 +15,9 @@ import { cpus } from 'node:os';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { AxisymModel } from '../regional/axisym.js';
 import { IceMicrophysics } from '../regional/ice.js';
-import { tropicalSounding, eyewallPeaks } from '../regional/tropical.js';
+import { tcSounding, eyewallPeaks } from '../regional/tropical.js';
 
-interface RunSpec { name: string; days: number; sst: number; dr: number; lh: number; lv: number; ck: number; vmin: number; rad: number; radc: number; rh12: number; vmax0: number; lat: number; nz: number; out: string }
+interface RunSpec { name: string; days: number; sst: number; dr: number; lh: number; lv: number; ck: number; vmin: number; rad: number; radc: number; rh12: number; vmax0: number; lat: number; nz: number; unstable: number; out: string }
 
 /** progress line: printed by the main thread (worker-thread console output is not flushed reliably to files) */
 const say = (line: string): void => { if (isMainThread) console.log(line); else parentPort!.postMessage({ line }); };
@@ -24,7 +25,7 @@ const say = (line: string): void => { if (isMainThread) console.log(line); else 
 function run(p: RunSpec): string {
   const nr = Math.round(800000 / p.dr), nz = p.nz, dz = 25000 / nz, f = 2 * 7.292e-5 * Math.sin(p.lat * Math.PI / 180);
   const m = new AxisymModel({ nr, nz, dr: p.dr, dz, dt: Math.min(20, 7.5 * p.dr / 1000), nsound: 6, f, dampDepth: 6000, dampRate: 1 / 300, spongeWidth: 150000, spongeRate: 1 / 900,
-    lh: p.lh, lv: p.lv, sst: p.sst + 273.15, ck: p.ck * 1e-3, vmin: p.vmin, radTau: 12 * 3600, radMax: p.rad / 86400, radConst: p.radc / 86400 }, tropicalSounding(p.sst + 273.15, 200, p.rh12));
+    lh: p.lh, lv: p.lv, sst: p.sst + 273.15, ck: p.ck * 1e-3, vmin: p.vmin, radTau: 12 * 3600, radMax: p.rad / 86400, radConst: p.radc / 86400 }, tcSounding(p.unstable ? 'unstable' : 're87', p.sst + 273.15, p.rh12));
   const mp = new IceMicrophysics(m);
   m.insertVortex(p.vmax0, 20000);
   const every = Math.round(3 * 3600 / m.a.dt), rows = ['t_h,dp_hPa,vmax_ms,rmw_km,core_mmh,outer_mmh,rings,eyewalls'], t0 = Date.now();
@@ -61,7 +62,7 @@ function run(p: RunSpec): string {
 if (isMainThread) {
   const args = Object.fromEntries(process.argv.slice(2).map((a) => a.split('=')).filter((kv) => kv.length === 2) as [string, string][]);
   const base: RunSpec = { name: 'base', days: Number(args.days ?? 4), sst: Number(args.sst ?? 28), dr: Number(args.dr ?? 2000), lh: Number(args.lh ?? 1000), lv: Number(args.lv ?? 100), ck: Number(args.ck ?? 1.2),
-    vmin: Number(args.vmin ?? 1), rad: Number(args.rad ?? 2), radc: Number(args.radc ?? 0), rh12: Number(args.rh12 ?? 0.4), vmax0: Number(args.vmax0 ?? 15), lat: Number(args.lat ?? 20), nz: Number(args.nz ?? 50), out: args.out ?? 'results/axisym' };
+    vmin: Number(args.vmin ?? 1), rad: Number(args.rad ?? 2), radc: Number(args.radc ?? 0), rh12: Number(args.rh12 ?? 0.4), vmax0: Number(args.vmax0 ?? 15), lat: Number(args.lat ?? 20), nz: Number(args.nz ?? 50), unstable: Number(args.unstable ?? 0), out: args.out ?? 'results/axisym' };
   const specs: RunSpec[] = [];
   if (args.cases) {
     // cases=base|radc:1|rh12:0.6+radc:1 : each case sets one or more keys ('+'-joined key:value pairs)

@@ -45,6 +45,32 @@ export function tropicalSounding(sst = 301.15, Ttrop = 200, rhTop = 0.4): (z: nu
   };
 }
 
+/** Environment of the tropical-cyclone experiments: 'unstable' a conditionally unstable tropical sounding like the
+ *  observed mean over tropical oceans, 're87' the convectively neutral sounding above (no CAPE). */
+export type TcSounding = 'unstable' | 're87';
+
+/**
+ * Conditionally unstable tropical sounding: the neutral sounding above with (1) a well-mixed boundary layer, water
+ * vapour constant at its surface value up to 600 m (the neutral sounding's relative-humidity profile leaves the lowest
+ * model level about 2 g/kg drier than the surface air, so a lifted parcel is colder than its surroundings), and (2) a free
+ * troposphere cooler than the surface parcel's moist adiabat by cool * sin(pi (z - 1 km) / 14 km) between 1 and 15 km.
+ * With cool = 3 K the surface-parcel CAPE is about 1000 J/kg at 28 °C (tropical oceans: roughly 1000-2000 J/kg), and the
+ * outer region of a storm can sustain deep convection; the neutral sounding (CAPE 0) only allows it where the storm's
+ * surface fluxes are strong, so it has an eyewall but no rainbands.
+ */
+export function unstableTropicalSounding(sst = 301.15, cool = 3): (z: number) => { theta: number; qv: number } {
+  const base = tropicalSounding(sst), q0 = base(0).qv;
+  return (z: number) => {
+    const s = base(z), d = z > 1000 && z < 15000 ? cool * Math.sin(Math.PI * (z - 1000) / 14000) : 0;
+    return { theta: s.theta - d, qv: z < 600 ? q0 : s.qv };
+  };
+}
+
+/** The sounding of the tropical-cyclone experiments. */
+export function tcSounding(kind: TcSounding, sst: number, rhTop = 0.4): (z: number) => { theta: number; qv: number } {
+  return kind === 'unstable' ? unstableTropicalSounding(sst) : tropicalSounding(sst, 200, rhTop);
+}
+
 /** Rotunno & Emanuel (1987) vortex tangential wind at the surface (m/s). */
 export function re87Wind(r: number, f: number, vmax = 15, rm = 82500, r0 = 412500): number {
   if (r >= r0) return 0;
