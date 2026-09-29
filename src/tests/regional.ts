@@ -164,7 +164,8 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
   let rain = 0, frozen = 0; for (let n = 0; n < mp.rainAcc.length; n++) { rain += mp.rainAcc[n]!; frozen += mp.snowAcc[n]!; }
   const drift = Math.abs(water() - W0) / W0;
   if (process.env.VERBOSE) console.log(`    water drift ${(water() - W0) / W0}, clipped ${mp.clipped / W0}`);
-  check('ice regional: deep updraft with cloud ice, snow and graupel aloft', wmax > 15 && qimax > 1e-4 && qsmax > 1e-4 && qgmax > 1e-4, `w ${wmax.toFixed(1)} m/s, qi ${(qimax * 1e3).toFixed(2)} qs ${(qsmax * 1e3).toFixed(2)} qg ${(qgmax * 1e3).toFixed(2)} g/kg`);
+  // with the Lin et al. (1983) ice -> snow threshold (1 g/kg) cloud ice builds up first and little snow forms in 40 minutes
+  check('ice regional: deep updraft with cloud ice, snow and graupel aloft', wmax > 15 && qimax > 1e-4 && qsmax > 2e-5 && qgmax > 1e-4, `w ${wmax.toFixed(1)} m/s, qi ${(qimax * 1e3).toFixed(2)} qs ${(qsmax * 1e3).toFixed(2)} qg ${(qgmax * 1e3).toFixed(2)} g/kg`);
   check('ice regional: no liquid water colder than -40 °C', liqCold < 1e-9, liqCold);
   check('ice regional: precipitation reaches the ground', rain > 0, `total ${(rain / (nx * nx)).toFixed(2)} mm mean, frozen part ${(100 * frozen / Math.max(rain, 1e-30)).toFixed(0)}%`);
   check('ice regional: total water conserved within 0.5%', drift < 5e-3, drift);

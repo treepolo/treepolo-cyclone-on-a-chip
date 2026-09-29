@@ -6,7 +6,7 @@
 // microphysics, 8 qi, 9 qs, 10 qg.
 
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
-import { RegionalPhysicsConfig, surfaceState } from '../regional/physics.js';
+import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
 import { ICE, LF, gammaFn } from '../regional/ice.js';
 import { COL } from '../regional/diagnostics.js';
 import type { TracerParams } from '../regional/tracers.js';
@@ -112,6 +112,7 @@ export class GpuRegional {
     const baseBuf = device.createBuffer({ size: base.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(baseBuf, 0, base);
     const ph = opts.physics;
+    this.blNoise = ph?.blNoise ?? 0;
     const open = m.c.lateral === 'open';
     const sfc = ph ? surfaceState(m, ph) : null;
     const bnd = open ? (opts.boundary ?? m.boundary) : null;
@@ -335,11 +336,47 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   private cflK: { pipe: GPUComputePipeline; out: GPUBuffer; bind: GPUBindGroup } | null = null;
 
+  /** stochastic boundary-layer perturbations (RegionalPhysicsConfig.blNoise, K) and the last interval applied */
+  private readonly blNoise: number;
+  private noiseEpoch = -1;
+  private noiseK: { pipe: GPUComputePipeline; P: GPUBuffer; bind: GPUBindGroup } | null = null;
+  /** Perturb theta below BL_NOISE_DEPTH in every column by blNoise * blNoiseValue(i, j, nx, epoch) (as RegionalPhysics.noise). */
+  private noise(epoch: number): void {
+    const dev = this.device, m = this.cpu;
+    if (!this.noiseK) {
+      let nk = 0; while (nk < m.c.nz && m.zc[nk]! < BL_NOISE_DEPTH) nk++;
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code: this.consts + `
+@group(0) @binding(0) var<storage, read_write> S: array<f32>;
+@group(0) @binding(1) var<uniform> NP: vec4<u32>;
+fn pcg(v: u32) -> u32 { let s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= NX * NY) { return; }
+  let j = t / NX; let i = t % NX;
+  let d = ${this.blNoise.toFixed(6)} * (2.0 * (f32(pcg((i + NX * j) ^ pcg(NP.x))) / 4294967296.0) - 1.0);
+  for (var k = 0u; k < ${nk}u; k++) { let q = 3u * SIZE + k * PL + (j + HH) * SX + (i + HH); S[q] = S[q] + d; }
+}` }), entryPoint: 'main' } });
+      const P = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.noiseK = { pipe, P, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: P } }] }) };
+    }
+    const k = this.noiseK;
+    dev.queue.writeBuffer(k.P, 0, new Uint32Array([epoch >>> 0, 0, 0, 0]));
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.ceil(m.c.nx * m.c.ny / 64)); pass.end();
+    dev.queue.submit([enc.finish()]);
+  }
+
   step(n = 1): void {
     // several short command buffers per step: on large grids one step is ~1 s of GPU work, and a single
     // long submission can trip the OS GPU watchdog (Windows TDR, ~2 s), which resets the device
     const chunk = Math.max(4, Math.ceil(PASS_CELLS / this.cpu.size));
     for (let s = 0; s < n; s++) {
+      if (this.blNoise > 0) {
+        const e = Math.floor(this.time / BL_NOISE_PERIOD + 1e-6);
+        if (this.noiseEpoch < 0 || e <= this.noiseEpoch) this.noiseEpoch = Math.max(this.noiseEpoch, e);
+        else { this.noiseEpoch = e; this.noise(e); }
+      }
       for (let p0 = 0; p0 < this.passes.length; p0 += chunk) {
         const enc = this.device.createCommandEncoder();
         const pass = enc.beginComputePass();
@@ -427,8 +464,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   /**
    * Display data without reading the whole state back: a GPU kernel packs the 3-D view bytes and the
    * per-column composites; only those, the requested horizontal planes and the surface precipitation
-   * accumulations are copied. `packed`: per cell cloud byte (qc + qi) | channel-2 byte << 8 (channel 2:
-   * precipitation qr + qs + qg, or with `volMode` 1 updraft w, 2 cyclonic vertical vorticity); `col` (COL
+   * accumulations are copied. `packed`: per cell cloud byte (qc + qi + qs) | channel-2 byte << 8 (channel 2:
+   * precipitation qr + qg, or with `volMode` 1 updraft w, 2 cyclonic vertical vorticity); `col` (COL
    * values per column, offsets C in diagnostics.ts): w max, w min, condensate max, precipitation max,
    * column-max reflectivity (dBZ), cloud-top height (m), cloud-top temperature (K), 2-5 km updraft helicity
    * (m^2/s^2), surface-based CAPE and CIN (J/kg; same steps as parcelAscent); `planes`: every prognostic
@@ -470,8 +507,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let zc = LB[4u * k + 2u];
     if (zc >= 2000.0 && zc <= 5000.0) { uh += wc * zeta * LB[4u * k + 3u]; }
     if (cl > 1e-5) { ctz = zc; ctt = S[3u * SIZE + q] * (LB[4u * k] + S[4u * SIZE + q]); }
-    let cb = u32(min(255.0, round(sqrt(cl / 3e-3) * 255.0)));
-    var v2 = sqrt(pr / 8e-3);
+    // 3-D view: snow is drawn with the cloud (anvils and the outflow shield are mostly snow in this scheme),
+    // channel 2 with rain and graupel
+    let cb = u32(min(255.0, round(sqrt((cl + qs) / 3e-3) * 255.0)));
+    var v2 = sqrt(max(pr - qs, 0.0) / 8e-3);
     if (MODE.x == 1u) { v2 = sqrt(max(wc, 0.0) / 40.0); }
     if (MODE.x == 2u) { v2 = sqrt(max(zeta, 0.0) / 0.05); }
     let pb = u32(min(255.0, round(v2 * 255.0)));

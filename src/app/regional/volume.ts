@@ -84,6 +84,9 @@ void main(){
 }`;
 const TRAIL = 8;
 
+/** orbit (drag to turn), free flight, or the fixed side and top views */
+export type CameraMode = 'orbit' | 'fly' | 'side' | 'top';
+
 export class VolumeView {
   private readonly gl: WebGL2RenderingContext;
   private readonly prog: WebGLProgram;
@@ -144,8 +147,11 @@ export class VolumeView {
   private fly: { eye: [number, number, number]; yaw: number; pitch: number } | null = null;
   private readonly keys = new Set<string>();
   private lastT = 0;
-  setCamera(mode: 'orbit' | 'fly'): void {
-    if (mode === 'orbit') { this.fly = null; this.dirty = true; return; }
+  setCamera(mode: CameraMode): void {
+    // fixed views of the whole domain: level from the south side, or straight down from above (dragging turns them back into the orbit view)
+    if (mode === 'side') { this.fly = null; this.yaw = -Math.PI / 2; this.pitch = 0; this.dist = 1.0; this.dirty = true; return; }
+    if (mode === 'top') { this.fly = null; this.yaw = -Math.PI / 2; this.pitch = Math.PI / 2; this.dist = 0.85; this.dirty = true; return; }
+    if (mode === 'orbit') { this.fly = null; this.yaw = -0.9; this.pitch = 0.35; this.dist = 1.35; this.dirty = true; return; }
     if (this.fly) return;
     // start where the orbit camera is, looking at the same point
     const [bx, by, bz] = this.box, c = [bx / 2, by / 2, bz * 0.3];
@@ -332,7 +338,8 @@ export class VolumeView {
 type V3 = [number, number, number];
 function viewProj(eye: V3, ctr: V3, aspect: number): Float32Array {
   const f = norm([ctr[0] - eye[0], ctr[1] - eye[1], ctr[2] - eye[2]]);
-  const s = norm(cross(f, [0, 0, 1])), u = cross(s, f);
+  // looking straight down: north (+y) is up on the screen
+  const s = norm(cross(f, Math.abs(f[2]) > 0.999 ? [0, 1, 0] : [0, 0, 1])), u = cross(s, f);
   const view = [s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0, -dot(s, eye), -dot(u, eye), dot(f, eye), 1];
   const fov = 0.9, n = 0.01, fa = 100, t = 1 / Math.tan(fov / 2);
   const proj = [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (fa + n) / (n - fa), -1, 0, 0, 2 * fa * n / (n - fa), 0];

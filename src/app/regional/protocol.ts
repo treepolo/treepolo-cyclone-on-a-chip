@@ -23,7 +23,7 @@ export interface NestPayload {
  *  'cp3': 960 km at 3 km (convection-permitting, GPU) */
 export type NestSize = 'meso' | 'storm' | 'cp3';
 export const NEST_HALF_WIDTH_KM: Record<NestSize, number> = { meso: 600, storm: 240, cp3: 480 };
-export type GroundField = 'rain' | 'wind' | 'theta' | 'snow';
+export type GroundField = 'rain' | 'wind' | 'theta' | 'snow' | 'none';
 
 export type ToRegionalWorker =
   | { type: 'init'; experiment: RegionalExperiment; backend: 'auto' | 'cpu'; axi?: import('./axiDriver.js').AxiParams; tornado?: import('../../regional/supercell.js').TornadoEnv }

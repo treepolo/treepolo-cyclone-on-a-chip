@@ -16,28 +16,41 @@ const qsat = (T: number, p: number): number => { const e = esat(T); return EPS *
  * (0.4 by default; about 0.6 matches the moist-tropical hurricane-season mean of Dunion 2011).
  */
 export function tropicalSounding(sst = 301.15, Ttrop = 200, rhTop = 0.4): (z: number) => { theta: number; qv: number } {
+  return tropicalProfile(sst, Ttrop, rhTop, 0, false);
+}
+
+/**
+ * Tropical sounding builder. The reference parcel (surface air, T = sst - 1 K, RH 80%) rises dry-adiabatically to
+ * its LCL and pseudo-adiabatically above; the environment is that parcel path, colder by
+ * cool * sin(pi (z - 1 km) / 14 km) between 1 and 15 km, isothermal (Ttrop) in the stratosphere. Water vapour follows the
+ * relative-humidity profile at the environment temperature; with `mixed`, the lowest kilometre also holds the surface
+ * air's water vapour as far as 90% relative humidity allows (a well-mixed sub-cloud layer that is not saturated).
+ */
+function tropicalProfile(sst: number, Ttrop: number, rhTop: number, cool: number, mixed: boolean): (z: number) => { theta: number; qv: number } {
   const dz = 10, n = 3000;
   const th = new Float64Array(n + 1), qv = new Float64Array(n + 1);
-  let T = sst - 1, p = 1e5;
+  let Tp = sst - 1, p = 1e5;
   const rh0 = 0.8;
-  const q0 = rh0 * qsat(T, p);
+  const q0 = rh0 * qsat(Tp, p);
+  const off = (z: number): number => (z > 1000 && z < 15000 ? cool * Math.sin(Math.PI * (z - 1000) / 14000) : 0);
   let saturated = false;
   for (let i = 0; i <= n; i++) {
-    const z = i * dz;
+    const z = i * dz, T = Math.max(Ttrop, Tp - off(z));
     const rh = z < 12000 ? rh0 - (rh0 - rhTop) * z / 12000 : rhTop * Math.exp(-(z - 12000) / 3000);
     th[i] = T * Math.pow(1e5 / p, DRY_AIR.kappa);
     qv[i] = Math.min(rh * qsat(T, p), 0.02);
-    // lapse rate for the next step
+    if (mixed && z < 1000) qv[i] = Math.max(qv[i]!, Math.min(q0, 0.9 * qsat(T, p)));
+    // lapse rate of the reference parcel for the next step
     let gamma: number;
-    if (T <= Ttrop) gamma = 0;
+    if (Tp <= Ttrop) gamma = 0;
     else {
-      if (!saturated && q0 >= qsat(T, p)) saturated = true;
+      if (!saturated && q0 >= qsat(Tp, p)) saturated = true;
       if (!saturated) gamma = G / CP;
-      else { const rs = qsat(T, p); gamma = G * (1 + LV * rs / (RD * T)) / (CP + LV * LV * rs * EPS / (RD * T * T)); }
+      else { const rs = qsat(Tp, p); gamma = G * (1 + LV * rs / (RD * Tp)) / (CP + LV * LV * rs * EPS / (RD * Tp * Tp)); }
     }
-    const Tn = Math.max(Ttrop, T - gamma * dz);
+    const Tpn = Math.max(Ttrop, Tp - gamma * dz), Tn = Math.max(Ttrop, Tpn - off(z + dz));
     p *= Math.exp(-G * dz / (RD * 0.5 * (T + Tn)));
-    T = Tn;
+    Tp = Tpn;
   }
   return (z: number) => {
     const x = Math.max(0, Math.min(n - 1e-6, z / dz)), i = Math.floor(x), w = x - i;
@@ -50,20 +63,15 @@ export function tropicalSounding(sst = 301.15, Ttrop = 200, rhTop = 0.4): (z: nu
 export type TcSounding = 'unstable' | 're87';
 
 /**
- * Conditionally unstable tropical sounding: the neutral sounding above with (1) a well-mixed boundary layer, water
- * vapour constant at its surface value up to 600 m (the neutral sounding's relative-humidity profile leaves the lowest
- * model level about 2 g/kg drier than the surface air, so a lifted parcel is colder than its surroundings), and (2) a free
- * troposphere cooler than the surface parcel's moist adiabat by cool * sin(pi (z - 1 km) / 14 km) between 1 and 15 km.
- * With cool = 3 K the surface-parcel CAPE is about 1000 J/kg at 28 °C (tropical oceans: roughly 1000-2000 J/kg), and the
- * outer region of a storm can sustain deep convection; the neutral sounding (CAPE 0) only allows it where the storm's
- * surface fluxes are strong, so it has an eyewall but no rainbands.
+ * Conditionally unstable tropical sounding (tropicalProfile with cool = 3 K and a mixed sub-cloud layer): a free
+ * troposphere up to 3 K cooler than the surface air's moist adiabat and a well-mixed, unsaturated boundary layer.
+ * The neutral sounding's relative-humidity profile leaves the lowest model level about 2 g/kg drier than the surface
+ * air, so a lifted parcel is colder than its surroundings (CAPE 0) and only the storm's strong surface fluxes can build
+ * deep convection: an eyewall but no rainbands or outer convection. Here the surface-parcel CAPE from the lowest level of
+ * a 500 m grid is about 1000 J/kg at 28 °C, as over tropical oceans (roughly 1000-2000 J/kg).
  */
 export function unstableTropicalSounding(sst = 301.15, cool = 3): (z: number) => { theta: number; qv: number } {
-  const base = tropicalSounding(sst), q0 = base(0).qv;
-  return (z: number) => {
-    const s = base(z), d = z > 1000 && z < 15000 ? cool * Math.sin(Math.PI * (z - 1000) / 14000) : 0;
-    return { theta: s.theta - d, qv: z < 600 ? q0 : s.qv };
-  };
+  return tropicalProfile(sst, 200, 0.4, cool, true);
 }
 
 /** The sounding of the tropical-cyclone experiments. */

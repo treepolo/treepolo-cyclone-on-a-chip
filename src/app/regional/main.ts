@@ -9,7 +9,7 @@ import type { AxiParams } from './axiDriver.js';
 import { quarterCircleWind, bunkersRightMover, type TornadoEnv } from '../../regional/supercell.js';
 import { weismanKlempQ } from '../../regional/kessler.js';
 import { parcelAscent } from '../../regional/diagnostics.js';
-import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import { isTcExperiment, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type ToRegionalWorker } from './protocol.js';
 
 const REFINE_LABEL: Partial<Record<RegionalExperiment, string>> = { supercell_hr: '1 km', tc_hr: '5 km', tc_3: '3 km', tornado: '250 m' };
 
@@ -70,11 +70,14 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     const in3d = charts.view === '3d';
     if (in3d) { view.setVolume(m.nx, m.ny, m.nz, m.cloud, m.rain, aspect); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     const [lo, hi] = m.groundRange, rgba = new Uint8Array(m.nx * m.ny * 4);
+    // plain surface: sea (tropical cyclones, sea points of a nest) or land (convective storms, land points)
+    const sea = isTcExperiment(curExp), bare = (i: number): [number, number, number] => ((land ? !land[i] : sea) ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]);
     for (let i = 0; i < m.ground.length; i++) {
       const v = m.ground[i]!;
       let c: [number, number, number];
       if (m.groundField === 'theta') c = diverging(v / hi);
-      else if (m.groundField === 'rain' || m.groundField === 'snow') { const t = Math.sqrt(Math.max(0, v) / hi); c = t < 0.02 ? (land && !land[i] ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]) : sequential(0.15 + 0.85 * t); }
+      else if (m.groundField === 'none') c = bare(i);
+      else if (m.groundField === 'rain' || m.groundField === 'snow') { const t = Math.sqrt(Math.max(0, v) / hi); c = t < 0.02 ? bare(i) : sequential(0.15 + 0.85 * t); }
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
@@ -95,7 +98,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('zeta').textContent = `${s.zetaMax.toFixed(3)} s⁻¹ · ${s.vGround.toFixed(1)} m/s`;
     $('tcrain').textContent = !s.tcRain ? '—' : `${s.tcRain.core.toFixed(1)} · ${s.tcRain.outer.toFixed(2)} mm/h（外圍 >1 mm/h ${(100 * s.tcRain.wet).toFixed(1)}%）`;
     tornadoWatch(m.time, s.tornado, m.dx);
-    $('legend').textContent = `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
+    $('legend').textContent = m.groundField === 'none' ? '' : `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); if (runner.running) void runner.abort(`error: ${m.message}`); }
   else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
   else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; if (runner.running) void runner.end('done'); }
@@ -135,7 +138,7 @@ function axiParams(): AxiParams {
   return { sst: num('axSst', 28) + 273.15, dr: num('axDr', 2000), lh: Math.max(0, num('axLh', 1000)), lv: Math.max(0, num('axLv', 100)), ck: Math.max(0, num('axCk', 1.2)) * 1e-3,
     vmin: Math.max(0, num('axVmin', 1)), vmax0: Math.max(1, num('axV0', 15)), f: 2 * 7.292e-5 * Math.sin(lat * Math.PI / 180),
     radMax: Math.max(0, num('axRad', 2)), radConst: $<HTMLSelectElement>('axRadMode').value === 'const' ? Math.max(0, num('axRad', 1.5)) : 0, rhTop: Math.max(0.05, Math.min(1, num('axRh', 40) / 100)),
-    snd: $<HTMLSelectElement>('axSnd').value === 're87' ? 're87' : 'unstable' };
+    snd: $<HTMLSelectElement>('axSnd').value === 're87' ? 're87' : 'unstable', blNoise: $<HTMLSelectElement>('axSnd').value === 're87' ? 0 : 0.1 };
 }
 /** Tornado environment from the panel, and its 0-1 / 0-3 km storm-relative helicity, shear and CAPE. */
 function tornadoParams(): TornadoEnv {

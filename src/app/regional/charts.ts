@@ -4,6 +4,7 @@
 // on the CPU); this module only draws them and accumulates the time series.
 
 import { parcelAscent, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
+import type { CameraMode } from './volume.js';
 import { isTcExperiment, type ChartRequest, type RegionalFrame, type RegionalExperiment, type TcRain } from './protocol.js';
 import { INK, SERIES, FONT, FONT_SMALL, type Rect, type Scale, type ScaleKind, colorOf, niceCeil, ticks, fmt, drawField, drawColorbar, drawAxes, drawContours, drawArrow, drawBarb, haloText, tooltip } from './chartDraw.js';
 
@@ -103,7 +104,7 @@ export interface ChartsHooks {
   /** interaction on a map: place a bubble or cold pool, or paint the surface (domain coordinates, m) */
   interact(kind: MapTool, x: number, y: number, radius: number): void;
   /** 3-D camera mode */
-  camera(mode: 'orbit' | 'fly'): void;
+  camera(mode: CameraMode): void;
 }
 
 /** The Chinese half of a bilingual label ('中文 / English', also '中文（…）/ English'). */
@@ -130,7 +131,7 @@ export class RegionalCharts {
   private volMode = 0;
   private tracerN = 0;
   private tool: MapTool = 'inspect';
-  private cam: 'orbit' | 'fly' = 'orbit';
+  private cam: CameraMode = 'orbit';
   private lastPaint: { x: number; y: number } | null = null;
   /** paint brush radius (m): 3 cells or a twentieth of the domain, whichever is larger */
   private get brush(): number { const g = this.grid!; return Math.max(3 * g.dx, Math.min(g.nx * g.dx, g.ny * g.dy) / 20); }
@@ -269,7 +270,8 @@ export class RegionalCharts {
         String(this.volMode), (v) => { this.volMode = Number(v); this.hooks.volMode(this.volMode); }, '3D 第二通道 / 3-D second channel');
       sel([{ v: '0', label: '無軌跡粒子 / No trajectory particles' }, { v: '2000', label: '軌跡粒子 2000 / 2,000 particles' }, { v: '6000', label: '軌跡粒子 6000 / 6,000 particles' }, { v: '16000', label: '軌跡粒子 16000 / 16,000 particles' }],
         String(this.tracerN), (v) => { this.tracerN = Number(v); this.hooks.tracers(this.tracerN); this.buildBar(); }, '軌跡粒子 / Trajectory particles');
-      sel([{ v: 'orbit', label: '相機：環繞 / Camera: orbit' }, { v: 'fly', label: '相機：自由飛行 / Camera: free flight' }], this.cam, (v) => { this.cam = v as 'orbit' | 'fly'; this.hooks.camera(this.cam); this.buildBar(); }, '相機 / Camera');
+      sel([{ v: 'orbit', label: '相機：環繞 / Camera: orbit' }, { v: 'side', label: '相機：正側面 / Camera: side view' }, { v: 'top', label: '相機：正上方 / Camera: top view' }, { v: 'fly', label: '相機：自由飛行 / Camera: free flight' }],
+        this.cam, (v) => { this.cam = v as CameraMode; this.hooks.camera(this.cam); this.buildBar(); }, '相機 / Camera');
       if (this.tracerN) hint('粒子：從低層 2 km 內出發，橘 = 低、淡黃 = 高；尾跡為最近幾個畫面 / particles start in the lowest 2 km; orange low, pale yellow high; trails show recent frames');
       if (this.cam === 'fly') hint('自由飛行：W/S 前後、A/D 左右、Q/E 上下（Shift 加速）、拖曳轉頭、滾輪前進後退 / free flight: W/S forward/back, A/D left/right, Q/E down/up (Shift: faster), drag to look, wheel to move');
     }

@@ -34,7 +34,7 @@ export const ICE = {
   N0G: 4e6, RHOG: 500, AG: 330, BG: 0.8,            // graupel
   KA: 2.4e-2, MU: 1.718e-5,                         // thermal conductivity of air, dynamic viscosity
   MI0: 1e-12,                                       // mass of a newly nucleated ice crystal (kg)
-  QI0: 1e-4, QS0: 6e-4,                             // autoconversion thresholds ice -> snow, snow -> graupel
+  QI0: 1e-3, QS0: 6e-4,                             // autoconversion thresholds ice -> snow, snow -> graupel (Lin et al. 1983)
   BIGG_B: 100, BIGG_A: 0.66,                        // Bigg (1953) freezing: B' (m^-3 s^-1), A' (K^-1)
 } as const;
 export const LF = ICE.LS - ICE.LV;

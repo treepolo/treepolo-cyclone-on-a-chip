@@ -20,12 +20,13 @@ export interface AxiParams {
   radConst: number;     // constant clear-sky tropospheric cooling (K/day; 0 = Newtonian relaxation, RE87)
   rhTop: number;        // relative humidity of the sounding at 12 km (0.4 standard, 0.6 moist; RE87 sounding only)
   snd: TcSounding;      // environment: conditionally unstable tropical sounding or the neutral RE87 sounding
+  blNoise: number;      // stochastic boundary-layer perturbations (K per 10 min, 3-D only; 0 = none)
   vmax0: number;        // initial vortex maximum wind (m/s)
   f: number;            // Coriolis parameter (s^-1)
 }
-export const AXI_DEFAULTS: AxiParams = { sst: 301.15, dr: 4000, lh: 1000, lv: 100, ck: 1.2e-3, vmin: 1, radMax: 2, radConst: 1.5, rhTop: 0.4, snd: 'unstable', vmax0: 15, f: 5e-5 };
+export const AXI_DEFAULTS: AxiParams = { sst: 301.15, dr: 4000, lh: 1000, lv: 100, ck: 1.2e-3, vmin: 1, radMax: 2, radConst: 1.5, rhTop: 0.4, snd: 'unstable', blNoise: 0.1, vmax0: 15, f: 5e-5 };
 /** Environment of saves made before the unstable sounding (neutral RE87 sounding, radiative relaxation): merged under saved parameters. */
-export const LEGACY_TC: Pick<AxiParams, 'snd' | 'radConst'> = { snd: 're87', radConst: 0 };
+export const LEGACY_TC: Pick<AxiParams, 'snd' | 'radConst' | 'blNoise'> = { snd: 're87', radConst: 0, blNoise: 0 };
 /** Short bilingual description of the TC environment. */
 export function tcEnvText(p: AxiParams): { zh: string; en: string } {
   const snd = p.snd === 'unstable' ? { zh: '條件不穩定熱帶探空（CAPE 約 1000 J/kg）', en: 'conditionally unstable tropical sounding (CAPE about 1000 J/kg)' } : { zh: `RE87 中性探空（12 km RH ${Math.round(100 * p.rhTop)}%）`, en: `neutral RE87 sounding (RH ${Math.round(100 * p.rhTop)}% at 12 km)` };
@@ -180,9 +181,10 @@ export class AxiDriver {
     let wmax = 0, qcmax = 0, qrmax = 0;
     for (let k = 0; k < nz; k++) for (let i = 0; i < nr; i++) {
       const q = ax.idx(i, 0, k);
+      // snow drawn with the cloud (as the 3-D experiments), channel 2 rain + graupel
       const cl = Math.max(0, S[QC]![q]! + S[QI]![q]!), pr = Math.max(0, S[QR]![q]! + S[QS]![q]! + S[QG]![q]!);
-      cb[k * nr + i] = Math.min(255, Math.round(Math.sqrt(cl / 3e-3) * 255));
-      let v2 = Math.sqrt(pr / 8e-3);
+      cb[k * nr + i] = Math.min(255, Math.round(Math.sqrt((cl + Math.max(0, S[QS]![q]!)) / 3e-3) * 255));
+      let v2 = Math.sqrt(Math.max(0, S[QR]![q]! + S[QG]![q]!) / 8e-3);
       if (volMode === 1) v2 = Math.sqrt(Math.max(0.5 * (ax.w[q]! + ax.w[q + ax.sx]!), 0) / 40);
       else if (volMode === 2) v2 = Math.sqrt(Math.max(zetaL[k]![i]!, 0) / 0.05);
       pb[k * nr + i] = Math.min(255, Math.round(v2 * 255));
@@ -199,7 +201,7 @@ export class AxiDriver {
     // surface profiles
     const vr0 = new Float64Array(nr), vt0 = new Float64Array(nr), spd = new Float64Array(nr), thp0 = new Float64Array(nr);
     for (let i = 0; i < nr; i++) { const q = ax.idx(i, 0, 0); vr0[i] = 0.5 * (ax.u[q]! + ax.u[q + 1]!); vt0[i] = ax.v[q]!; spd[i] = Math.hypot(vr0[i]!, vt0[i]!); thp0[i] = ax.th[q]! - ax.th0[0]!; }
-    const gprof = ground === 'rain' ? this.mp.rainAcc : ground === 'snow' ? this.mp.snowAcc : ground === 'wind' ? spd : thp0;
+    const gprof = ground === 'rain' ? this.mp.rainAcc : ground === 'snow' ? this.mp.snowAcc : ground === 'wind' ? spd : ground === 'none' ? new Float64Array(spd.length) : thp0;
     const g = this.revolve(gprof);
     let lo = Infinity, hi = -Infinity; for (const v of g) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
     if (ground === 'theta') { const a = Math.max(Math.abs(lo), Math.abs(hi), 0.5); lo = -a; hi = a; } else { lo = 0; hi = Math.max(hi, ground === 'rain' || ground === 'snow' ? 5 : 10); }

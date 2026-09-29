@@ -72,6 +72,8 @@ export class RegionalModel {
   /** sub-grid / surface / radiation slow tendencies hook */
   /** stage: RK3 stage 0, 1, 2 (sub-grid turbulence and surface fluxes are computed in stage 0 only) */
   physicsTend: ((m: RegionalModel, t: { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fsc: Float64Array[] }, stage: number) => void) | null = null;
+  /** called at the start of every step, before the time-level-n copy (stochastic physics) */
+  preStep: ((m: RegionalModel) => void) | null = null;
 
   constructor(cfg: RegionalConfig, sounding: (z: number) => { theta: number; qv: number }, nScalars = 0) {
     this.c = cfg;
@@ -515,6 +517,7 @@ export class RegionalModel {
   /** Advance one large step with RK3 + acoustic substeps. */
   step(): void {
     this.ensureWork();
+    if (this.preStep) this.preStep(this);
     const { dt, nsound, nz } = this.c;
     this.u0.set(this.u); this.v0.set(this.v); this.w0.set(this.w); this.th0s.set(this.th); this.pp0.set(this.pp);
     for (let s = 0; s < this.scalars.length; s++) this.sc0[s]!.set(this.scalars[s]!);

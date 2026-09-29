@@ -11,6 +11,7 @@
 import { DRY_AIR } from '../core/constants.js';
 import { RegionalModel } from './core.js';
 import { QV } from './kessler.js';
+import { pcg, rnd } from './tracers.js';
 
 export interface RegionalPhysicsConfig {
   lh: number;              // horizontal mixing length (m)
@@ -33,6 +34,16 @@ export interface RegionalPhysicsConfig {
   /** constant clear-sky tropospheric cooling (K/s) instead of the relaxation toward the base state (0 or
    *  undefined: RE87 relaxation); the stratosphere (base-state T < 210 K) still relaxes */
   radConst?: number;
+  /** stochastic boundary-layer perturbations (K; 0 or undefined: none): every BL_NOISE_PERIOD seconds each column's
+   *  theta below BL_NOISE_DEPTH changes by blNoise * (2 r - 1), r uniform in [0, 1). They stand for the turbulent thermals
+   *  a 3-15 km grid cannot resolve, which start convection wherever the air is unstable (periodic domains only). */
+  blNoise?: number;
+}
+
+export const BL_NOISE_PERIOD = 600, BL_NOISE_DEPTH = 1000;
+/** Random number in [-1, 1) of column (i, j) in noise interval `epoch` (the GPU kernel uses the same hash). */
+export function blNoiseValue(i: number, j: number, nx: number, epoch: number): number {
+  return 2 * rnd(((i + nx * j) ^ pcg(epoch >>> 0)) >>> 0) - 1;
 }
 
 /** Drag coefficient at the lowest level: neutral log law over land (z0 given) or the Donelan-type
@@ -70,6 +81,21 @@ export class RegionalPhysics {
     this.shf = new Float64Array(m.c.nx * m.c.ny);
     this.lhf = new Float64Array(m.c.nx * m.c.ny);
     m.physicsTend = (mm, t, stage): void => this.tendencies(mm, t, stage);
+    if ((cfg.blNoise ?? 0) > 0) m.preStep = (mm): void => this.noise(mm);
+  }
+
+  /** last noise interval applied (the first step only records it) */
+  private noiseEpoch = -1;
+  /** Stochastic boundary-layer perturbations at the start of each new noise interval. */
+  private noise(m: RegionalModel): void {
+    const e = Math.floor(m.time / BL_NOISE_PERIOD + 1e-6);
+    if (this.noiseEpoch < 0 || e <= this.noiseEpoch) { this.noiseEpoch = Math.max(this.noiseEpoch, e); return; }
+    this.noiseEpoch = e;
+    const { nx, ny, nz } = m.c, a = this.cfg.blNoise!;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const d = a * blNoiseValue(i, j, nx, e);
+      for (let k = 0; k < nz && m.zc[k]! < BL_NOISE_DEPTH; k++) { const q = m.idx(i, j, k); m.th[q] = m.th[q]! + d; }
+    }
   }
 
   /** sub-grid turbulence + surface-flux tendencies of the first RK stage, reused in stages 2 and 3 (as in WRF);

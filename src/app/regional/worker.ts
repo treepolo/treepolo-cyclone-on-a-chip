@@ -202,7 +202,7 @@ function build(exp: RegionalExperiment, gpuOk: boolean): { dt: number; descripti
     m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: dtm, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 6000, dampRate: 1 / 300, kdiff2: 0 }, tcSounding(P.snd, sst, P.rhTop), 6);
     mp = new IceMicrophysics(m);
     // the mixing lengths stay those of the 3-D set-up (the panel's lh / lv apply to the axisymmetric version)
-    physCfg = { lh: 0.2 * dx, lv: 100, sst, ck: P.ck, radTau: 12 * 3600, radMax: P.radMax / 86400, vmin: P.vmin, radConst: P.radConst / 86400 };
+    physCfg = { lh: 0.2 * dx, lv: 100, sst, ck: P.ck, radTau: 12 * 3600, radMax: P.radMax / 86400, vmin: P.vmin, radConst: P.radConst / 86400, blNoise: P.blNoise };
     phys = new RegionalPhysics(m, physCfg);
     insertVortex(m, f, P.vmax0);
     dpEnv = 1e5 * Math.pow(m.pi0[0]!, 1004.5 / 287.05) / 100;
@@ -719,10 +719,10 @@ async function sendFrame(): Promise<void> {
     const vm = volMode;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const q = m.idx(i, j, k), o = (k * ny + j) * nx + i;
-      // cloud: liquid + ice cloud; channel 2: precipitation (rain + snow + graupel), updraft or vorticity
+      // cloud: liquid and ice cloud and snow (anvils are mostly snow); channel 2: precipitation (rain + graupel), updraft or vorticity
       const cl = Math.max(0, qc[q]! + qi[q]!), pr = Math.max(0, qr[q]! + qs[q]! + qg[q]!);
-      cloud[o] = Math.min(255, Math.round(Math.sqrt(cl / 3e-3) * 255));
-      let v2 = Math.sqrt(pr / 8e-3);
+      cloud[o] = Math.min(255, Math.round(Math.sqrt((cl + Math.max(0, qs[q]!)) / 3e-3) * 255));
+      let v2 = Math.sqrt(Math.max(0, qr[q]! + qg[q]!) / 8e-3);
       if (vm === 1) v2 = Math.sqrt(Math.max(0.5 * (m.w[q]! + m.w[q + m.plane]!), 0) / 40);
       else if (vm === 2) {
         const zeta = 0.25 * ((m.v[q + 1]! + m.v[q + 1 + m.sx]!) - (m.v[q - 1]! + m.v[q - 1 + m.sx]!)) / dx - 0.25 * ((m.u[q + m.sx]! + m.u[q + m.sx + 1]!) - (m.u[q - m.sx]! + m.u[q - m.sx + 1]!)) / m.c.dy;
@@ -749,7 +749,7 @@ async function sendFrame(): Promise<void> {
     const sp = Math.hypot(0.5 * (m.u[q]! + m.u[q + 1]!), 0.5 * (m.v[q]! + m.v[q + m.sx]!));
     vmax = Math.max(vmax, sp);
     rainmax = Math.max(rainmax, mp.rainAcc[j * nx + i]!);
-    g[j * nx + i] = ground === 'rain' ? mp.rainAcc[j * nx + i]! : ground === 'snow' ? mp.snowAcc[j * nx + i]! : ground === 'wind' ? sp : m.th[q]! - m.th0[0]!;
+    g[j * nx + i] = ground === 'rain' ? mp.rainAcc[j * nx + i]! : ground === 'snow' ? mp.snowAcc[j * nx + i]! : ground === 'wind' ? sp : ground === 'none' ? 0 : m.th[q]! - m.th0[0]!;
   }
   let lo = Infinity, hi = -Infinity;
   for (const v of g) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
