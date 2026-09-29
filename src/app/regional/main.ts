@@ -24,7 +24,10 @@ const view = new VolumeView($<HTMLCanvasElement>('view'));
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
 const send = (m: ToRegionalWorker): void => worker.postMessage(m);
 const tools = new Tools3D(view, $('tools'), document.getElementById('fx') as unknown as SVGSVGElement, send, (s) => log(s));
-let running = false, dt = 6, aspect = 0.3;
+let running = false, dt = 6;
+// vertical exaggeration of the 3-D view (null: automatic, from the domain size)
+let exag: number | null = null;
+const autoExag = (L: number): number => (L > 500000 ? 8 : 2.5);
 let land: Uint8Array | null = null;
 let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
 // charts: the main view is either the 3-D volume or one of the 2-D charts
@@ -35,7 +38,10 @@ let lastVol: ReplayFrame | null = null, refining = false;
 const replay = new ReplayStore(Math.min(400, 64 * ((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 4)) * 1e6);
 let replayIdx: number | null = null, replayPlaying = false, replayAcc = 0;
 /** Show a stored or live display volume in the 3-D view. */
-function showVolume(f: ReplayFrame): void { view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, f.aspect, f.top); view.setGround(f.nx, f.ny, f.ground); }
+function showVolume(f: ReplayFrame): void {
+  view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, f.aux, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top, f.Lx / f.nx);
+  view.setGround(f.nx, f.ny, f.ground);
+}
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
   request: (req) => send({ type: 'charts', req }),
   volMode: (mode) => { send({ type: 'volMode', mode }); view.setMode(mode); },
@@ -56,8 +62,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   if (m.type === 'ready') {
     dt = m.dt;
     land = m.land;
-    // vertical exaggeration so that the troposphere is visible
-    aspect = Math.min(0.45, (m.nz * m.dz) / (m.nx * m.dx) * (m.nx * m.dx > 500000 ? 12 : 2.5));
+    // vertical exaggeration so that the troposphere is visible (unless chosen)
+    if (exag === null) { const e = autoExag(m.nx * m.dx); $<HTMLInputElement>('exag').value = String(e); $('exagV').textContent = `${e}×`; }
     $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${m.dx >= 1000 ? `${(m.dx / 1000).toFixed(1)} km` : `${m.dx.toFixed(0)} m`}, Δz ${m.dz.toFixed(0)} m, Δt ${m.dt} s`;
     $('backend').textContent = m.backend === 'gpu' ? 'WebGPU（f32）' : 'CPU（Float64）';
     if (m.note) log(m.note);
@@ -65,10 +71,17 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     const rb = $<HTMLButtonElement>('refine');
     rb.disabled = !m.refineTo;
     rb.textContent = m.refineTo ? `細化到 ${km(m.refineTo)} / Refine to ${km(m.refineTo)}` : '細化 / Refine';
+    const cb = $<HTMLButtonElement>('coarsen');
+    cb.disabled = !m.coarsenTo;
+    cb.textContent = m.coarsenTo ? `粗化到 ${km(m.coarsenTo)} / Coarsen` : '粗化 / Coarsen';
+    cb.title = m.coarsenBack ? '回到細化前的網格（細化的部分平均回去）/ back to the grid before the refinement (the refined run averaged into it)' : '平均到較粗的網格接著算 / continue on a coarser grid (averaged)';
+    $<HTMLButtonElement>('eyeGo').disabled = !m.eyeOk;
+    eyeInfo();
     if (m.setup) form.set(m.setup);
     curExp = m.experiment; curTc = m.tc;
     // a nest has its land mask from the global model (sea elsewhere); a set-up says which surface it has
     curSea = m.setup ? m.setup.surface === 'sea' : m.experiment === 'nest';
+    view.setOutside(curSea ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]);
     document.querySelectorAll<HTMLElement>('.tcOnly').forEach((el) => { el.hidden = !curTc; });
     document.querySelectorAll<HTMLElement>('.stormOnly').forEach((el) => { el.hidden = curTc; });
     charts.setGrid({ nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dy: m.dx, dz: m.dz, experiment: m.experiment, land: m.land, tc: m.tc, sea: curSea }, refining);
@@ -95,7 +108,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
-    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, aspect, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [] };
+    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, aux: m.aux, ground: rgba, storms: m.stats.storms ?? [] };
     replay.push(lastVol);
     if (in3d && replayIdx === null) { showVolume(lastVol); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     replayBar();
@@ -120,7 +133,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); if (runner.running) void runner.abort(`error: ${m.message}`); }
   else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
   else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; $('ovRun').textContent = '▶'; if (runner.running) void runner.end('done'); }
-  else if (m.type === 'log') log(m.text);
+  else if (m.type === 'log') { log(m.text); if (/no vortex|eye box too large/.test(m.text)) { refining = false; $<HTMLButtonElement>('eyeGo').disabled = false; } }
   else if (m.type === 'land') { land = m.land; charts.setLand(m.land); showSurface(); }
   else if (m.type === 'forcings') tools.setForcings(m.list);
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
@@ -245,6 +258,12 @@ document.querySelectorAll<HTMLDetailsElement>('details[id]').forEach((d) => {
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('subgrid').onchange = (): void => send({ type: 'subgrid', on: $<HTMLInputElement>('subgrid').checked });
+$('exag').oninput = (): void => {
+  exag = Number($<HTMLInputElement>('exag').value); $('exagV').textContent = `${exag}×`;
+  const f = replayIdx !== null ? replay.frames[replayIdx] : lastVol;
+  if (f && charts.view === '3d') showVolume(f);
+};
+$('fov').oninput = (): void => { const d = Number($<HTMLInputElement>('fov').value); view.setFov(d); $('fovV').textContent = `${d}°`; };
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 $('adaptive').onchange = (): void => send({ type: 'adaptive', on: $<HTMLInputElement>('adaptive').checked });
 // Nesting: embedded by the global page (in-page overlay, #nest...) or opened with ?nest=1; the
@@ -323,6 +342,18 @@ function tick(): void {
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
+$('coarsen').onclick = (): void => { $<HTMLButtonElement>('coarsen').disabled = true; refining = true; log('粗化中… / Coarsening…'); send({ type: 'coarsen' }); };
+/** cells of the eye box and its time step */
+function eyeInfo(): void {
+  const L = Number($<HTMLSelectElement>('eyeL').value), dx = Number($<HTMLSelectElement>('eyeDx').value), dz = Number($<HTMLSelectElement>('eyeDz').value), top = form.value().top;
+  const n = Math.round(L / dx) ** 2 * Math.round(top / dz);
+  $('eyeInfo').textContent = `${Math.round(L / dx)}×${Math.round(L / dx)}×${Math.round(top / dz)} = ${(n / 1e6).toFixed(1)} M 格點 / cells${n > 8e6 ? ' · ⚠ 需要較強的顯卡 / needs a strong GPU' : ''}`;
+}
+for (const id of ['eyeL', 'eyeDx', 'eyeDz']) $(id).onchange = eyeInfo;
+$('eyeGo').onclick = (): void => {
+  $<HTMLButtonElement>('eyeGo').disabled = true; refining = true; log('眼區細化中… / Refining the eye…');
+  send({ type: 'refineEye', L: Number($<HTMLSelectElement>('eyeL').value), dx: Number($<HTMLSelectElement>('eyeDx').value), dz: Number($<HTMLSelectElement>('eyeDz').value) });
+};
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
 $('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; refining = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
 // ---------------- saved simulations

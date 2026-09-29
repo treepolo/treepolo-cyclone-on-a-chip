@@ -91,7 +91,8 @@ interface GridInfo {
   /** tropical-cyclone-like run (pressure deficit, eyewall and rainband diagnostics); surface all sea where not land */
   tc: boolean; sea: boolean;
 }
-type MapFrame = { r: Rect; Lx: number; Ly: number };
+/** map placement: r the whole domain on the page (larger than the visible frame v when zoomed in), v the frame shown */
+type MapFrame = { r: Rect; v: Rect; Lx: number; Ly: number };
 /** what a click or drag on a map does */
 export type MapTool = 'inspect' | 'warm' | 'cold' | 'warmer' | 'cooler' | 'land' | 'sea';
 const TOOLS: { v: MapTool; label: string }[] = [
@@ -139,6 +140,14 @@ export class RegionalCharts {
   private hover: { x: number; y: number } | null = null;
   private drag: { x0: number; y0: number; px: number; py: number; x1: number; y1: number; moved: boolean } | null = null;
   private mapF: MapFrame | null = null;
+  /** zoom of the maps (plan views): factor and the lower-left corner of the window shown (fractions of the domain) */
+  private mz = { z: 1, u0: 0, v0: 0 };
+  /** magnifier of the other charts: factor and the top-left corner of the part shown (page pixels) */
+  private mg = { z: 1, x0: 0, y0: 0 };
+  /** active pan (middle or right button) and touch points (two fingers: pinch zoom) */
+  private panFrom: { x: number; y: number } | null = null;
+  private touches = new Map<number, { x: number; y: number }>();
+  private pinch: { d: number; x: number; y: number } | null = null;
   private plotF: { r: Rect; kind: 'section' | 'rz' | 'hov' | 'series'; x0: number; x1: number; y0: number; y1: number; panels?: Rect[] } | null = null;
   private readonly ctx: CanvasRenderingContext2D;
   private pending = 0;
@@ -161,6 +170,15 @@ export class RegionalCharts {
     canvas.addEventListener('pointermove', (e) => this.move(e));
     canvas.addEventListener('pointerup', (e) => this.up(e));
     canvas.addEventListener('pointerleave', () => { this.hover = null; if (!this.drag) this.redraw(); });
+    canvas.addEventListener('pointercancel', (e) => { this.touches.delete(e.pointerId); this.pinch = null; this.panFrom = null; });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const r = canvas.getBoundingClientRect();
+      this.zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
+    }, { passive: false });
+    canvas.addEventListener('dblclick', () => { this.resetZoom(); });
     new ResizeObserver(() => this.redraw()).observe(canvas);
     this.buildBar();
   }
@@ -172,7 +190,7 @@ export class RegionalCharts {
     const same = this.grid && this.grid.nx * this.grid.dx === g.nx * g.dx && this.grid.ny * this.grid.dy === g.ny * g.dy;
     this.grid = g;
     if (!keepSeries) { this.samples = []; this.hov = []; this.storms.clear(); this.stormColor.clear(); this.selStorm = null; }
-    if (!same) { this.line = null; this.point = null; }
+    if (!same) { this.line = null; this.point = null; this.mz = { z: 1, u0: 0, v0: 0 }; }
     this.level = this.nearestLevel(this.view === 'slice' ? this.levelZ() : 1500);
     this.frame = null;
     this.buildBar();
@@ -277,6 +295,7 @@ export class RegionalCharts {
     const was = this.view;
     this.view = v;
     this.note = '';
+    this.mg = { z: 1, x0: 0, y0: 0 };
     if (v === 'slice' && was !== 'slice' && this.grid) this.level = Math.min(this.level, this.grid.nz - 1);
     this.buildBar();
     this.sendRequest();
@@ -310,7 +329,7 @@ export class RegionalCharts {
       sel([{ v: 'orbit', label: '相機：環繞 / Camera: orbit' }, { v: 'side', label: '相機：正側面 / Camera: side view' }, { v: 'top', label: '相機：正上方 / Camera: top view' }, { v: 'fly', label: '相機：自由飛行 / Camera: free flight' }],
         this.cam, (v) => { this.cam = v as CameraMode; this.hooks.camera(this.cam); this.buildBar(); }, '相機 / Camera');
       if (this.tracerN) hint('粒子：從低層 2 km 內出發，橘 = 低、淡黃 = 高；尾跡為最近幾個畫面 / particles start in the lowest 2 km; orange low, pale yellow high; trails show recent frames');
-      if (this.cam !== 'fly') hint('拖曳移動 · 右鍵拖曳（或 Ctrl＋拖曳）轉向與傾斜 · 滾輪縮放 · 雙擊放大 · 手機：單指移動、雙指縮放轉向、雙指上下傾斜 / drag: move · right-drag (or Ctrl+drag): turn and tilt · wheel: zoom · double-click: zoom in · touch: one finger moves, two fingers zoom and turn, move both up or down to tilt');
+      if (this.cam !== 'fly') hint('拖曳移動 · 按住滾輪或右鍵拖曳（或 Ctrl＋拖曳）轉向與傾斜 · 滾輪縮放 · 雙擊放大 · 手機：單指移動、雙指縮放轉向、雙指上下傾斜 / drag: move · middle- or right-drag (or Ctrl+drag): turn and tilt · wheel: zoom · double-click: zoom in · touch: one finger moves, two fingers zoom and turn, move both up or down to tilt');
       if (this.cam === 'fly') hint('自由飛行：W/S 前後、A/D 左右、Q/E 上下（Shift 加速）、拖曳轉頭、滾輪前進後退 / free flight: W/S forward/back, A/D left/right, Q/E down/up (Shift: faster), drag to look, wheel to move');
     }
     if (vv === 'slice') {
@@ -367,20 +386,94 @@ export class RegionalCharts {
   // ---------------------------------------------------------------- pointer
 
   private isPaint(): boolean { return (this.view === 'slice' || this.view === 'composite') && (this.tool === 'warmer' || this.tool === 'cooler' || this.tool === 'land' || this.tool === 'sea'); }
-  private local(e: PointerEvent): { x: number; y: number } { const r = this.canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+  /** pointer position on the page (magnified charts: on the unmagnified picture) */
+  private local(e: { clientX: number; clientY: number }): { x: number; y: number } {
+    const r = this.canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    return this.magnified() ? { x: this.mg.x0 + x / this.mg.z, y: this.mg.y0 + y / this.mg.z } : { x, y };
+  }
   private toDomain(p: { x: number; y: number }): { x: number; y: number } | null {
     const f = this.mapF; if (!f) return null;
-    const { r } = f;
-    if (p.x < r.x || p.y < r.y || p.x > r.x + r.w || p.y > r.y + r.h) return null;
+    const { r, v } = f;
+    if (p.x < v.x || p.y < v.y || p.x > v.x + v.w || p.y > v.y + v.h) return null;
     return { x: (p.x - r.x) / r.w * f.Lx, y: (r.y + r.h - p.y) / r.h * f.Ly };
   }
+
+  // ---------------------------------------------------------------- zoom
+
+  /** plan views zoom inside the map frame (axes follow); the other charts are magnified as a picture */
+  private mapZoom(): boolean { return this.view === 'slice' || this.view === 'composite'; }
+  private magnified(): boolean { return !this.mapZoom() && this.mg.z > 1; }
+  /** Zoom by factor k about the page point (x, y) (unmagnified page pixels for the maps, screen pixels otherwise). */
+  private zoomAt(x: number, y: number, k: number): void {
+    if (this.view === '3d') return;
+    if (this.mapZoom()) {
+      const f = this.mapF; if (!f) return;
+      const m = this.mz, v = f.v, z = Math.max(1, Math.min(32, m.z * k));
+      // the domain point under the pointer stays there
+      const sx = Math.max(0, Math.min(1, (x - v.x) / v.w)), sy = Math.max(0, Math.min(1, (v.y + v.h - y) / v.h));
+      const uc = m.u0 + sx / m.z, vc = m.v0 + sy / m.z;
+      this.mz = { z, u0: uc - sx / z, v0: vc - sy / z };
+    } else {
+      const m = this.mg, z = Math.max(1, Math.min(8, m.z * k)), cx = m.x0 + x / m.z, cy = m.y0 + y / m.z;
+      this.mg = { z, x0: cx - x / z, y0: cy - y / z };
+    }
+    this.clampZoom();
+    this.redraw();
+  }
+  /** Move the zoomed picture by (dx, dy) screen pixels. */
+  private panBy(dx: number, dy: number): void {
+    if (this.mapZoom()) {
+      const f = this.mapF; if (!f) return;
+      this.mz.u0 -= dx / (f.v.w * this.mz.z); this.mz.v0 += dy / (f.v.h * this.mz.z);
+    } else { this.mg.x0 -= dx / this.mg.z; this.mg.y0 -= dy / this.mg.z; }
+    this.clampZoom();
+    this.redraw();
+  }
+  private clampZoom(): void {
+    const m = this.mz, a = 1 - 1 / m.z;
+    m.u0 = Math.max(0, Math.min(a, m.u0)); m.v0 = Math.max(0, Math.min(a, m.v0));
+    const g = this.mg, W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    g.x0 = Math.max(0, Math.min(W - W / g.z, g.x0)); g.y0 = Math.max(0, Math.min(H - H / g.z, g.y0));
+  }
+  resetZoom(): void { this.mz = { z: 1, u0: 0, v0: 0 }; this.mg = { z: 1, x0: 0, y0: 0 }; this.redraw(); }
+
   private down(e: PointerEvent): void {
+    if (e.pointerType === 'touch') {
+      this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.touches.size === 2) {
+        // second finger: pinch zoom and pan instead of drawing
+        this.drag = null; this.lastPaint = null;
+        const [a, b] = [...this.touches.values()];
+        this.pinch = { d: Math.hypot(b!.x - a!.x, b!.y - a!.y), x: (a!.x + b!.x) / 2, y: (a!.y + b!.y) / 2 };
+        this.canvas.setPointerCapture(e.pointerId);
+        return;
+      }
+      if (this.touches.size > 2) return;
+    }
+    if (e.button === 1 || e.button === 2) {
+      e.preventDefault();
+      this.canvas.setPointerCapture(e.pointerId);
+      this.panFrom = { x: e.clientX, y: e.clientY };
+      return;
+    }
     const p = this.local(e), d = this.toDomain(p);
     if (!d || !['slice', 'composite', 'section', 'sounding'].includes(this.view)) return;
     this.canvas.setPointerCapture(e.pointerId);
     this.drag = { x0: d.x, y0: d.y, px: p.x, py: p.y, x1: d.x, y1: d.y, moved: false };
   }
   private move(e: PointerEvent): void {
+    if (e.pointerType === 'touch' && this.touches.has(e.pointerId)) {
+      this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.pinch && this.touches.size === 2) {
+        const [a, b] = [...this.touches.values()], d = Math.hypot(b!.x - a!.x, b!.y - a!.y), x = (a!.x + b!.x) / 2, y = (a!.y + b!.y) / 2;
+        const r = this.canvas.getBoundingClientRect();
+        this.panBy(x - this.pinch.x, y - this.pinch.y);
+        if (this.pinch.d > 10) this.zoomAt(x - r.left, y - r.top, d / this.pinch.d);
+        this.pinch = { d, x, y };
+        return;
+      }
+    }
+    if (this.panFrom) { this.panBy(e.clientX - this.panFrom.x, e.clientY - this.panFrom.y); this.panFrom = { x: e.clientX, y: e.clientY }; return; }
     const p = this.local(e);
     this.hover = p;
     if (this.drag) {
@@ -396,6 +489,11 @@ export class RegionalCharts {
     this.redraw();
   }
   private up(e: PointerEvent): void {
+    if (e.pointerType === 'touch') {
+      this.touches.delete(e.pointerId);
+      if (this.pinch) { if (this.touches.size < 2) this.pinch = null; this.drag = null; try { this.canvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ } return; }
+    }
+    if (this.panFrom) { this.panFrom = null; try { this.canvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ } return; }
     const d = this.drag; this.drag = null;
     try { this.canvas.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
     if (!d) return;
@@ -432,6 +530,8 @@ export class RegionalCharts {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = INK.surface; ctx.fillRect(0, 0, W, H);
     ctx.font = FONT;
+    const mag = this.magnified();
+    if (mag) { this.clampZoom(); const g = this.mg; ctx.setTransform(dpr * g.z, 0, 0, dpr * g.z, -dpr * g.z * g.x0, -dpr * g.z * g.y0); }
     this.mapF = null; this.plotF = null;
     const top = 8, area: Rect = { x: 0, y: top, w: W, h: H - top };
     const f = this.frame, ch = f?.charts;
@@ -444,6 +544,12 @@ export class RegionalCharts {
     else if (this.view === 'section') this.drawSection(area);
     else if (this.view === 'rz') this.drawRZ(area);
     else if (this.view === 'sounding') this.drawSounding(area);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const z = this.mapZoom() ? this.mz.z : this.mg.z;
+    if (z > 1.001) {
+      ctx.font = FONT_SMALL; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+      haloText(ctx, `放大 ${z.toFixed(1)}× · 雙擊還原 / zoom ${z.toFixed(1)}× · double-click to reset`, W - 10, 10, INK.secondary);
+    }
     if (this.note) {
       ctx.font = FONT_SMALL; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
       haloText(ctx, this.note, W - 10, H - 8, INK.secondary);
@@ -460,8 +566,21 @@ export class RegionalCharts {
     const g = this.grid!, Lx = g.nx * g.dx, Ly = g.ny * g.dy;
     const ml = 46, mr = colorbar ? 72 : 12, mt = 26, mb = 36;
     const aw = Math.max(40, r.w - ml - mr), ah = Math.max(40, r.h - mt - mb), s = Math.min(aw / Lx, ah / Ly);
-    const w = Lx * s, h = Ly * s;
-    return { r: { x: r.x + ml + Math.max(0, (aw - w) / 2), y: r.y + mt + Math.max(0, (ah - h) / 2), w, h }, Lx, Ly };
+    const w = Lx * s, h = Ly * s, v: Rect = { x: r.x + ml + Math.max(0, (aw - w) / 2), y: r.y + mt + Math.max(0, (ah - h) / 2), w, h };
+    if (!this.mapZoom() || this.mz.z <= 1) return { r: v, v, Lx, Ly };
+    // zoomed: the whole domain drawn larger, the frame shows the window [u0, u0 + 1/z] x [v0, v0 + 1/z]
+    const { z, u0, v0 } = this.mz, W = v.w * z, Hh = v.h * z;
+    return { r: { x: v.x - u0 * W, y: v.y - (1 - v0 - 1 / z) * Hh, w: W, h: Hh }, v, Lx, Ly };
+  }
+  /** axes of a map frame (the window shown when zoomed) */
+  private mapAxes(mf: MapFrame): void {
+    const u0 = (mf.v.x - mf.r.x) / mf.r.w, u1 = (mf.v.x + mf.v.w - mf.r.x) / mf.r.w;
+    const v0 = (mf.r.y + mf.r.h - mf.v.y - mf.v.h) / mf.r.h, v1 = (mf.r.y + mf.r.h - mf.v.y) / mf.r.h;
+    drawAxes(this.ctx, mf.v, { lo: u0 * mf.Lx / 1000, hi: u1 * mf.Lx / 1000, label: 'x (km)' }, { lo: v0 * mf.Ly / 1000, hi: v1 * mf.Ly / 1000, label: 'y (km)' });
+  }
+  /** draw inside the visible map frame only */
+  private clipped(mf: MapFrame, fn: () => void): void {
+    const c = this.ctx; c.save(); c.beginPath(); c.rect(mf.v.x, mf.v.y, mf.v.w, mf.v.h); c.clip(); fn(); c.restore();
   }
 
   private underlay(): (i: number, j: number) => [number, number, number] {
@@ -472,10 +591,10 @@ export class RegionalCharts {
 
   /** Plan-view map of a [j][i] field with colour bar, axes and title. */
   private drawPlan(r: Rect, name: string, data: Float32Array, title: string, colorbar = true): MapFrame {
-    const ctx = this.ctx, g = this.grid!, mf = this.mapFrame(r, colorbar), m = mf.r;
+    const ctx = this.ctx, g = this.grid!, mf = this.mapFrame(r, colorbar), m = mf.v;
     const sc = scaleFor(name, data);
-    drawField(ctx, m, g.nx, g.ny, (i, j) => data[j * g.nx + i]!, sc, this.underlay());
-    drawAxes(ctx, m, { lo: 0, hi: mf.Lx / 1000, label: 'x (km)' }, { lo: 0, hi: mf.Ly / 1000, label: 'y (km)' });
+    this.clipped(mf, () => drawField(ctx, mf.r, g.nx, g.ny, (i, j) => data[j * g.nx + i]!, sc, this.underlay()));
+    this.mapAxes(mf);
     if (colorbar) drawColorbar(ctx, { x: m.x + m.w + 12, y: m.y + 14, w: 12, h: Math.max(40, m.h - 14) }, sc, VI[name]!.unit, VI[name]!.digits);
     ctx.font = FONT; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
     ctx.fillText(title, m.x, m.y - 8);
@@ -484,7 +603,8 @@ export class RegionalCharts {
   }
 
   /** Section line, sounding point and storm marker on a map. */
-  private drawMarks(mf: MapFrame): void {
+  private drawMarks(mf: MapFrame): void { this.clipped(mf, () => this.drawMarksIn(mf)); }
+  private drawMarksIn(mf: MapFrame): void {
     const ctx = this.ctx, X = (x: number): number => mf.r.x + x / mf.Lx * mf.r.w, Y = (y: number): number => mf.r.y + mf.r.h - y / mf.Ly * mf.r.h;
     const ln = this.drag?.moved ? { x0: this.drag.x0, y0: this.drag.y0, x1: this.drag.x1, y1: this.drag.y1 } : this.view === 'section' ? (this.line ?? this.frame?.charts?.section ?? null) : this.line;
     if (ln) {
@@ -512,15 +632,18 @@ export class RegionalCharts {
 
   /** Wind arrows sampled every few cells ([j][i] components in m/s). */
   private drawWind(mf: MapFrame, u: Float32Array, v: Float32Array): void {
-    const g = this.grid!, n = Math.max(1, Math.round(Math.max(g.nx, g.ny) / 22));
+    const g = this.grid!, n = Math.max(1, Math.round(Math.max(g.nx, g.ny) / 22 * mf.v.w / mf.r.w));
     let vmax = 0; for (let i = 0; i < u.length; i++) vmax = Math.max(vmax, Math.hypot(u[i]!, v[i]!));
     const ref = niceCeil(Math.max(vmax, 1)), px = mf.r.w / g.nx * n * 0.9 / ref;
-    for (let j = Math.floor(n / 2); j < g.ny; j += n) for (let i = Math.floor(n / 2); i < g.nx; i += n) {
-      const c = j * g.nx + i, x = mf.r.x + (i + 0.5) / g.nx * mf.r.w, y = mf.r.y + mf.r.h - (j + 0.5) / g.ny * mf.r.h;
-      drawArrow(this.ctx, x, y, u[c]! * px, -v[c]! * px);
-    }
+    this.clipped(mf, () => {
+      for (let j = Math.floor(n / 2); j < g.ny; j += n) for (let i = Math.floor(n / 2); i < g.nx; i += n) {
+        const c = j * g.nx + i, x = mf.r.x + (i + 0.5) / g.nx * mf.r.w, y = mf.r.y + mf.r.h - (j + 0.5) / g.ny * mf.r.h;
+        if (x < mf.v.x - 40 || x > mf.v.x + mf.v.w + 40 || y < mf.v.y - 40 || y > mf.v.y + mf.v.h + 40) continue;
+        drawArrow(this.ctx, x, y, u[c]! * px, -v[c]! * px);
+      }
+    });
     // reference arrow
-    const ctx = this.ctx, rx = mf.r.x + mf.r.w - ref * px - 60, ry = mf.r.y + mf.r.h + 26;
+    const ctx = this.ctx, rx = mf.v.x + mf.v.w - ref * px - 60, ry = mf.v.y + mf.v.h + 26;
     drawArrow(ctx, rx, ry, ref * px, 0);
     ctx.font = FONT_SMALL; ctx.fillStyle = INK.secondary; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
     ctx.fillText(`${ref} m/s`, rx + ref * px + 6, ry);
@@ -548,9 +671,9 @@ export class RegionalCharts {
       let lo = Infinity, hi = -Infinity; for (const v of slp) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
       const step = Math.max(0.5, niceCeil((hi - lo) / 14)), lv: number[] = [];
       for (let p = Math.ceil(lo / step) * step; p <= hi; p += step) lv.push(p);
-      drawContours(this.ctx, g.nx, g.ny, (i, j) => slp[j * g.nx + i]!, X, Y, lv, () => ({ color: 'rgba(250,250,250,0.85)', width: 1 }));
+      this.clipped(mf, () => drawContours(this.ctx, g.nx, g.ny, (i, j) => slp[j * g.nx + i]!, X, Y, lv, () => ({ color: 'rgba(250,250,250,0.85)', width: 1 })));
       this.ctx.font = FONT_SMALL; this.ctx.textAlign = 'left'; this.ctx.textBaseline = 'middle';
-      haloText(this.ctx, `等壓線 / isobars: ${step} hPa`, mf.r.x, mf.r.y + mf.r.h + 30, INK.secondary);
+      haloText(this.ctx, `等壓線 / isobars: ${step} hPa`, mf.v.x, mf.v.y + mf.v.h + 30, INK.secondary);
     }
     if (this.show.sfcWind && mp.sfcU && mp.sfcV) this.drawWind(mf, mp.sfcU, mp.sfcV);
     this.drawMarks(mf);
@@ -563,7 +686,7 @@ export class RegionalCharts {
    * surface; the picture is interpolated to a finer raster so the cloud edges and shading are smooth.
    */
   private drawVisible(area: Rect, alb: Float32Array, top: Float32Array): MapFrame {
-    const ctx = this.ctx, g = this.grid!, mf = this.mapFrame(area, false), m = mf.r;
+    const ctx = this.ctx, g = this.grid!, mf = this.mapFrame(area, false), m = mf.v;
     const up = Math.max(1, Math.min(4, Math.round(480 / Math.max(g.nx, g.ny)))), W = g.nx * up, Hh = g.ny * up, dxs = g.dx / up, dys = g.dy / up;
     // bilinear samples of the albedo and the cloud-top height on the fine raster (cell centres at (i + 0.5) / up)
     const A = new Float32Array(W * Hh), Z = new Float32Array(W * Hh);
@@ -577,7 +700,7 @@ export class RegionalCharts {
     }
     // sun from the north-west: unit vector toward it and the height gained per metre toward it
     const az = 315 * Math.PI / 180, el = 40 * Math.PI / 180, sx = Math.sin(az), sy = Math.cos(az), rise = Math.tan(el);
-    const stepI = sx, stepJ = sy, stepM = Math.hypot(sx * dxs, sy * dys), maxZ = Math.max(...Z), nsteps = Math.min(200, Math.ceil(maxZ / rise / stepM) + 1);
+    const stepI = sx, stepJ = sy, stepM = Math.hypot(sx * dxs, sy * dys), maxZ = Z.reduce((a, b) => (b > a ? b : a), 0), nsteps = Math.min(200, Math.ceil(maxZ / rise / stepM) + 1);
     const lit = (I: number, J: number, z0: number): boolean => {
       for (let s = 1; s <= nsteps; s++) {
         const ii = Math.round(I + s * stepI), jj = Math.round(J + s * stepJ);
@@ -609,8 +732,8 @@ export class RegionalCharts {
     }
     const off = document.createElement('canvas'); off.width = W; off.height = Hh;
     off.getContext('2d')!.putImageData(img, 0, 0);
-    ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(off, m.x, m.y, m.w, m.h); ctx.restore();
-    drawAxes(ctx, m, { lo: 0, hi: mf.Lx / 1000, label: 'x (km)' }, { lo: 0, hi: mf.Ly / 1000, label: 'y (km)' });
+    this.clipped(mf, () => { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(off, mf.r.x, mf.r.y, mf.r.w, mf.r.h); });
+    this.mapAxes(mf);
     ctx.font = FONT; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
     ctx.fillText(`可見光雲圖 / Visible satellite · ${this.timeLabel()}`, m.x, m.y - 8);
     ctx.font = FONT_SMALL; ctx.fillStyle = INK.secondary; ctx.textBaseline = 'top';

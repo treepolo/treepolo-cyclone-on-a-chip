@@ -665,8 +665,8 @@ const DX: f32 = ${dx}; const DY: f32 = ${dy}; const COL: u32 = ${COL}u;
 @group(0) @binding(4) var<uniform> MODE: vec4<u32>;
 const RHC: f32 = ${subgridRHc(dx)};
 fn cs(f: u32, q: u32) -> f32 { return select(0.0, S[f * SIZE + q], MOIST); }
-// display extinction (1/m; cloudExtinction / precipExtinction / subgridCloud in src/regional/display.ts)
-fn extc(k: u32, q: u32, sub: bool) -> f32 {
+// display extinction (1/m) and its ice part (cloudExtinction / iceExtinction / subgridCloud in src/regional/display.ts)
+fn extc(k: u32, q: u32, sub: bool) -> vec2<f32> {
   let pik = LB[4u * k] + S[4u * SIZE + q]; let T = S[3u * SIZE + q] * pik; let rho = LB[4u * k + 1u];
   let qc = max(cs(6u, q), 0.0);
   var qsub = 0.0;
@@ -675,9 +675,11 @@ fn extc(k: u32, q: u32, sub: bool) -> f32 {
     let qsat = 0.622 * es / max(p - es, 1.0); let rh = cs(5u, q) / qsat;
     if (rh > RHC && rh < 1.0) { let a = 1.0 + (rh - 1.0) / (1.0 - RHC); qsub = (1.0 - RHC) * qsat * a * a * a / 6.0; }
   }
-  var e = ${EXT.liquid.toFixed(1)} * qc + select(${EXT.ice.toFixed(1)}, ${EXT.liquid.toFixed(1)}, T > 253.15) * qsub;
-  if (ICE) { e += ${EXT.ice.toFixed(1)} * max(S[8u * SIZE + q], 0.0) + ${EXT.snow.toFixed(1)} * max(S[9u * SIZE + q], 0.0); }
-  return rho * e;
+  let ws = select(${EXT.ice.toFixed(1)}, ${EXT.liquid.toFixed(1)}, T > 253.15) * qsub;
+  var e = ${EXT.liquid.toFixed(1)} * qc + ws;
+  var ei = select(ws, 0.0, T > 253.15);
+  if (ICE) { let xi = ${EXT.ice.toFixed(1)} * max(S[8u * SIZE + q], 0.0) + ${EXT.snow.toFixed(1)} * max(S[9u * SIZE + q], 0.0); e += xi; ei += xi; }
+  return rho * vec2<f32>(e, ei);
 }
 fn extb(beta: f32) -> u32 { if (beta <= 0.0) { return 0u; } return u32(min(255.0, round(255.0 * pow(beta / ${EXT_MAX}, 1.0 / 3.0)))); }
 @compute @workgroup_size(64)
@@ -709,13 +711,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (cl > 1e-5) { ctz = zc; ctt = S[3u * SIZE + q] * (LB[4u * k] + S[4u * SIZE + q]); }
     // 3-D view: extinction of cloud water, sub-grid cloud (MODE.y), ice and snow (anvils are mostly snow in this
     // scheme); channel 2: extinction of rain and graupel, or updraft, or cyclonic vorticity
-    let bc = extc(k, q, MODE.y == 1u);
+    let bce = extc(k, q, MODE.y == 1u); let bc = bce.x;
     bet[k] = bc; tau += bc * LB[4u * k + 3u];
     let cb = extb(bc);
+    // texture of the 3-D view: vertical velocity (wByte) and the ice fraction of the cloud extinction (iceByte)
+    let wb = u32(clamp(round(128.0 + 127.0 * sign(wc) * sqrt(min(40.0, abs(wc)) / 40.0)), 0.0, 255.0));
+    let ib = select(0u, u32(round(255.0 * min(1.0, bce.y / max(bc, 1e-30)))), cb > 0u);
     var pb = extb(rho * (${EXT.rain.toFixed(1)} * max(cs(7u, q), 0.0) + ${EXT.graupel.toFixed(1)} * qg));
     if (MODE.x == 1u) { pb = u32(min(255.0, round(sqrt(max(wc, 0.0) / 40.0) * 255.0))); }
     if (MODE.x == 2u) { pb = u32(min(255.0, round(sqrt(max(zeta, 0.0) / 0.05) * 255.0))); }
-    D[(k * NY + j) * NX + i] = cb | (pb << 8u);
+    D[(k * NY + j) * NX + i] = cb | (pb << 8u) | (wb << 16u) | (ib << 24u);
     let w = S[2u * SIZE + q];
     wmax = max(wmax, w); wmin = min(wmin, w); cmax = max(cmax, cl); pmax = max(pmax, pr);
     if (MOIST) {

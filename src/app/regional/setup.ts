@@ -99,5 +99,5 @@ export function describe(s: RegionalSetup): string {
   const snd = { tropical: '熱帶不穩定 / unstable tropical', re87: 'RE87 中性 / neutral', wk82: `WK82（${s.qvBL} g/kg）` }[s.sounding];
   const wind = { calm: '無風 / calm', trade: `信風 ${s.windU} m/s / trade`, shear: `風切 ${s.windU} m/s / shear`, quarter: `四分之一圓 ${s.windR}–${s.windU} m/s / quarter circle` }[s.wind];
   return `${km(s.L)} × ${km(s.top)}，Δx ${km(s.dx)}，${s.boundary === 'periodic' ? '週期邊界 / periodic' : '開放邊界 / open'}${s.follow ? '，跟隨風暴 / following' : ''}，` +
-    `${s.lat}°，${s.surface === 'sea' ? `海 ${s.sst} °C / sea` : '陸地 / land'}，${snd}，${wind}${s.cumulus && s.dx > 3000 ? '，積雲參數化 / cumulus scheme' : ''}`;
+    `${+s.lat.toFixed(1)}°，${s.surface === 'sea' ? `海 ${+s.sst.toFixed(1)} °C / sea` : '陸地 / land'}，${snd}，${wind}${s.cumulus && s.dx > 3000 ? '，積雲參數化 / cumulus scheme' : ''}`;
 }

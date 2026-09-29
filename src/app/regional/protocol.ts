@@ -36,6 +36,10 @@ export type ToRegionalWorker =
   | { type: 'adaptive'; on: boolean }
   /** continue the running simulation on the finer grid of its set-up (build.ts refinedSetup) */
   | { type: 'refine' }
+  /** refine only a box around the eye (width L, spacing dx, dz; m), open boundaries, following the storm */
+  | { type: 'refineEye'; L: number; dx: number; dz: number }
+  /** back to the coarser grid (the kept one, with the fine run averaged into it) */
+  | { type: 'coarsen' }
   | { type: 'save' }
   /** target speed in model seconds per wall second (0 = full speed) */
   | { type: 'pace'; target: number }
@@ -54,8 +58,9 @@ export type ToRegionalWorker =
   /** tracer particles for the 3-D view (0: off) */
   | { type: 'tracers'; n: number }
   /** interaction (conditions only): a warm bubble or a cold pool centred at (x, y) m in domain coordinates, optionally
-   *  at height z (m; default 1.5 km warm, the ground cold) with horizontal radius (m) */
-  | { type: 'perturb'; kind: 'warm' | 'cold'; x: number; y: number; z?: number; radius?: number }
+   *  at height z (m; default 1.5 km warm, the ground cold) with horizontal radius and full depth (m) and theta amplitude
+   *  amp (K; default +3 warm, -6 cold) */
+  | { type: 'perturb'; kind: 'warm' | 'cold'; x: number; y: number; z?: number; radius?: number; depth?: number; amp?: number }
   /** multiply the water vapour in a region (centre x, y, z, radius, full depth, m) by factor (capped at saturation) */
   | { type: 'moisture'; x: number; y: number; z: number; radius: number; depth: number; factor: number }
   /** wind in a region (forcing.ts): speed (m/s), direction the push blows toward (az degrees clockwise from north,
@@ -64,8 +69,8 @@ export type ToRegionalWorker =
   | { type: 'wind'; x: number; y: number; z: number; radius: number; depth: number; speed: number; az: number; el: number; form: 'push' | 'rotate' | 'converge'; sign: 1 | -1; minutes: number }
   /** stop every lasting wind forcing */
   | { type: 'clearForcing' }
-  /** paint the surface within `radius` m of (x, y): sea temperature change (K) or land / sea */
-  | { type: 'paint'; kind: 'warmer' | 'cooler' | 'land' | 'sea'; x: number; y: number; radius: number }
+  /** paint the surface within `radius` m of (x, y): sea temperature change of `amount` K (default 2) or land / sea */
+  | { type: 'paint'; kind: 'warmer' | 'cooler' | 'land' | 'sea'; x: number; y: number; radius: number; amount?: number }
   /** change the environment now: add du6 (m/s) of westerly wind at 6 km (linear from the ground) and multiply
    *  the 1-8 km water vapour by humidity (capped at saturation) */
   | { type: 'environment'; du6: number; humidity: number };
@@ -99,6 +104,8 @@ export interface RegionalFrame {
   dx: number; dz: number;
   cloud: Uint8Array;          // [k][j][i] cloud water, 0..255 (scaled)
   rain: Uint8Array;           // [k][j][i] rain water, 0..255 (scaled)
+  /** [k][j][i] pairs: vertical velocity byte (display.ts wByte) and ice fraction byte (iceByte), for the 3-D view's texture */
+  aux: Uint8Array;
   ground: Float32Array;       // [j][i]
   groundField: GroundField;
   groundRange: [number, number];
@@ -137,6 +144,8 @@ export type FromRegionalWorker =
   | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null;
       /** grid spacing (m) the run continues on after 'refine', or null */
       refineTo: number | null;
+      /** grid spacing (m) after 'coarsen' (coarsenBack: a kept coarser state), whether the eye box refinement applies */
+      coarsenTo?: number | null; coarsenBack?: boolean; eyeOk?: boolean;
       /** tropical-cyclone diagnostics apply (a vortex run) */
       tc: boolean;
       /** the set-up of this run (null: nest in the global model) */

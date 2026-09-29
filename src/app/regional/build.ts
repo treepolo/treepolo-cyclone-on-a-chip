@@ -7,7 +7,7 @@ import { QV } from '../../regional/ice.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { tcSounding, insertVortex } from '../../regional/tropical.js';
 import { quarterCircleWind, bunkersRightMover, StormTracker, TORNADO_WK82, type TornadoEnv } from '../../regional/supercell.js';
-import { autoDt, describe, presetById, setupOf, type RegionalSetup } from './setup.js';
+import { PRESETS, autoDt, describe, presetById, setupOf, type RegionalSetup } from './setup.js';
 import type { AxiParams } from './axiDriver.js';
 import type { RegionalExperiment } from './protocol.js';
 
@@ -121,6 +121,18 @@ export function axiFromSetup(s: RegionalSetup): AxiParams {
   return { sst: s.sst + 273.15, dr: Math.max(1000, Math.min(4000, s.dx)), lh: 1000, lv: 100, ck: 1.2e-3, vmin: s.vmin, radMax: s.radiation === 'relax' ? s.radRate : 2,
     radConst: s.radiation === 'const' ? s.radRate : 0, rhTop: 0.4, snd: s.sounding === 're87' ? 're87' : 'unstable', blNoise: 0, vmax0: s.initAmp,
     f: 2 * 7.292e-5 * Math.sin(Math.max(1, Math.abs(s.lat)) * Math.PI / 180) };
+}
+
+/** The set-up a run continues with after coarsening without a kept coarser state: the preset this preset refines, else
+ *  the same domain at two (fine grids) or three times the spacing, at most 30 km. Returns null when there is none. */
+export function coarsenedSetup(s: RegionalSetup): RegionalSetup | null {
+  const from = PRESETS.find((p) => p.refine === s.preset && s.preset !== 'custom');
+  if (from && Math.abs(from.setup.L - s.L) < 1) { const t = from.setup; return { ...s, preset: t.preset, L: t.L, dx: t.dx, top: t.top, dz: t.dz, dt: t.dt }; }
+  const dx = s.dx >= 5000 ? 3 * s.dx : 2 * s.dx;
+  if (dx > 30000) return null;
+  const L = Math.max(16 * dx, Math.round(s.L / dx) * dx);
+  if (Math.abs(L - s.L) > 1) return null;
+  return { ...s, preset: 'custom', dx, dz: Math.max(s.dz, Math.min(1000, dx / 15)), dt: 0 };
 }
 
 /** The set-up a run continues with after refinement: a preset's finer preset grid (none for the finest presets), a custom

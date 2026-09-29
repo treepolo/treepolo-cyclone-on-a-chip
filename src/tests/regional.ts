@@ -451,4 +451,33 @@ void DRY_AIR;
     `rate ${info.rate[4]!.toFixed(2)} mm/h, top level ${info.kt[4]}, heating ${((a1.h - a0.h) / lat).toFixed(4)} x latent, water ${((a1.w - a0.w) / a0.w).toExponential(1)}`);
 }
 
+// Coarsening: refining to half the spacing and averaging back returns the smooth coarse fields (within 1 %); a
+// sub-box put back replaces only the box (outside unchanged) and blends at its edge
+{
+  const { refineInto: rin, coarsenInto: cin } = await import('../regional/refine.js');
+  const mk = (n: number, dx: number, lateral: 'periodic' | 'open'): RegionalModel => new RegionalModel({ ...base, nx: n, ny: n, nz: 10, dx, dy: dx, dz: 1000, dt: 10, lateral }, weismanKlemp, 3);
+  const a = mk(30, 4000, 'periodic'), L = 120000;
+  for (let k = 0; k < 10; k++) for (let j = 0; j < 30; j++) for (let i = 0; i < 30; i++) {
+    const q = a.idx(i, j, k), x = (i + 0.5) * 4000, y = (j + 0.5) * 4000;
+    a.th[q] = a.th[q]! + 2 * Math.sin(2 * Math.PI * x / L) * Math.cos(2 * Math.PI * y / L);
+    a.u[q] = 5 * Math.cos(2 * Math.PI * y / L); a.v[q] = 3 * Math.sin(2 * Math.PI * (i * 4000) / L);
+  }
+  const th0 = Float64Array.from(a.th), u0 = Float64Array.from(a.u);
+  const f = mk(60, 2000, 'periodic');
+  rin(a, f, 0, 0);
+  a.th.fill(300); a.u.fill(0);
+  cin(f, a, 0, 0, 0);
+  let eth = 0, eu = 0;
+  for (let k = 0; k < 10; k++) for (let j = 0; j < 30; j++) for (let i = 0; i < 30; i++) { const q = a.idx(i, j, k); eth = Math.max(eth, Math.abs(a.th[q]! - th0[q]!)); eu = Math.max(eu, Math.abs(a.u[q]! - u0[q]!)); }
+  // a 40 km open box in the middle, warmed by 1 K, put back with a 10 km blend
+  const box = mk(20, 2000, 'open'), before = Float64Array.from(a.th);
+  rin(a, box, 40000, 40000);
+  for (let q = 0; q < box.size; q++) box.th[q] = box.th[q]! + 1;
+  cin(box, a, 40000, 40000, 10000);
+  const out = Math.abs(a.th[a.idx(2, 2, 3)]! - before[a.idx(2, 2, 3)]!), mid = a.th[a.idx(15, 15, 3)]! - before[a.idx(15, 15, 3)]!, edge = a.th[a.idx(10, 15, 3)]! - before[a.idx(10, 15, 3)]!;
+  check('coarsening: refine then average back within 2 % of the smooth fields; a box put back changes only the box, fully at its centre, partly at its edge',
+    eth < 0.04 && eu < 0.1 && out === 0 && Math.abs(mid - 1) < 0.05 && edge > 0 && edge < 0.9,
+    `theta ${eth.toExponential(1)} K, u ${eu.toExponential(1)} m/s; box: outside ${out}, centre ${mid.toFixed(3)}, edge ${edge.toFixed(3)}`);
+}
+
 summary('regional');

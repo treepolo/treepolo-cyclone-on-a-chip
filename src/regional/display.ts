@@ -37,5 +37,15 @@ export function cloudExtinction(rho: number, qc: number, qsub: number, qi: numbe
 /** Precipitation extinction (1/m) from rain and graupel. */
 export const precipExtinction = (rho: number, qr: number, qg: number): number => rho * (EXT.rain * Math.max(0, qr) + EXT.graupel * Math.max(0, qg));
 
+/** Ice part of the cloud extinction (1/m): cloud ice, snow and sub-grid cloud colder than -20 °C. */
+export function iceExtinction(rho: number, qsub: number, qi: number, qs: number, T: number): number {
+  return rho * ((T > 253.15 ? 0 : EXT.ice * qsub) + EXT.ice * Math.max(0, qi) + EXT.snow * Math.max(0, qs));
+}
+/** Display byte of the vertical velocity: 128 + 127 sign(w) sqrt(|w| / 40 m/s) (fine steps for the weak motion of coarse
+ *  grids, up to 40 m/s); the 3-D view's cloud texture follows it (billowing updraft towers, smooth layers). */
+export const wByte = (w: number): number => Math.round(128 + 127 * Math.sign(w) * Math.sqrt(Math.min(40, Math.abs(w)) / 40));
+/** Display byte of the ice fraction of the cloud extinction (0 liquid ... 255 ice; 0 where the cloud byte is 0). */
+export const iceByte = (ice: number, total: number): number => (extByte(total) > 0 ? Math.round(255 * Math.min(1, ice / total)) : 0);
+
 /** Visible-channel cloud albedo of a column optical depth (two-stream, asymmetry 0.85). */
 export const albedo = (tau: number): number => tau / (tau + 7.7);

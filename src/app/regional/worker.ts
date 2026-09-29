@@ -7,17 +7,17 @@ import { tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
-import { refineInto } from '../../regional/refine.js';
+import { refineInto, coarsenInto } from '../../regional/refine.js';
 import { Tracers, type TracerParams } from '../../regional/tracers.js';
 import { AxiDriver, AXI_DEFAULTS, LEGACY_TC, type AxiParams } from './axiDriver.js';
-import { buildModel, setupFromLegacy, axiFromSetup, refinedSetup } from './build.js';
-import { presetById, setupOf, tcLike, type RegionalSetup } from './setup.js';
+import { buildModel, setupFromLegacy, axiFromSetup, refinedSetup, coarsenedSetup } from './build.js';
+import { presetById, sanitize, setupCells, setupOf, tcLike, type RegionalSetup } from './setup.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { StormTracker, type TornadoEnv } from '../../regional/supercell.js';
 import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.js';
 import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcing.js';
-import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
+import { cloudExtinction, precipExtinction, iceExtinction, extByte, wByte, iceByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
@@ -62,6 +62,32 @@ function clearForcings(): void { if (forcings.length) { forcings = []; syncForci
 function hookForcing(model: RegionalModel): void {
   const prev = model.preStep;
   model.preStep = (mm): void => { prev?.(mm); if (forcings.length) applyWind(mm, forcings.map((x) => x.f), mm.c.dt); };
+}
+
+/**
+ * Coarser states kept by refinements (newest last, at most 3): coarsening continues on the kept grid with the fine
+ * run averaged into it. `box`: the refinement cut a smaller domain (the eye box, the 250 m tornado box), so only that
+ * part is replaced (blended over its relaxation zone) and the rest is the state at the time of the refinement.
+ */
+interface Parent {
+  setup: RegionalSetup; arrays: Float32Array[]; rain: Float32Array; snow: Float32Array; time: number; steps: number;
+  frame: { u: number; v: number }; origin: { x: number; y: number }; dpEnv: number; tsk: Float64Array | null; wet: Float64Array | null;
+  bnd: { u: Float64Array; v: Float64Array; th: Float64Array; qv: Float64Array | null; pp: Float64Array | null } | null; box: boolean;
+}
+let parents: Parent[] = [];
+/** Keep the current (CPU-synchronised) state as the parent of a refinement. */
+function keepParent(box: boolean): void {
+  const mm = m!, sf = phys?.surface ?? null, b = mm.boundary;
+  parents.push({ setup: { ...setup! }, arrays: [mm.u, mm.v, mm.w, mm.th, mm.pp, ...mm.scalars].map((a) => Float32Array.from(a)), rain: Float32Array.from(mp!.rainAcc), snow: Float32Array.from(mp!.snowAcc),
+    time: mm.time, steps: mm.steps, frame: { ...frameVel }, origin: { ...origin }, dpEnv, tsk: sf ? Float64Array.from(sf.tsk) : null, wet: sf ? Float64Array.from(sf.wet) : null,
+    bnd: b ? { u: Float64Array.from(b.u), v: Float64Array.from(b.v), th: Float64Array.from(b.th), qv: b.qv ? Float64Array.from(b.qv) : null, pp: b.pp ? Float64Array.from(b.pp) : null } : null, box });
+  if (parents.length > 3) parents.shift();
+}
+/** Grid changes available now: refine to (dx), coarsen to (dx; `back`: a kept coarser state), eye refinement. */
+function gridOptions(): { refineTo: number | null; coarsenTo: number | null; coarsenBack: boolean; eyeOk: boolean } {
+  if (!setup || axi || experiment === 'nest' || !m) return { refineTo: null, coarsenTo: null, coarsenBack: false, eyeOk: false };
+  const p = parents[parents.length - 1];
+  return { refineTo: refinedSetup(setup)?.dx ?? null, coarsenTo: p ? p.setup.dx : coarsenedSetup(setup)?.dx ?? null, coarsenBack: !!p, eyeOk: isTc() };
 }
 
 /** One storm analysis of the current CPU model state (level-0 fields; column composites for cells). */
@@ -329,7 +355,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
         experiment = 'tc_axi'; frameVel = { u: 0, v: 0 }; setup = { ...msg.setup };
         axi = new AxiDriver(axiFromSetup(msg.setup));
-        resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings();
+        resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings(); parents = [];
         post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu',
           note: '軸對稱模式在 CPU 上執行（很快）；3D 畫面是把半徑–高度場繞軸旋轉 / the axisymmetric model runs on the CPU (fast); the 3-D view revolves the radius-height fields', refineTo: null, tc: true, setup });
         await sendFrame();
@@ -352,9 +378,9 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       } else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       const c = m!.c, cells = c.nx * c.ny * c.nz;
       if (!gpu && cells > 1.5e6) note += (note ? ' · ' : '') + `這個網格有 ${(cells / 1e6).toFixed(1)} M 格點，在 CPU 上非常慢 / ${(cells / 1e6).toFixed(1)} M cells: very slow on the CPU`;
-      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings();
+      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = [];
       post({ type: 'ready', land: info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
-        refineTo: refinedSetup(setup!)?.dx ?? null, tc: isTc(), setup });
+        tc: isTc(), setup, ...gridOptions() });
       await sendFrame();
       } finally { busy = false; }
     }
@@ -374,7 +400,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         if (reason) { note = gpuFailNote(reason); info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, false); builtGpu = false; }
       } else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
-      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings();
+      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = [];
       post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land, refineTo: null, tc: false, setup: null });
       await sendFrame();
       } finally { busy = false; }
@@ -463,7 +489,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           axi = new AxiDriver({ ...AXI_DEFAULTS, ...LEGACY_TC, ...((meta as unknown as { axi?: AxiParams }).axi ?? {}) });
           axi.restore(arrays as Record<string, Float32Array>, M.time, M.steps);
           setup = M.setup ?? setupOf('tc_axi');
-          resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings();
+          resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings(); parents = [];
           post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu', note: `已載入存檔 / save loaded (t = ${(M.time / 3600).toFixed(2)} h)`, refineTo: null, tc: true, setup });
           await sendFrame();
           busy = false;
@@ -505,51 +531,134 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           else if (gpu) (gpu as GpuRegional).setDt(M.dt);
         } else if (M.builtGpu) note += ' · 此存檔是 GPU 網格，在 CPU 上會很慢 / GPU-sized grid: very slow on the CPU';
         dt0 = mm.c.dt;
-        resetOrigin(M.origin?.x ?? 0, M.origin?.y ?? 0); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings();
+        resetOrigin(M.origin?.x ?? 0, M.origin?.y ?? 0); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = [];
         const c = mm.c;
         post({ type: 'ready', experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land ?? null,
-          refineTo: setup && experiment !== 'nest' ? refinedSetup(setup)?.dx ?? null : null, tc: isTc(), setup: experiment === 'nest' ? null : setup });
+          tc: isTc(), setup: experiment === 'nest' ? null : setup, ...gridOptions() });
         await sendFrame();
       } catch (e) { post({ type: 'error', message: `載入失敗 / load failed: ${String((e as Error).message ?? e)}` }); }
       busy = false;
     }
-    else if (msg.type === 'refine') {
-      const target = setup && experiment !== 'nest' && !axi ? refinedSetup(setup) : null;
-      if (!target || !m || !mp) return;
+    else if (msg.type === 'refine' || msg.type === 'refineEye') {
+      if (!setup || experiment === 'nest' || axi || !m || !mp) return;
+      if (msg.type === 'refine' && !refinedSetup(setup)) return;
       const wasRunning = running; running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
       busy = true;
       try {
         await syncFromGpu();
         advanceOrigin();
+        let target: RegionalSetup | null = null, eye: StormNow | null = null;
+        if (msg.type === 'refine') target = refinedSetup(setup);
+        else {
+          // the eye and eyewall in a box of the chosen size and spacing: open boundaries relaxing to the state at this
+          // moment, the box following the storm
+          eye = mainStorm(); if (eye?.kind !== 'vortex') eye = catalog.main();
+          // a vortex not yet confirmed by two analyses (a save just loaded): one more analysis of this state
+          if (!eye || eye.kind !== 'vortex') { analyseStorms(null); eye = catalog.main(); }
+          if (!eye || eye.kind !== 'vortex') { post({ type: 'log', text: '還找不到颱風眼（需要一個已偵測到的渦旋）/ no vortex found yet' }); return; }
+          const Lc = Math.min(m.c.nx * m.c.dx, m.c.ny * m.c.dy);
+          target = sanitize({ ...setup, preset: 'custom', L: Math.min(Lc, msg.L), dx: msg.dx, dz: msg.dz, dt: 0, boundary: 'open', follow: true });
+          if (setupCells(target) > 30e6) { post({ type: 'log', text: '眼區網格太大（上限 3000 萬格）/ eye box too large (30 M cells)' }); return; }
+        }
+        if (!target) return;
         const mc = m, mpc = mp, fromDx = mc.c.dx, frameC = { ...frameVel }, trackC = tracker?.position ?? null, originC = { ...origin };
+        const Lc = mc.c.nx * mc.c.dx, Lcy = mc.c.ny * mc.c.dy, Lf = target.L;
+        keepParent(Lf < Lc - 1 || !!eye);
         const device = gpu ? gpu.device : null;
         gpu?.destroy(); gpu = null;
         const info = build(target, !!device);
         builtGpu = !!device;
         const mf = m!;
-        // moving-frame experiments: bring the fine model into the coarse model's current frame
-        if (tracker && (frameC.u !== frameVel.u || frameC.v !== frameVel.v)) {
+        // bring the fine model into the coarse model's current frame (the interpolated winds are relative to it)
+        if (frameC.u !== frameVel.u || frameC.v !== frameVel.v) {
           mf.shiftFrame(frameC.u - frameVel.u, frameC.v - frameVel.v);
           frameVel = frameC; if (physCfg) physCfg.frameVel = frameVel;
         }
-        // sub-box around the storm when the fine domain is smaller
-        const Lc = mc.c.nx * mc.c.dx, Lf = mf.c.nx * mf.c.dx;
-        const cx = trackC?.x ?? Lc / 2, cy = trackC?.y ?? Lc / 2;
-        const x0 = Math.max(0, Math.min(Lc - Lf, cx - Lf / 2)), y0 = Math.max(0, Math.min(Lc - Lf, cy - Lf / 2));
+        // sub-box around the storm (the eye, or the tracked storm) when the fine domain is smaller
+        const Lfx = mf.c.nx * mf.c.dx, Lfy = mf.c.ny * mf.c.dy;
+        const cx = eye ? eye.xd : trackC?.x ?? Lc / 2, cy = eye ? eye.yd : trackC?.y ?? Lcy / 2;
+        const open = mc.c.lateral === 'open';
+        const x0 = Lfx >= Lc - 1 ? 0 : open ? Math.max(0, Math.min(Lc - Lfx, cx - Lfx / 2)) : cx - Lfx / 2;
+        const y0 = Lfy >= Lcy - 1 ? 0 : open ? Math.max(0, Math.min(Lcy - Lfy, cy - Lfy / 2)) : cy - Lfy / 2;
         refineInto(mc, mf, x0, y0, { rain: mpc.rainAcc, snow: mpc.snowAcc }, { rain: mp!.rainAcc, snow: mp!.snowAcc });
-        let note = `已從 Δx ${fromDx >= 1000 ? `${fromDx / 1000} km` : `${fromDx} m`} 細化 / refined from Δx ${fromDx >= 1000 ? `${fromDx / 1000} km` : `${fromDx} m`} at t = ${(mc.time / 60).toFixed(0)} min`;
+        // an open box relaxes to its state at this moment
+        if (mf.c.lateral === 'open') mf.boundary = { u: Float64Array.from(mf.u), v: Float64Array.from(mf.v), th: Float64Array.from(mf.th), qv: Float64Array.from(mf.scalars[QV]!), pp: Float64Array.from(mf.pp) };
+        const km = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${d} m`);
+        let note = eye ? `眼區細化：${km(Lfx)} 見方、Δx ${km(mf.c.dx)}，以颱風眼為中心、跟著颱風走；邊界向細化當下的外圍狀態鬆弛 / eye refinement: ${km(Lfx)} box at Δx ${km(mf.c.dx)} centred on the eye`
+          : `已從 Δx ${km(fromDx)} 細化 / refined from Δx ${km(fromDx)} at t = ${(mc.time / 60).toFixed(0)} min`;
         if (device) {
           const reason = await tryGpu(device);
           if (reason) note += ' · ' + gpuFailNote(reason);
         }
         dt0 = mf.c.dt;
-        resetOrigin(originC.x + x0, originC.y + y0); stormDomain = null; setupTracers(); clearForcings();
+        const wrapX = (x: number, L: number): number => (open ? x : x - Math.floor(x / L) * L);
+        resetOrigin(originC.x + wrapX(x0, Lc), originC.y + wrapX(y0, Lcy)); stormDomain = null; setupTracers(); clearForcings();
         const c = mf.c;
         post({ type: 'ready', land: landMask() ?? info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
-          refineTo: refinedSetup(setup!)?.dx ?? null, tc: isTc(), setup });
+          tc: isTc(), setup, ...gridOptions() });
         await sendFrame();
       } catch (e) { post({ type: 'error', message: `細化失敗 / refinement failed: ${String(e)}` }); }
+      finally { busy = false; running = wasRunning; }
+    }
+    else if (msg.type === 'coarsen') {
+      if (!setup || experiment === 'nest' || axi || !m || !mp) return;
+      const parent = parents[parents.length - 1] ?? null, target = parent ? parent.setup : coarsenedSetup(setup);
+      if (!target) return;
+      const wasRunning = running; running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        await syncFromGpu();
+        advanceOrigin();
+        if (parent) parents.pop();
+        const mf = m, mpf = mp, physF = phys, frameF = { ...frameVel }, originF = { ...origin }, fromDx = mf.c.dx, tNow = mf.time, sfF = physF?.surface ?? null;
+        const device = gpu ? gpu.device : null;
+        gpu?.destroy(); gpu = null;
+        const info = build(target, !!device);
+        builtGpu = !!device;
+        const mc = m!;
+        // the coarse model's frame: the kept state's, else the fine model's
+        const frameC = parent ? parent.frame : frameF;
+        if (frameC.u !== frameVel.u || frameC.v !== frameVel.v) {
+          mc.shiftFrame(frameC.u - frameVel.u, frameC.v - frameVel.v);
+          frameVel = { ...frameC }; if (physCfg) physCfg.frameVel = frameVel;
+        }
+        let originC = { ...originF };
+        if (parent) {
+          // the kept state (its outer part is the state at the time of the refinement)
+          [mc.u, mc.v, mc.w, mc.th, mc.pp, ...mc.scalars].forEach((a, f) => a.set(parent.arrays[f]!));
+          mp!.rainAcc.set(parent.rain); mp!.snowAcc.set(parent.snow);
+          const sf = phys?.surface;
+          if (sf && parent.tsk && parent.wet) { sf.tsk.set(parent.tsk); sf.wet.set(parent.wet); if (physCfg) physCfg.surface = { tsk: sf.tsk, wet: sf.wet }; }
+          if (parent.bnd && mc.boundary) { mc.boundary.u.set(parent.bnd.u); mc.boundary.v.set(parent.bnd.v); mc.boundary.th.set(parent.bnd.th); if (parent.bnd.qv && mc.boundary.qv) mc.boundary.qv.set(parent.bnd.qv); if (parent.bnd.pp && mc.boundary.pp) mc.boundary.pp.set(parent.bnd.pp); }
+          dpEnv = parent.dpEnv;
+          // where its domain would be now (moving with its frame velocity since the refinement)
+          originC = { x: parent.origin.x + parent.frame.u * (tNow - parent.time), y: parent.origin.y + parent.frame.v * (tNow - parent.time) };
+        }
+        // the fine run in the coarse model's frame, averaged into it (a box blended over its relaxation zone)
+        if (frameF.u !== frameC.u || frameF.v !== frameC.v) mf.shiftFrame(frameC.u - frameF.u, frameC.v - frameF.v);
+        const x0 = originF.x - originC.x, y0 = originF.y - originC.y;
+        const margin = parent?.box ? (mf.c.relaxCells ?? 6) * mf.c.dx + 2 * mc.c.dx : 0;
+        const sfC = phys?.surface ?? null;
+        coarsenInto(mf, mc, x0, y0, margin, { rain: mpf.rainAcc, snow: mpf.snowAcc }, { rain: mp!.rainAcc, snow: mp!.snowAcc },
+          sfF && sfC ? [sfF.tsk, sfF.wet] : undefined, sfF && sfC ? [sfC.tsk, sfC.wet] : undefined);
+        if (sfC && physCfg) physCfg.surface = { tsk: sfC.tsk, wet: sfC.wet };
+        mc.time = tNow;
+        const km = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${d} m`);
+        let note = `已從 Δx ${km(fromDx)} 粗化到 ${km(mc.c.dx)} / coarsened from Δx ${km(fromDx)} to ${km(mc.c.dx)}` +
+          (parent?.box ? '；細化區已貼回，外圍是細化當時的狀態 / the refined box was put back; outside it the state is the one at the refinement' : '');
+        if (device) {
+          const reason = await tryGpu(device);
+          if (reason) note += ' · ' + gpuFailNote(reason);
+        }
+        dt0 = mc.c.dt;
+        resetOrigin(originC.x, originC.y); stormDomain = null; setupTracers(); clearForcings();
+        const c = mc.c;
+        post({ type: 'ready', land: landMask() ?? info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
+          tc: isTc(), setup, ...gridOptions() });
+        await sendFrame();
+      } catch (e) { post({ type: 'error', message: `粗化失敗 / coarsening failed: ${String(e)}` }); }
       busy = false; running = wasRunning;
     }
     else if (msg.type === 'adaptive') {
@@ -739,8 +848,9 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       if (Math.hypot((i + 0.5) * dx - msg.x, (j + 0.5) * dy - msg.y) > msg.radius) continue;
       const c = j * nx + i;
-      if (msg.kind === 'warmer') sf.tsk[c] = Math.min(310, sf.tsk[c]! + 2);
-      else if (msg.kind === 'cooler') sf.tsk[c] = Math.max(271.35, sf.tsk[c]! - 2);
+      const dT = Math.max(0.1, Math.min(5, msg.amount ?? 2));
+      if (msg.kind === 'warmer') sf.tsk[c] = Math.min(310, sf.tsk[c]! + dT);
+      else if (msg.kind === 'cooler') sf.tsk[c] = Math.max(271.35, sf.tsk[c]! - dT);
       else if (msg.kind === 'land') { if (sf.wet[c]! >= 0.99) sf.tsk[c] = mm.th0[0]! * mm.pi0[0]!; sf.wet[c] = 0.3; }
       else { if (sf.wet[c]! < 0.99) sf.tsk[c] = (setup?.sst ?? 28) + 273.15; sf.wet[c] = 1; }
     }
@@ -793,10 +903,14 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
   }
   if (msg.type === 'perturb') {
     // warm bubble (+3 K, centred at 1.5 km unless given) or cold pool (-6 K at the ground unless given), horizontal radius 10 km
-    // (at least 4 cells, at most L/8) unless given. Repeated clicks add up only to +6 K / -10 K relative to the base state
-    // (they never weaken an existing anomaly).
+    // (at least 4 cells, at most L/8) and vertical radius 1.5 km unless given; amplitude up to 15 K. Repeated clicks add up
+    // only to twice the amplitude (at least 6 K warm / 10 K cold, at most 20 K) relative to the base state (they never
+    // weaken an existing anomaly).
     const warm = msg.kind === 'warm', rh = msg.radius ? clampR(msg.radius, 10000) : Math.max(4 * dx, Math.min(10000, L / 8));
-    const zc = msg.z !== undefined && Number.isFinite(msg.z) ? Math.max(0, Math.min(top, msg.z)) : warm ? 1500 : 0, rz = 1500, amp = warm ? 3 : -6, cap = warm ? 6 : -10;
+    const zc = msg.z !== undefined && Number.isFinite(msg.z) ? Math.max(0, Math.min(top, msg.z)) : warm ? 1500 : 0;
+    const rz = msg.depth && Number.isFinite(msg.depth) ? Math.max(mm.c.dz, Math.min(top / 2, msg.depth / 2)) : 1500;
+    const a0 = msg.amp !== undefined && Number.isFinite(msg.amp) ? Math.min(15, Math.abs(msg.amp)) : warm ? 3 : 6;
+    const amp = warm ? a0 : -a0, cap = warm ? Math.min(20, Math.max(6, 2 * a0)) : -Math.min(20, Math.max(10, 2 * a0));
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const r = Math.sqrt((((i + 0.5) * dx - msg.x) / rh) ** 2 + (((j + 0.5) * dy - msg.y) / rh) ** 2 + ((mm.zc[k]! - zc) / rz) ** 2);
       if (r >= 1) continue;
@@ -804,7 +918,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
       mm.th[q] = mm.th[q]! + (warm ? Math.max(0, Math.min(d, room)) : Math.min(0, Math.max(d, room)));
     }
     if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
-    return `${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km`;
+    return `${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} ${amp >= 0 ? '+' : ''}${amp.toFixed(1)} K at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km, ${(zc / 1000).toFixed(1)} km high`;
   }
   // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km;
   // the accumulated change at 6 km stays within +-ENV_DU_MAX
@@ -869,7 +983,7 @@ async function sendFrameRaw(): Promise<void> {
   if (!m || !mp) return;
   lastFrame = performance.now(); lastFrameModel = modelNow();
   const { nx, ny, nz, dx, dz } = m.c, n = nx * ny * nz;
-  const cloud = new Uint8Array(n), rain = new Uint8Array(n);
+  const cloud = new Uint8Array(n), rain = new Uint8Array(n), aux = new Uint8Array(2 * n);
   const req = chartReq;
   let wmax = 0, wmin = 0, qcmax = 0, qrmax = 0;
   let col: Float32Array | null = null;
@@ -877,7 +991,7 @@ async function sendFrameRaw(): Promise<void> {
   const sliceK = req?.slice ? Math.max(0, Math.min(nz - 1, req.slice.k | 0)) : -1;
   let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
   let charts: ChartData | null = null, trOut: Float32Array | null = null;
-  const transfer = new Set<ArrayBuffer>([cloud.buffer, rain.buffer]);
+  const transfer = new Set<ArrayBuffer>([cloud.buffer, rain.buffer, aux.buffer]);
   // the GPU model of this frame (the module variable can be replaced while a readback is awaited)
   const gpu = currentGpu();
   if (gpu) {
@@ -886,7 +1000,7 @@ async function sendFrameRaw(): Promise<void> {
     const d = await gpu.readDisplay(levels, volMode, subgrid);
     cuRate = d.cu ? Float32Array.from({ length: nx * ny }, (_, c) => d.cu![4 * c + 2]!) : null;
     const tNow = gpu.time, sNow = gpu.steps;
-    for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; }
+    for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; aux[2 * i] = (v >>> 16) & 255; aux[2 * i + 1] = v >>> 24; }
     col = d.col;
     for (let c = 0; c < nx * ny; c++) { wmax = Math.max(wmax, col[NCOL * c]!); wmin = Math.min(wmin, col[NCOL * c + 1]!); qcmax = Math.max(qcmax, col[NCOL * c + 2]!); qrmax = Math.max(qrmax, col[NCOL * c + 3]!); }
     for (const [k, pl] of d.planes) {
@@ -915,7 +1029,9 @@ async function sendFrameRaw(): Promise<void> {
       const cl = Math.max(0, qc[q]! + qi[q]!), pr = Math.max(0, qr[q]! + qs[q]! + qg[q]!), rho = m.rho0[k]!;
       const pi = m.pi0[k]! + m.pp[q]!, T = m.th[q]! * pi;
       const qsub = subgrid && qc[q]! <= 1e-8 ? subgridCloud(qv[q]!, qsatW(T, 1e5 * Math.pow(pi, 1004.5 / 287.05)), rhc) : 0;
-      cloud[o] = extByte(cloudExtinction(rho, qc[q]!, qsub, qi[q]!, qs[q]!, T));
+      const bc = cloudExtinction(rho, qc[q]!, qsub, qi[q]!, qs[q]!, T);
+      cloud[o] = extByte(bc);
+      aux[2 * o] = wByte(0.5 * (m.w[q]! + m.w[q + m.plane]!)); aux[2 * o + 1] = iceByte(iceExtinction(rho, qsub, qi[q]!, qs[q]!, T), bc);
       let v2 = extByte(precipExtinction(rho, qr[q]!, qg[q]!)) / 255;
       if (vm === 1) v2 = Math.sqrt(Math.max(0.5 * (m.w[q]! + m.w[q + m.plane]!), 0) / 40);
       else if (vm === 2) {
@@ -1000,7 +1116,7 @@ async function sendFrameRaw(): Promise<void> {
   if (charts) for (const a of chartArrays(charts)) transfer.add(a.buffer as ArrayBuffer);
   if (trOut) transfer.add(trOut.buffer as ArrayBuffer);
   stormDomain = main ? { x: main.xd, y: main.yd } : stormDomain;
-  post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
+  post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, aux, ground: g, groundField: ground, groundRange: [lo, hi],
     stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, uhMin, capeMax, storm, storms: catalog.active, mainId: main?.id ?? null, vtProfile, tornado, tcRain: isTc() ? tcRain : null },
     origin: { ...origin }, charts, tracers: trOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
 }

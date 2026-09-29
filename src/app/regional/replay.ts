@@ -6,9 +6,11 @@ import type { StormNow } from '../../regional/storms.js';
 
 export interface ReplayFrame {
   t: number; nx: number; ny: number; nz: number;
-  /** domain width and height (m) and the vertical exaggeration of the view */
-  Lx: number; Ly: number; top: number; aspect: number;
+  /** domain width, height and top (m) */
+  Lx: number; Ly: number; top: number;
   cloud: Uint8Array; rain: Uint8Array; ground: Uint8Array; storms: StormNow[];
+  /** per cell: vertical-velocity byte and ice-fraction byte (the cloud texture of the 3-D view) */
+  aux: Uint8Array;
 }
 
 /** keep frames at full resolution up to this many cells, else at half the horizontal resolution */
@@ -43,20 +45,22 @@ export class ReplayStore {
   }
 }
 
-const size = (f: ReplayFrame): number => f.cloud.length + f.rain.length + f.ground.length + 200 * f.storms.length;
+const size = (f: ReplayFrame): number => f.cloud.length + f.rain.length + f.aux.length + f.ground.length + 200 * f.storms.length;
 
 /** Half the horizontal resolution (2 x 2 averages; the storms keep their positions). */
 function halve(f: ReplayFrame): ReplayFrame {
   const nx = Math.max(1, f.nx >> 1), ny = Math.max(1, f.ny >> 1), nz = f.nz;
   const cloud = new Uint8Array(nx * ny * nz), rain = new Uint8Array(nx * ny * nz), ground = new Uint8Array(nx * ny * 4);
+  const aux = new Uint8Array(2 * nx * ny * nz);
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const a = (k * f.ny + 2 * j) * f.nx + 2 * i, b = a + f.nx, o = (k * ny + j) * nx + i;
     cloud[o] = (f.cloud[a]! + f.cloud[a + 1]! + f.cloud[b]! + f.cloud[b + 1]! + 2) >> 2;
     rain[o] = (f.rain[a]! + f.rain[a + 1]! + f.rain[b]! + f.rain[b + 1]! + 2) >> 2;
+    for (let c = 0; c < 2; c++) aux[2 * o + c] = (f.aux[2 * a + c]! + f.aux[2 * a + 2 + c]! + f.aux[2 * b + c]! + f.aux[2 * b + 2 + c]! + 2) >> 2;
   }
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) for (let c = 0; c < 4; c++) {
     const a = ((2 * j) * f.nx + 2 * i) * 4 + c, b = a + 4 * f.nx;
     ground[(j * nx + i) * 4 + c] = (f.ground[a]! + f.ground[a + 4]! + f.ground[b]! + f.ground[b + 4]! + 2) >> 2;
   }
-  return { ...f, nx, ny, cloud, rain, ground };
+  return { ...f, nx, ny, cloud, rain, aux, ground };
 }
