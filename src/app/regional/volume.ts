@@ -135,7 +135,7 @@ export class VolumeView {
   /** orbit target (box units); null: the domain centre */
   private tgt: V3 | null = null;
   /** inverse view-projection and eye of the last drawn frame (picking) */
-  private lastInv: Float32Array | null = null; private lastEye: V3 = [0, 0, 0];
+  private lastInv: Float32Array | null = null; private lastEye: V3 = [0, 0, 0]; private lastVP: Float32Array | null = null;
   /** tap on the view (no drag): screen position, for interaction tools; returns true when it used the tap */
   onTap: ((clientX: number, clientY: number) => boolean) | null = null;
   private controls(): void {
@@ -225,6 +225,16 @@ export class VolumeView {
     const r = this.pickRay(clientX, clientY); if (!r || Math.abs(r.d[2]) < 1e-6) return null;
     const t = (zb - r.o[2]) / r.d[2]; if (t <= 0) return null;
     return [r.o[0] + t * r.d[0], r.o[1] + t * r.d[1], zb];
+  }
+  /** Screen position (CSS pixels in the canvas) of a point in box units as last drawn, or null behind the eye / off screen. */
+  project(p: V3): { x: number; y: number } | null {
+    const v = this.lastVP; if (!v) return null;
+    const cx = v[0]! * p[0] + v[4]! * p[1] + v[8]! * p[2] + v[12]!, cy = v[1]! * p[0] + v[5]! * p[1] + v[9]! * p[2] + v[13]!;
+    const cw = v[3]! * p[0] + v[7]! * p[1] + v[11]! * p[2] + v[15]!;
+    if (cw <= 1e-6) return null;
+    const x = cx / cw, y = cy / cw;
+    if (Math.abs(x) > 1.05 || Math.abs(y) > 1.05) return null;
+    return { x: (x + 1) / 2 * this.canvas.clientWidth, y: (1 - y) / 2 * this.canvas.clientHeight };
   }
   /** fraction of the box height per model metre (to convert heights) and the box size */
   get boxSize(): V3 { return [this.box[0], this.box[1], this.box[2]]; }
@@ -416,7 +426,7 @@ export class VolumeView {
     }
     const vp = viewProj(eye, ctr, w / h);
     const inv = invert4(vp);
-    this.lastInv = inv; this.lastEye = eye;
+    this.lastInv = inv; this.lastEye = eye; this.lastVP = vp;
     const trOn = this.tracerPass(vp, eye, w, h);
     gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);

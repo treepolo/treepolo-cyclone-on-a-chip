@@ -7,6 +7,7 @@ import { RegionalCharts } from './charts.js';
 import { Missions } from './missions.js';
 import { SetupForm } from './setupForm.js';
 import type { RegionalSetup } from './setup.js';
+import type { StormNow } from '../../regional/storms.js';
 import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 
 const km = (m: number): string => (m >= 1000 ? `${+(m / 1000).toFixed(2)} km` : `${+m.toFixed(0)} m`);
@@ -102,6 +103,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('zeta').textContent = `${s.zetaMax.toFixed(3)} s⁻¹ · ${s.vGround.toFixed(1)} m/s`;
     $('tcrain').textContent = !s.tcRain ? '—' : `${s.tcRain.core.toFixed(1)} · ${s.tcRain.outer.toFixed(2)} mm/h（外圍 >1 mm/h ${(100 * s.tcRain.wet).toFixed(1)}%）`;
     tornadoWatch(m.time, s.tornado, m.dx);
+    showStorms(s.storms ?? [], s.mainId ?? null, m);
     $('legend').textContent = m.groundField === 'none' ? '深藍 = 海、深綠 = 陸地 / dark blue = sea, dark green = land' : `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); if (runner.running) void runner.abort(`error: ${m.message}`); }
   else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
@@ -138,6 +140,60 @@ document.querySelectorAll<HTMLButtonElement>('#flyPad button').forEach((b) => {
   const k = b.dataset.k!, on = (e: PointerEvent): void => { e.preventDefault(); b.setPointerCapture(e.pointerId); view.setKey(k, true); }, off = (): void => view.setKey(k, false);
   b.addEventListener('pointerdown', on); b.addEventListener('pointerup', off); b.addEventListener('pointercancel', off); b.addEventListener('lostpointercapture', off);
 });
+// ---------------- storms: list in the diagnostics (click: its numbers in the time series) and labels in the 3-D view
+let stormsNow: StormNow[] = [], stormFrame: { nx: number; dx: number; ny: number; nz: number; dz: number } | null = null, stormMain: number | null = null;
+const compass = (u: number, v: number): string => {
+  const sp = Math.hypot(u, v); if (sp < 0.5) return '幾乎不動 / nearly still';
+  const d = ['東 E', '東北 NE', '北 N', '西北 NW', '西 W', '西南 SW', '南 S', '東南 SE'][Math.round(Math.atan2(v, u) / (Math.PI / 4) + 8) % 8]!;
+  return `往${d} ${sp.toFixed(0)} m/s`;
+};
+function stormLine(st: StormNow): string {
+  const age = st.age < 7200 ? `${(st.age / 60).toFixed(0)} min` : `${(st.age / 3600).toFixed(1)} h`;
+  if (st.kind === 'vortex') return `${st.pmin?.toFixed(0) ?? '—'} hPa（−${st.dp?.toFixed(1) ?? '—'}）· ${st.vmax?.toFixed(0) ?? '—'} m/s · RMW ${st.rmw ? (st.rmw / 1000).toFixed(0) : '—'} km · ${compass(st.u, st.v)} · ${age}`;
+  return `w ${st.wmax?.toFixed(0) ?? '—'} m/s · UH ${st.uh?.toFixed(0) ?? '—'} · ${st.dbz?.toFixed(0) ?? '—'} dBZ · ${compass(st.u, st.v)} · ${age}`;
+}
+function showStorms(list: StormNow[], mainId: number | null, f: { nx: number; ny: number; nz: number; dx: number; dz: number }): void {
+  stormsNow = list; stormFrame = f; stormMain = mainId;
+  const box = $('stormList'), sel = charts.selectedStorm;
+  $('stormCount').textContent = list.length ? `${list.length} 個 / ${list.length}` : '尚未形成 / none yet';
+  // vortices first, strongest first; rows are reused (a click must survive the next frame's update)
+  const order = [...list].sort((a, b) => (a.kind === b.kind ? (b.dp ?? Math.abs(b.uh ?? 0) + 10 * (b.wmax ?? 0)) - (a.dp ?? Math.abs(a.uh ?? 0) + 10 * (a.wmax ?? 0)) : a.kind === 'vortex' ? -1 : 1)).slice(0, 12);
+  while (box.childElementCount < order.length + 1) {
+    const b = document.createElement('button'), sw = document.createElement('span'), nm = document.createElement('span'), dt = document.createElement('span');
+    sw.className = 'sw'; nm.className = 'nm'; dt.className = 'dt'; b.append(sw, nm, dt);
+    b.onclick = (): void => { const id = Number(b.dataset.id); charts.selectStorm(charts.selectedStorm === id ? null : id); if (stormFrame) showStorms(stormsNow, stormMain, stormFrame); };
+    box.append(b);
+  }
+  const kids = box.children;
+  order.forEach((st, n) => {
+    const b = kids[n] as HTMLButtonElement, [sw, nm, dt] = Array.from(b.children) as HTMLElement[];
+    b.hidden = false; b.dataset.id = String(st.id); b.className = st.id === sel ? 'sel' : '';
+    sw!.style.background = charts.stormColour(st.id);
+    nm!.textContent = st.name + (st.id === mainId ? ' ★' : '');
+    dt!.textContent = stormLine(st);
+    b.title = st.id === mainId ? '主要風暴（跟隨、診斷用它）/ main storm (followed, used by the diagnostics)' : '點選：時間序列顯示它的數據 / click: its numbers in the time series';
+  });
+  for (let n = order.length; n < kids.length; n++) (kids[n] as HTMLElement).hidden = true;
+  // the last row is the note on weaker storms
+  const note = kids[order.length] as HTMLButtonElement;
+  if (list.length > 12) { note.hidden = false; note.disabled = true; note.className = ''; note.dataset.id = ''; (note.children[0] as HTMLElement).style.background = 'transparent'; (note.children[1] as HTMLElement).textContent = ''; (note.children[2] as HTMLElement).textContent = `另有 ${list.length - 12} 個較弱的 / ${list.length - 12} weaker ones not listed`; }
+  for (let n = 0; n < order.length; n++) (kids[n] as HTMLButtonElement).disabled = false;
+}
+/** Labels above the storms in the 3-D view (redrawn every animation frame: the camera moves). */
+function placeStormLabels(): void {
+  const host = $('stormLabels');
+  if (charts.view !== '3d' || !stormFrame || !stormsNow.length) { if (host.childElementCount) host.replaceChildren(); return; }
+  const [bx, by, bz] = view.boxSize, f = stormFrame, Lx = f.nx * f.dx, Ly = f.ny * f.dx, off = $('view').offsetTop;
+  while (host.childElementCount < Math.min(12, stormsNow.length)) host.append(document.createElement('div'));
+  while (host.childElementCount > Math.min(12, stormsNow.length)) host.lastElementChild!.remove();
+  stormsNow.slice(0, 12).forEach((st, n) => {
+    const el = host.children[n] as HTMLElement, p = view.project([st.xd / Lx * bx, st.yd / Ly * by, bz * 0.92]);
+    if (!p) { el.hidden = true; return; }
+    el.hidden = false;
+    el.style.left = `${p.x}px`; el.style.top = `${p.y + off}px`; el.style.borderColor = charts.stormColour(st.id);
+    el.textContent = st.kind === 'vortex' ? `${st.name} ${st.pmin?.toFixed(0) ?? ''} hPa ${st.vmax?.toFixed(0) ?? ''} m/s` : `${st.name} w ${st.wmax?.toFixed(0) ?? ''}`;
+  });
+}
 /** Sea / land shown in the diagnostics: the set-up's surface and the painted share. */
 function showSurface(): void {
   const n = land ? land.reduce((a, x) => a + x, 0) : 0, frac = land ? n / land.length : curSea ? 0 : 1;
@@ -189,7 +245,7 @@ if (location.hash.startsWith('#nest') || new URLSearchParams(location.search).ha
 }
 if (window.parent !== window) { const back = document.getElementById('backLink'); if (back) back.hidden = true; }
 init();
-function tick(): void { if (charts.view === '3d') view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); requestAnimationFrame(tick); }
+function tick(): void { if (charts.view === '3d') view.render(Number($<HTMLInputElement>('cloudK').value), Number($<HTMLInputElement>('cloudK').value) * 1.5); placeStormLabels(); requestAnimationFrame(tick); }
 requestAnimationFrame(tick);
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
 $('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; refining = true; log('細化中… / Refining…'); send({ type: 'refine' }); };

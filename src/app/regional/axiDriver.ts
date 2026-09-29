@@ -6,7 +6,7 @@
 import { AxisymModel, HA, type AxisymConfig } from '../../regional/axisym.js';
 import { IceMicrophysics, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { tcSounding, eyewallPeaks, type TcSounding } from '../../regional/tropical.js';
-import { SECTION_VARS, sectionValues, parcelAscent, pressure, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
+import { SECTION_VARS, WV_PATH, sectionValues, parcelAscent, pressure, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { ChartData, ChartRequest, GroundField, RegionalFrame, TcRain } from './protocol.js';
 
 /** User-adjustable parameters of the axisymmetric experiment. */
@@ -99,17 +99,25 @@ export class AxiDriver {
     return z;
   }
 
+  /** Sea-level pressure at the centre (hPa), reduced from the lowest level as in storms.ts. */
+  private centralSlp(): number {
+    const ax = this.ax, q = ax.idx(0, 0, 0), pi = ax.pi0[0]! + ax.pp[q]!;
+    return 1e5 * Math.pow(pi, 1004.5 / 287.05) / 100 * Math.exp(9.80665 * ax.zc[0]! / (287.05 * ax.th[q]! * pi * (1 + 0.61 * Math.max(0, ax.scalars[0]![q]!))));
+  }
+
   /** Column composites per radius (same meaning as the 3-D column records). */
-  private columns(): { dbz: Float64Array; ctopT: Float64Array; ctopZ: Float64Array; uh: Float64Array; wMax: Float64Array; cape: Float64Array; cin: Float64Array; wmin: number; cmax: number; pmax: number } {
+  private columns(): { dbz: Float64Array; ctopT: Float64Array; ctopZ: Float64Array; uh: Float64Array; wMax: Float64Array; cape: Float64Array; cin: Float64Array; vis: Float64Array; pw: Float64Array; wvT: Float64Array; wmin: number; cmax: number; pmax: number } {
     const ax = this.ax, { nz, dz } = ax.a, nr = this.nDisp;
+    const vis = new Float64Array(nr), pw = new Float64Array(nr), wvT = new Float64Array(nr);
     const dbz = new Float64Array(nr).fill(-30), ctopT = new Float64Array(nr), ctopZ = new Float64Array(nr), uh = new Float64Array(nr), wMax = new Float64Array(nr), cape = new Float64Array(nr), cin = new Float64Array(nr);
     const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz);
     const zs = Array.from({ length: nz }, (_, k) => (ax.zc[k]! >= 2000 && ax.zc[k]! <= 5000 ? this.zeta(k) : null));
     let wmin = 0, cmax = 0, pmax = 0;
     for (let i = 0; i < nr; i++) {
-      let zmax = 0;
+      let zmax = 0, lwp = 0, iwp = 0, swp = 0;
       for (let k = 0; k < nz; k++) {
         const q = ax.idx(i, 0, k), rho = ax.rho0[k]!, S = ax.scalars;
+        lwp += rho * dz * Math.max(0, S[QC]![q]!); iwp += rho * dz * Math.max(0, S[QI]![q]!); swp += rho * dz * Math.max(0, S[QS]![q]!); pw[i] = pw[i]! + rho * dz * Math.max(0, S[0]![q]!);
         const qr = Math.max(S[QR]![q]!, 0), qs = Math.max(S[QS]![q]!, 0), qg = Math.max(S[QG]![q]!, 0);
         zmax = Math.max(zmax, 3.63e9 * Math.pow(rho * qr, 1.75) + 9.80e8 * Math.pow(rho * qs, 1.75) + 4.33e10 * Math.pow(rho * qg, 1.75));
         const pi = ax.pi0[k]! + ax.pp[q]!;
@@ -123,8 +131,13 @@ export class AxiDriver {
       if (ctopZ[i] === 0) ctopT[i] = T[0]!;
       dbz[i] = 10 * Math.log10(Math.max(zmax, 1e-3));
       const pc = parcelAscent(T, p, qv, dz); cape[i] = pc.cape; cin[i] = pc.cin;
+      // satellite-like values as columnDiagnostics (src/regional/diagnostics.ts)
+      let above = pw[i]!, zEmit = ax.zc[nz - 1]!; wvT[i] = T[nz - 1]!;
+      for (let k = 0; k < nz; k++) { above -= ax.rho0[k]! * dz * Math.max(0, qv[k]!); if (above < WV_PATH) { wvT[i] = T[k]!; zEmit = ax.zc[k]!; break; } }
+      if (ctopZ[i]! > zEmit) wvT[i] = ctopT[i]!;
+      const tau = 150 * lwp + 41 * iwp + 20 * swp; vis[i] = tau / (tau + 7.7);
     }
-    return { dbz, ctopT, ctopZ, uh, wMax, cape, cin, wmin, cmax, pmax };
+    return { dbz, ctopT, ctopZ, uh, wMax, cape, cin, vis, pw, wvT, wmin, cmax, pmax };
   }
 
   // ---------------------------------------------------------------- revolving onto the display grid
@@ -219,7 +232,10 @@ export class AxiDriver {
     const msg: RegionalFrame = {
       type: 'frame', time: ax.time, nx: N, ny: N, nz, dx: this.dxv, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
       stats: { wmax, wmin: col.wmin, qcmax, qrmax, rainmax, vmax: mt.vmax, dp: mt.dp, rmw: mt.rmw, eyewalls: eyewallPeaks(rr, vt), zetaMax, vGround: mt.vmax, dbzMax, uhMax, uhMin: 0, capeMax,
-        storm: { x: origin.x + this.D, y: origin.y + this.D }, vtProfile: { dr, vt }, tornado: null, tcRain: this.tcRain },
+        storm: { x: origin.x + this.D, y: origin.y + this.D }, vtProfile: { dr, vt }, tornado: null, tcRain: this.tcRain,
+        // the one storm of the axisymmetric model: the vortex on the axis
+        storms: [{ id: 1, kind: 'vortex', name: 'TC1', x: origin.x + this.D, y: origin.y + this.D, xd: this.D, yd: this.D, u: 0, v: 0, age: ax.time,
+          pmin: this.centralSlp(), dp: -mt.dp, vmax: mt.vmax, rmw: mt.rmw }], mainId: 1 },
       origin, charts, tracers: null, stepsPerSecond, dt: ax.a.dt,
     };
     return { msg, transfer };
@@ -244,6 +260,9 @@ export class AxiDriver {
         case 'wMax': prof = col.wMax; break;
         case 'cape': prof = col.cape; break;
         case 'cin': prof = col.cin; break;
+        case 'vis': prof = col.vis; break;
+        case 'pw': prof = col.pw; break;
+        case 'wvT': prof = col.wvT.map((x) => x - 273.15); break;
         case 'rain': prof = this.mp.rainAcc; break;
         case 'snow': prof = this.mp.snowAcc; break;
         case 'rainRate': prof = this.rate ?? new Float64Array(nr); break;
@@ -268,6 +287,11 @@ export class AxiDriver {
         if (sv === 'u') a = wkf().u; else if (sv === 'v') a = wkf().v;
         else if (sv === 'speed') a = this.revolve(Float64Array.from({ length: nr }, (_, i) => Math.hypot(at('u', k, i), at('v', k, i))));
         else if (sv === 'zeta') a = this.revolve(this.zeta(k));
+        else if (sv === 'div') {
+          // (1/r) d(r u)/dr at the cell centres (1e-5 s^-1)
+          const rf = ax.rf;
+          a = this.revolve(Float64Array.from({ length: nr }, (_, i) => { const q = ax.idx(i, 0, k); return 1e5 * (rf[i + 1 + HA]! * ax.u[q + 1]! - rf[i + HA]! * ax.u[q]!) / (ax.rc[i + HA]! * ax.a.dr); }));
+        }
         else a = this.revolve(prof(sv as SectionVar));
         vars[sv] = keep(a);
       }

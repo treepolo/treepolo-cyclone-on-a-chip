@@ -38,7 +38,19 @@ function irColor(T: number): Rgba {
   return [...hex(s[s.length - 1]![1]), 255];
 }
 
-export type ScaleKind = 'seq' | 'div' | 'radar' | 'ir';
+export type ScaleKind = 'seq' | 'div' | 'radar' | 'ir' | 'vis' | 'wv';
+/** visible satellite: clear sky shows the surface, then grey to white with cloud albedo */
+function visColor(a: number): Rgba { if (a < 0.03) return [0, 0, 0, 0]; const g = 40 + 215 * Math.pow(Math.min(1, a), 0.8); return [g, g, g, 255]; }
+/** water-vapour channel (°C): warm (dry upper troposphere) dark brown, cold (moist, or high cloud tops) white */
+const WV: [number, string][] = [[0, '#2b1d10'], [-15, '#5a3d1e'], [-25, '#34475c'], [-35, '#6f87a3'], [-45, '#b9c8d8'], [-60, '#ffffff'], [-80, '#ffffff']];
+function wvColor(T: number): Rgba {
+  if (T >= WV[0]![0]) return [...hex(WV[0]![1]), 255];
+  for (let i = 1; i < WV.length; i++) {
+    const [t0, c0] = WV[i - 1]!, [t1, c1] = WV[i]!;
+    if (T <= t0 && T >= t1) { const f = (t0 - T) / (t0 - t1), a = hex(c0), b = hex(c1); return [a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2]), 255]; }
+  }
+  return [...hex(WV[WV.length - 1]![1]), 255];
+}
 export interface Scale { kind: ScaleKind; lo: number; hi: number; gamma: number; clear: number | null; reverse: boolean }
 
 /** Colour of a value (alpha 0 = show the underlay). */
@@ -46,6 +58,8 @@ export function colorOf(s: Scale, v: number): Rgba {
   if (!Number.isFinite(v)) return [0, 0, 0, 0];
   if (s.kind === 'radar') { if (v < 5) return [0, 0, 0, 0]; const c = RADAR[Math.min(RADAR.length - 1, Math.floor((v - 5) / 5))]!; return [c[0], c[1], c[2], 255]; }
   if (s.kind === 'ir') return irColor(v);
+  if (s.kind === 'vis') return visColor(v);
+  if (s.kind === 'wv') return wvColor(v);
   if (s.kind === 'div') { const a = Math.max(Math.abs(s.lo), Math.abs(s.hi)) || 1; return divRamp(Math.sign(v) * Math.pow(Math.min(1, Math.abs(v) / a), s.gamma)); }
   if (s.clear !== null && (s.reverse ? v > -s.clear : v < s.clear)) return [0, 0, 0, 0];
   let t = (v - s.lo) / ((s.hi - s.lo) || 1);
@@ -117,7 +131,7 @@ export function drawColorbar(ctx: CanvasRenderingContext2D, r: Rect, s: Scale, u
   let lo = s.lo, hi = s.hi;
   if (s.kind === 'div') { const a = Math.max(Math.abs(lo), Math.abs(hi)); lo = -a; hi = a; }
   if (s.kind === 'radar') { lo = 5; hi = 80; }
-  const tv = s.kind === 'radar' ? [10, 20, 30, 40, 50, 60, 70] : s.kind === 'ir' ? [20, 0, -20, -40, -60, -80] : ticks(lo, hi, 5);
+  const tv = s.kind === 'radar' ? [10, 20, 30, 40, 50, 60, 70] : s.kind === 'ir' || s.kind === 'wv' ? [20, 0, -20, -40, -60, -80] : ticks(lo, hi, 5);
   for (const v of tv) {
     const t = (v - lo) / ((hi - lo) || 1);
     if (t < -1e-6 || t > 1 + 1e-6) continue;

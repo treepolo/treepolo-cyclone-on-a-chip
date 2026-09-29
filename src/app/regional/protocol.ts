@@ -1,5 +1,6 @@
 // Messages between the regional-model UI and its worker.
 import type { MapVar, SliceVar, SectionVar, RzVar } from '../../regional/diagnostics.js';
+import type { StormNow } from '../../regional/storms.js';
 
 export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'tc_3' | 'nest' | 'tornado' | 'tornado_c' | 'tc_axi' | 'custom';
 /** tropical cyclones: mean rain rate in the core and the outer region over the last model hour (mm/h), outer wet fraction */
@@ -93,8 +94,11 @@ export interface RegionalFrame {
     dbzMax: number; uhMax: number; capeMax: number;
     /** most negative 2-5 km updraft helicity (anticyclonic left-moving storms), m^2/s^2 */
     uhMin: number;
-    /** strongest storm column (max UH, or max w before rotation): ground-relative position (m), or null */
+    /** the main storm (the followed one, else the deepest vortex or the strongest cell): ground-relative position (m), or
+     *  null before any storm exists */
     storm: { x: number; y: number } | null;
+    /** every storm now (storms.ts) and the id of the main one */
+    storms: StormNow[]; mainId: number | null;
     /** tropical cyclones: mean precipitation rates (mm/h) in the core (< 60 km) and the outer region (100-300 km) over the last
      *  completed model hour, and the outer area fraction raining more than 1 mm/h (rainband diagnostics) */
     tcRain?: TcRain | null;

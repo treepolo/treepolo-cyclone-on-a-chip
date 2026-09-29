@@ -35,16 +35,21 @@ const zFactor = (rho: number, qr: number, qs: number, qg: number): number =>
 // ---------------------------------------------------------------- variables
 
 /** Values per column in the display composites (GPU readDisplay and columnDiagnostics). */
-export const COL = 10;
+export const COL = 13;
 /** Offsets in a column record. */
-export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 6, uh: 7, cape: 8, cin: 9 } as const;
+export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 6, uh: 7, cape: 8, cin: 9, vis: 10, pw: 11, wvT: 12 } as const;
+/** Satellite-like column values: cloud albedo from the optical depth tau = 150 LWP + 41 IWP + 20 SWP (kg/m^2; effective
+ *  radii about 10 um water, 40 um ice, larger snow) as tau / (tau + 7.7); the water-vapour channel as the temperature
+ *  where the water-vapour path above first falls below WV_PATH kg/m^2 (upper-tropospheric humidity), or the cloud top
+ *  when a cloud reaches above that level. */
+export const WV_PATH = 0.3;
 
 /** Fields of a horizontal slice. */
-export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh', 'zeta', 'pp', 'qv', 'cloud', 'precip'] as const;
+export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh', 'zeta', 'div', 'pp', 'qv', 'cloud', 'precip'] as const;
 /** Fields of a cross-section or sounding (per level). */
 export const SECTION_VARS = ['dbz', 'w', 'u', 'v', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'T', 'Td', 'p', 'qv', 'pp'] as const;
 /** Composite (column / surface) maps. */
-export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin'] as const;
+export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'wvT', 'pw'] as const;
 /** Azimuthal-mean (radius-height) fields. */
 export const RZ_VARS = ['vt', 'vr', 'w', 'thp', 'cond'] as const;
 export type SliceVar = (typeof SLICE_VARS)[number];
@@ -117,9 +122,11 @@ export function columnDiagnostics(m: RegionalModel): Float32Array {
   const out = new Float32Array(nx * ny * COL);
   const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz);
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    let wmax = 0, wmin = 0, cmax = 0, pmax = 0, zmax = 0, ctz = 0, ctt = 0, uh = 0;
+    let wmax = 0, wmin = 0, cmax = 0, pmax = 0, zmax = 0, ctz = 0, ctt = 0, uh = 0, lwp = 0, iwp = 0, swp = 0, pw = 0;
     for (let k = 0; k < nz; k++) {
-      const q = m.idx(i, j, k);
+      const q = m.idx(i, j, k), rdz = m.rho0[k]! * dz;
+      lwp += rdz * Math.max(0, ns > 1 ? sc[1]![q]! : 0); iwp += rdz * Math.max(0, ns > 5 ? sc[3]![q]! : 0); swp += rdz * Math.max(0, ns > 5 ? sc[4]![q]! : 0);
+      pw += rdz * Math.max(0, ns > 0 ? sc[0]![q]! : 0);
       const qr = ns > 2 ? Math.max(sc[2]![q]!, 0) : 0, qs = ns > 5 ? Math.max(sc[4]![q]!, 0) : 0, qg = ns > 5 ? Math.max(sc[5]![q]!, 0) : 0;
       const cl = Math.max(0, (ns > 1 ? sc[1]![q]! : 0) + (ns > 5 ? sc[3]![q]! : 0)), pr = Math.max(0, (ns > 2 ? sc[2]![q]! : 0) + (ns > 5 ? qs + qg : 0));
       zmax = Math.max(zmax, zFactor(m.rho0[k]!, qr, qs, qg));
@@ -136,7 +143,13 @@ export function columnDiagnostics(m: RegionalModel): Float32Array {
     }
     if (ctz === 0) ctt = T[0]!;
     const pc = ns > 0 ? parcelAscent(T, p, qv, dz) : { cape: 0, cin: 0 };
+    // water-vapour channel: emission where the vapour path above drops below WV_PATH, unless a cloud top is higher
+    let above = pw, wvT = T[nz - 1]!, zEmit = m.zc[nz - 1]!;
+    for (let k = 0; k < nz; k++) { above -= m.rho0[k]! * dz * Math.max(0, qv[k]!); if (above < WV_PATH) { wvT = T[k]!; zEmit = m.zc[k]!; break; } }
+    if (ctz > zEmit) wvT = ctt;
+    const tau = 150 * lwp + 41 * iwp + 20 * swp;
     const o = COL * (j * nx + i);
+    out[o + 10] = tau / (tau + 7.7); out[o + 11] = pw; out[o + 12] = wvT;
     out[o] = wmax; out[o + 1] = wmin; out[o + 2] = cmax; out[o + 3] = pmax; out[o + 4] = 10 * Math.log10(Math.max(zmax, 1e-3));
     out[o + 5] = ctz; out[o + 6] = ctt; out[o + 7] = uh; out[o + 8] = pc.cape; out[o + 9] = pc.cin;
   }
@@ -209,6 +222,7 @@ export function sliceFields(m: RegionalModel, pl: LevelPlanes, k: number, vars: 
         case 'rh': x = 100 * qv / qsatW(T, p); break;
         case 'zeta': x = 0.25 * ((pl.v[q + 1]! + pl.v[q + 1 + sx]!) - (pl.v[q - 1]! + pl.v[q - 1 + sx]!)) / dx
           - 0.25 * ((pl.u[q + sx]! + pl.u[q + sx + 1]!) - (pl.u[q - sx]! + pl.u[q - sx + 1]!)) / dy; break;
+        case 'div': x = 1e5 * ((pl.u[q + 1]! - pl.u[q]!) / dx + (pl.v[q + sx]! - pl.v[q]!) / dy); break;
         case 'pp': x = (p - p0) / 100; break;
         case 'qv': x = 1e3 * Math.max(0, qv); break;
         case 'cloud': x = 1e3 * Math.max(0, g(sc[1], q) + (ns > 5 ? g(sc[3], q) : 0)); break;
@@ -241,6 +255,9 @@ export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPla
         case 'wMax': x = col[o + C.wmax]!; break;
         case 'cape': x = col[o + C.cape]!; break;
         case 'cin': x = col[o + C.cin]!; break;
+        case 'vis': x = col[o + C.vis]!; break;
+        case 'pw': x = col[o + C.pw]!; break;
+        case 'wvT': x = col[o + C.wvT]! - 273.15; break;
         case 'rain': x = acc.rain[c]!; break;
         case 'snow': x = acc.snow[c]!; break;
         case 'rainRate': x = acc.rate ? acc.rate[c]! : 0; break;

@@ -85,8 +85,22 @@ export function tornadoExperiment(dx: number, L: number, nz: number, dz: number,
 export class StormTracker {
   private last: { x: number; y: number; t: number } | null = null;
   /** 'updraft': the main updraft at 4 km (convective storms); 'vortex': the surface-pressure minimum of a vortex that
-   *  is at least 1 hPa deeper than the domain mean (tropical cyclones), searched within 150 km of the last centre */
+   *  is at least 1 hPa deeper than the domain mean (tropical cyclones), searched within 150 km of the last centre.
+   *  The regional page follows a storm of its storm catalogue instead (follow). */
   constructor(readonly mode: 'updraft' | 'vortex' = 'updraft') {}
+
+  /** Follow a storm found elsewhere (domain position x, y in m): frame change and whole-cell rolls as update(). */
+  follow(m: RegionalModel, x: number, y: number, kind: 'vortex' | 'cell'): { du: number; dv: number; di: number; dj: number; x: number; y: number } {
+    const { nx, ny, dx, dy } = m.c, periodic = m.c.lateral !== 'open', Lx = nx * dx, Ly = ny * dy;
+    const dist = (x0: number, y0: number, x1: number, y1: number): [number, number] => {
+      let ddx = x1 - x0, ddy = y1 - y0;
+      if (periodic) { ddx -= Math.round(ddx / Lx) * Lx; ddy -= Math.round(ddy / Ly) * Ly; }
+      return [ddx, ddy];
+    };
+    return this.move(x, y, m.time, dist, Lx, Ly, periodic, dx, dy, kind === 'vortex' ? 3 * 3600 : 1200);
+  }
+  /** Forget the last position (a different storm is followed from now on). */
+  forget(): void { this.last = null; }
   /** last located storm position (m from the domain origin), or null before the storm is found */
   get position(): { x: number; y: number } | null { return this.last ? { x: this.last.x, y: this.last.y } : null; }
 

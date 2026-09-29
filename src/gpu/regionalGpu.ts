@@ -8,7 +8,7 @@
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
-import { COL } from '../regional/diagnostics.js';
+import { COL, WV_PATH } from '../regional/diagnostics.js';
 import type { TracerParams } from '../regional/tracers.js';
 
 const WG = 64;
@@ -489,6 +489,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (t >= NX * NY) { return; }
   let j = t / NX; let i = t % NX;
   var wmax = 0.0; var wmin = 0.0; var cmax = 0.0; var pmax = 0.0; var zmax = 0.0; var ctz = 0.0; var ctt = 0.0; var uh = 0.0;
+  var lwp = 0.0; var iwp = 0.0; var swp = 0.0; var pw = 0.0;
   // surface-based parcel (parcelAscent in src/regional/diagnostics.ts)
   var pth = 0.0; var pq = 0.0; var cape = 0.0; var cin = 0.0; var lcl = false; var lfc = false;
   for (var k = 0u; k < NZ; k++) {
@@ -498,6 +499,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (ICE) { cl += S[8u * SIZE + q]; qs = max(S[9u * SIZE + q], 0.0); qg = max(S[10u * SIZE + q], 0.0); pr += qs + qg; }
     cl = max(cl, 0.0); pr = max(pr, 0.0);
     let rho = LB[4u * k + 1u];
+    let rdz = rho * LB[4u * k + 3u];
+    lwp += rdz * max(cs(6u, q), 0.0); pw += rdz * max(cs(5u, q), 0.0);
+    if (ICE) { iwp += rdz * max(S[8u * SIZE + q], 0.0); swp += rdz * qs; }
     // reflectivity factor (mm^6 m^-3) from rain, snow and graupel contents (kg m^-3)
     let zr = 3.63e9 * pow(rho * max(cs(7u, q), 0.0), 1.75) + 9.80e8 * pow(rho * qs, 1.75) + 4.33e10 * pow(rho * qg, 1.75);
     zmax = max(zmax, zr);
@@ -549,6 +553,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   C[COL * t] = wmax; C[COL * t + 1u] = wmin; C[COL * t + 2u] = cmax; C[COL * t + 3u] = pmax;
   C[COL * t + 4u] = 10.0 * log(max(zmax, 1e-3)) / log(10.0); C[COL * t + 5u] = ctz; C[COL * t + 6u] = ctt; C[COL * t + 7u] = uh;
   C[COL * t + 8u] = cape; C[COL * t + 9u] = cin;
+  // satellite-like values (columnDiagnostics in src/regional/diagnostics.ts): cloud albedo, precipitable water,
+  // water-vapour channel temperature (WV_PATH ${WV_PATH} kg/m^2)
+  var above = pw; var wvT = 0.0; var zEmit = LB[4u * (NZ - 1u) + 2u]; var found = false;
+  for (var k = 0u; k < NZ; k++) {
+    let q = k * PL + (j + HH) * SX + (i + HH);
+    above -= LB[4u * k + 1u] * LB[4u * k + 3u] * max(cs(5u, q), 0.0);
+    if (!found && above < ${WV_PATH}) { found = true; wvT = S[3u * SIZE + q] * (LB[4u * k] + S[4u * SIZE + q]); zEmit = LB[4u * k + 2u]; }
+  }
+  if (!found) { let q = (NZ - 1u) * PL + (j + HH) * SX + (i + HH); wvT = S[3u * SIZE + q] * (LB[4u * (NZ - 1u)] + S[4u * SIZE + q]); }
+  if (ctz > zEmit) { wvT = ctt; }
+  let tau = 150.0 * lwp + 41.0 * iwp + 20.0 * swp;
+  C[COL * t + 10u] = tau / (tau + 7.7); C[COL * t + 11u] = pw; C[COL * t + 12u] = wvT;
 }`;
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
       const D = dev.createBuffer({ size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });

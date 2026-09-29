@@ -44,6 +44,12 @@ label.f{display:grid;grid-template-columns:1fr 8.5em;gap:8px;align-items:center;
 label.f input,label.f select{width:100%;box-sizing:border-box;min-width:0}
 label.f.chk{grid-template-columns:auto 1fr;justify-content:start}label.f.chk input{width:auto}
 .foot{margin-top:10px}
+.stormlist{display:flex;flex-direction:column;gap:4px;margin:4px 0 6px}
+.stormlist button{display:flex;gap:8px;align-items:baseline;text-align:left;width:100%;padding:5px 8px;font-size:12px;font-variant-numeric:tabular-nums}
+.stormlist button.sel{border-color:#8fc1ff;background:#132436}.stormlist .sw{width:10px;height:10px;border-radius:50%;flex:none;align-self:center}
+.stormlist .nm{font-weight:600;min-width:3.2em}.stormlist .dt{color:var(--muted);overflow-wrap:anywhere}
+.slabels{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:1}
+.slabels div{position:absolute;transform:translate(-50%,-100%);background:rgba(10,14,19,.78);border:1px solid;border-radius:4px;padding:1px 5px;font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--fg)}
 .missions{display:flex;flex-direction:column;gap:6px;margin-top:6px}.mission{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:4px;padding:6px 8px}
 .mission .mark{font-size:15px;line-height:1.2;color:var(--muted)}.mission.done .mark{color:#1baf7a}
 .log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:var(--bg);padding:8px;border:1px solid #1d2833;max-height:120px;overflow:auto}
@@ -54,6 +60,7 @@ a{color:#8fc1ff}
 <body>
 <div id="stage"><div id="chartBar" class="chartbar"></div><canvas id="view"></canvas><canvas id="chart" hidden></canvas>
 <div class="ov"><button id="ovRun" title="執行 / 暫停 (空白鍵) / run / pause (space)">▶</button><button id="ovStep" title="單步 / one step">⏭</button><span class="t" id="ovTime">0 min</span></div>
+<div id="stormLabels" class="slabels"></div>
 <div class="flypad" id="flyPad" hidden><span></span><button data-k="w" title="前進 / forward">▲</button><button data-k="e" title="上升 / up">⤒</button><button data-k="a" title="左 / left">◀</button><button data-k="s" title="後退 / back">▼</button><button data-k="d" title="右 / right">▶</button><span></span><span></span><button data-k="q" title="下降 / down">⤓</button></div>
 </div>
 <section class="panel">
@@ -91,6 +98,8 @@ a{color:#8fc1ff}
 <div class="row tcOnly"><span>中心氣壓降 / Pressure deficit</span><span id="dp">—</span></div>
 <div class="row tcOnly"><span>眼牆 / Eyewalls</span><span id="eyewalls">—</span></div>
 <div class="row tcOnly" title="上一個模式小時：核心 < 60 km、外圍 100–300 km 的平均雨率，與外圍 > 1 mm/h 的面積比 / last model hour: mean rain rate in the core (< 60 km) and the outer region (100–300 km), and the outer area above 1 mm/h"><span>雨量 核心 · 外圍 / Rain core · outer</span><span id="tcrain">—</span></div>
+<div class="row"><span>風暴 / Storms</span><span id="stormCount">—</span></div>
+<div id="stormList" class="stormlist"></div>
 <div class="row stormOnly"><span>近地面渦度 · 對地風 / ζ · ground wind</span><span id="zeta">—</span></div>
 <div class="row stormOnly"><span>龍捲 / Tornado</span><span id="tornado">—</span></div>
 </details>

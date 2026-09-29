@@ -86,6 +86,24 @@ export async function regionalTests(): Promise<void> {
     const du = cmp(m, st, 0, m.u, nz), dth = cmp(m, st, 3, m.th, nz), dq = cmp(m, st, 5, m.scalars[QV]!, nz);
     gcheck('regional TC physics with constant cooling and vmin 4 m/s, 5 steps: u < 1e-3, theta < 1e-5, qv < 1e-3', du < 1e-3 && dth < 1e-5 && dq < 1e-3, `${du.toExponential(1)} ${dth.toExponential(1)} ${dq.toExponential(1)}`);
   }
+  // ---- surface gustiness and a geostrophic trade wind (Coriolis on the departure from the background wind)
+  {
+    const nx = 16, nz = 16, dx = 20000, dz = 1250, f = 5e-5;
+    const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: 60, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 5000, dampRate: 1 / 300, kdiff2: 0, geostrophic: true }, tropicalSounding(301.15, 200, 0.6), 3);
+    const mp = new KesslerMicrophysics(m);
+    m.setBaseWind((z) => ({ u: -7 * Math.max(0, Math.min(1, (12000 - z) / 9000)), v: 0 }));
+    const cfg = { lh: 4000, lv: 100, sst: 301.15, ck: 1.2e-3, radTau: 12 * 3600, radMax: 2 / 86400, vmin: 1, radConst: 1.5 / 86400, gust: true };
+    new RegionalPhysics(m, cfg);
+    insertVortex(m, f, 15);
+    for (let s = 0; s < 30; s++) { m.step(); mp.apply(60); }
+    const g = new GpuRegional(device, m, { moist: true, physics: cfg });
+    g.uploadFrom(m);
+    for (let s = 0; s < 5; s++) { m.step(); mp.apply(60); }
+    g.step(5);
+    const st = await g.readState();
+    const du = cmp(m, st, 0, m.u, nz), dth = cmp(m, st, 3, m.th, nz), dq = cmp(m, st, 5, m.scalars[QV]!, nz);
+    gcheck('regional TC physics with gustiness and a geostrophic trade wind, 5 steps: u < 1e-3, theta < 1e-5, qv < 1e-3', du < 1e-3 && dth < 1e-5 && dq < 1e-3, `${du.toExponential(1)} ${dth.toExponential(1)} ${dq.toExponential(1)}`);
+  }
 }
 
 /** Analytic global state for nesting tests: midlatitude jet with a wave, moist lower troposphere. */
@@ -327,6 +345,8 @@ export async function regionalChartsTest(): Promise<void> {
   };
   const basic = [C.wmax, C.wmin, C.cmax, C.pmax, C.ctopT].map(rel);
   gcheck('charts: GPU column extremes and cloud-top temperature match the CPU (rel L2 < 1e-4)', basic.every((x) => x < 1e-4), basic.map((x) => x.toExponential(1)).join(' '));
+  const sat = [C.vis, C.pw, C.wvT].map(rel);
+  gcheck('charts: GPU cloud albedo, precipitable water and water-vapour channel match the CPU (rel L2 < 1e-3)', sat.every((x) => x < 1e-3), sat.map((x) => x.toExponential(1)).join(' '));
   let dz2 = 0, ctzMis = 0;
   for (let q = 0; q < nx * nx; q++) {
     if (cpu[COL * q + C.dbz]! > 0) dz2 = Math.max(dz2, Math.abs(d.col[COL * q + C.dbz]! - cpu[COL * q + C.dbz]!));

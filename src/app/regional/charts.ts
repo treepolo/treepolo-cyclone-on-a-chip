@@ -5,6 +5,7 @@
 
 import { parcelAscent, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { CameraMode } from './volume.js';
+import type { StormNow } from '../../regional/storms.js';
 import { type ChartRequest, type RegionalFrame, type RegionalExperiment, type TcRain } from './protocol.js';
 import { INK, SERIES, FONT, FONT_SMALL, type Rect, type Scale, type ScaleKind, colorOf, niceCeil, ticks, fmt, drawField, drawColorbar, drawAxes, drawContours, drawArrow, drawBarb, haloText, tooltip } from './chartDraw.js';
 
@@ -55,10 +56,14 @@ const VI: Record<string, VarInfo> = {
   cin: { label: '地面氣塊對流抑制 / Surface-based CIN', unit: 'J/kg', scale: 'seq', hi: 0, reverse: true, clear: 1, digits: 0 },
   vt: { label: '切向風 / Tangential wind', unit: 'm/s', scale: 'div', digits: 1 },
   vr: { label: '徑向風（負：流入）/ Radial wind (negative: inflow)', unit: 'm/s', scale: 'div', digits: 1 },
+  vis: { label: '可見光雲圖（雲反照率）/ Visible satellite (cloud albedo)', unit: '', scale: 'vis', lo: 0, hi: 1, digits: 2 },
+  wvT: { label: '水氣雲圖（上層水氣）/ Water-vapour imagery (upper-level moisture)', unit: '°C', scale: 'wv', lo: -80, hi: 20, digits: 1 },
+  pw: { label: '可降水量 / Precipitable water', unit: 'mm', scale: 'seq', digits: 1 },
+  div: { label: '水平輻散（高層正值 = 外流）/ Horizontal divergence (aloft positive = outflow)', unit: '10⁻⁵ s⁻¹', scale: 'div', digits: 1 },
   cond: { label: '總凝結物 / Total condensate', unit: 'g/kg', scale: 'seq', lo: 0, clear: 0.01, gamma: 0.5, digits: 2 },
 };
-const SLICE_CHOICES: SliceVar[] = ['dbz', 'w', 'speed', 'zeta', 'thp', 'thetaE', 'rh', 'pp', 'qv', 'cloud', 'precip', 'u', 'v'];
-const MAP_CHOICES: MapVar[] = ['dbzMax', 'ctopT', 'rainRate', 'rain', 'snow', 'uh', 'wMax', 'slp', 'sfcWind', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'ctopZ'];
+const SLICE_CHOICES: SliceVar[] = ['dbz', 'w', 'speed', 'zeta', 'div', 'thp', 'thetaE', 'rh', 'pp', 'qv', 'cloud', 'precip', 'u', 'v'];
+const MAP_CHOICES: MapVar[] = ['vis', 'ctopT', 'wvT', 'dbzMax', 'rainRate', 'pw', 'rain', 'snow', 'uh', 'wMax', 'slp', 'sfcWind', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'ctopZ'];
 const SECTION_CHOICES: SecVar[] = ['dbz', 'w', 'along', 'normal', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'qv', 'pp', 'T'];
 const RZ_CHOICES: RzVar[] = ['vt', 'vr', 'w', 'thp', 'cond'];
 
@@ -124,6 +129,11 @@ export class RegionalCharts {
   private grid: GridInfo | null = null;
   private frame: RegionalFrame | null = null;
   private samples: Sample[] = [];
+  /** per-storm samples (ground-relative), the storm whose numbers the series show (null: domain maxima) and the
+   *  colour slot of each storm (fixed when it first appears) */
+  private storms = new Map<number, { name: string; kind: StormNow['kind']; pts: (StormNow & { t: number })[] }>();
+  private selStorm: number | null = null;
+  private stormColor = new Map<number, number>();
   private hov: { t: number; dr: number; vt: number[] }[] = [];
   private hover: { x: number; y: number } | null = null;
   private drag: { x0: number; y0: number; px: number; py: number; x1: number; y1: number; moved: boolean } | null = null;
@@ -160,13 +170,19 @@ export class RegionalCharts {
   setGrid(g: GridInfo, keepSeries: boolean): void {
     const same = this.grid && this.grid.nx * this.grid.dx === g.nx * g.dx && this.grid.ny * this.grid.dy === g.ny * g.dy;
     this.grid = g;
-    if (!keepSeries) { this.samples = []; this.hov = []; }
+    if (!keepSeries) { this.samples = []; this.hov = []; this.storms.clear(); this.stormColor.clear(); this.selStorm = null; }
     if (!same) { this.line = null; this.point = null; }
     this.level = this.nearestLevel(this.view === 'slice' ? this.levelZ() : 1500);
     this.frame = null;
     this.buildBar();
     this.sendRequest();
   }
+
+  /** Show the numbers of one storm in the time series (null: the domain maxima). */
+  selectStorm(id: number | null): void { this.selStorm = id; if (this.view !== '3d') this.redraw(); }
+  get selectedStorm(): number | null { return this.selStorm; }
+  /** Colour of a storm (its fixed slot). */
+  stormColour(id: number): string { return SERIES[this.stormColor.get(id) ?? 0]!; }
 
   /** The land mask changed (painting, or the domain moved over painted ground). */
   setLand(land: Uint8Array | null): void { if (this.grid) { this.grid.land = land; if (this.view !== '3d') this.redraw(); } }
@@ -179,7 +195,19 @@ export class RegionalCharts {
     const s = f.stats;
     const smp: Sample = { t: f.time, dp: s.dp, vmax: s.vmax, rmw: s.rmw, wmax: s.wmax, zeta: s.zetaMax, uh: s.uhMax, dbz: s.dbzMax, vg: s.vGround, rain: s.rainmax, cape: s.capeMax, storm: s.storm, ew: s.eyewalls, tcRain: s.tcRain ?? null };
     const last = this.samples[this.samples.length - 1];
-    if (last && f.time < last.t - 1e-6) { this.samples = []; this.hov = []; }
+    if (last && f.time < last.t - 1e-6) { this.samples = []; this.hov = []; this.storms.clear(); this.stormColor.clear(); }
+    for (const st of s.storms ?? []) {
+      let e = this.storms.get(st.id);
+      if (!e) { e = { name: st.name, kind: st.kind, pts: [] }; this.storms.set(st.id, e); this.stormColor.set(st.id, this.stormColor.size % SERIES.length); }
+      const p = e.pts[e.pts.length - 1], row = { ...st, t: f.time };
+      if (p && Math.abs(p.t - f.time) < 1e-6) e.pts[e.pts.length - 1] = row; else e.pts.push(row);
+      if (e.pts.length > 3000) e.pts = e.pts.filter((_, i) => i % 2 === 1 || i === e!.pts.length - 1);
+    }
+    // bounded number of remembered storms: forget the oldest ended ones
+    if (this.storms.size > 60) {
+      const live = new Set((s.storms ?? []).map((x) => x.id));
+      for (const id of [...this.storms.keys()]) { if (this.storms.size <= 60) break; if (!live.has(id) && id !== this.selStorm) this.storms.delete(id); }
+    }
     if (last && Math.abs(f.time - last.t) < 1e-6) this.samples[this.samples.length - 1] = smp; else this.samples.push(smp);
     if (s.vtProfile) {
       const h = this.hov[this.hov.length - 1], row = { t: f.time, dr: s.vtProfile.dr, vt: s.vtProfile.vt };
@@ -745,6 +773,8 @@ export class RegionalCharts {
   // ---------------------------------------------------------------- time series
 
   private drawSeries(area: Rect): void {
+    const sel = this.selStorm !== null ? this.storms.get(this.selStorm) : undefined;
+    if (sel) { this.drawStormSeries(area, sel); return; }
     const ctx = this.ctx, S = this.samples;
     if (S.length < 2) { this.centerText('等待資料… / Waiting for data… / 時間序列在模式執行時累積 / series accumulate while the model runs', area); return; }
     const tc = !!this.grid?.tc;
@@ -762,7 +792,7 @@ export class RegionalCharts {
       { label: '最大對地地面風 / Max ground-relative surface wind', unit: 'm/s', get: (s) => s.vg, digits: 1 },
       { label: '最大回波 / Max reflectivity', unit: 'dBZ', get: (s) => s.dbz, digits: 0 },
     ];
-    const hasTrack = S.some((s) => s.storm);
+    const hasTrack = S.some((s) => s.storm) || this.storms.size > 0;
     const wide = area.w > 820;
     const trackR: Rect | null = hasTrack ? (wide ? { x: area.x + area.w * 0.64 + 40, y: area.y + 26, w: area.w * 0.36 - 60, h: Math.min(area.h - 70, area.w * 0.36 - 60) } : null) : null;
     const colW = trackR ? area.w * 0.64 : area.w;
@@ -805,32 +835,100 @@ export class RegionalCharts {
       tooltip(ctx, [`t = ${(s.t / 3600).toFixed(2)} h`, ...panels.map((pn) => { const v = pn.get(s); return `${zh(pn.label)}: ${v === null ? '—' : fmt(v, pn.digits)} ${pn.unit}`; })], hover!.x, hover!.y, this.canvas.clientWidth, this.canvas.clientHeight);
     }
     this.plotF = { r: rects[0]!, kind: 'series', x0: t0, x1: t1, y0: 0, y1: 1, panels: rects };
-    if (trackR) this.drawTrack(trackR, hi >= 0 ? S[hi]! : null);
+    if (trackR) this.drawTrack(trackR, hi >= 0 ? S[hi]!.t : null);
   }
 
-  /** Storm track (ground-relative positions of the strongest storm column, or the TC centre). */
-  private drawTrack(r: Rect, mark: Sample | null): void {
-    const ctx = this.ctx, pts = this.samples.filter((s) => s.storm);
-    if (pts.length === 0) return;
+  /** Time series of one storm: vortices pressure deficit, maximum wind, radius of maximum wind and minimum pressure;
+   *  cells maximum updraft, updraft helicity, reflectivity and updraft area. */
+  private drawStormSeries(area: Rect, st: { name: string; kind: StormNow['kind']; pts: (StormNow & { t: number })[] }): void {
+    const ctx = this.ctx, S = st.pts;
+    if (S.length < 2) { this.centerText(`${st.name}：等待資料… / waiting for data…`, area); return; }
+    type P = { label: string; unit: string; get: (s: StormNow) => number | null; digits: number };
+    const panels: P[] = st.kind === 'vortex' ? [
+      { label: '氣壓降（相對環境）/ Pressure deficit', unit: 'hPa', get: (s) => s.dp ?? null, digits: 1 },
+      { label: '最大地面風（150 km 內）/ Max surface wind', unit: 'm/s', get: (s) => s.vmax ?? null, digits: 1 },
+      { label: '最大風速半徑 / Radius of max wind', unit: 'km', get: (s) => (s.rmw === undefined ? null : s.rmw / 1000), digits: 0 },
+      { label: '中心氣壓 / Central pressure', unit: 'hPa', get: (s) => s.pmin ?? null, digits: 1 },
+    ] : [
+      { label: '最大上升速度 / Max updraft', unit: 'm/s', get: (s) => s.wmax ?? null, digits: 1 },
+      { label: '上升氣流螺旋度（2–5 km）/ Updraft helicity', unit: 'm²/s²', get: (s) => s.uh ?? null, digits: 0 },
+      { label: '最大回波 / Max reflectivity', unit: 'dBZ', get: (s) => s.dbz ?? null, digits: 0 },
+      { label: '上升氣流面積（≥ 10 m/s）/ Updraft area', unit: 'km²', get: (s) => s.area ?? null, digits: 0 },
+    ];
+    const wide = area.w > 820;
+    const trackR: Rect | null = wide ? { x: area.x + area.w * 0.64 + 40, y: area.y + 26, w: area.w * 0.36 - 60, h: Math.min(area.h - 70, area.w * 0.36 - 60) } : null;
+    const colW = trackR ? area.w * 0.64 : area.w;
+    const t0 = S[0]!.t / 3600, t1 = Math.max(t0 + 1e-3, S[S.length - 1]!.t / 3600), ph = (area.h - 30) / panels.length;
+    const rects: Rect[] = [], hover = this.hover, colour = this.stormColour(this.selStorm ?? 0);
+    let hi = -1;
+    panels.forEach((pn, n) => {
+      const r: Rect = { x: area.x + 64, y: area.y + 20 + n * ph, w: colW - 64 - 24, h: ph - 44 };
+      rects.push(r);
+      let lo = Infinity, hiV = -Infinity;
+      for (const s of S) { const v = pn.get(s); if (v !== null && Number.isFinite(v)) { lo = Math.min(lo, v); hiV = Math.max(hiV, v); } }
+      if (!Number.isFinite(lo)) { lo = 0; hiV = 1; }
+      if (hiV - lo < 1e-9) hiV = lo + 1;
+      const pad = 0.05 * (hiV - lo); lo -= pad; hiV += pad;
+      drawAxes(ctx, r, { lo: t0, hi: t1, label: n === panels.length - 1 ? '模式時間 / model time (h)' : '' }, { lo, hi: hiV, label: '' }, true);
+      const X = (t: number): number => r.x + (t - t0) / (t1 - t0) * r.w, Y = (v: number): number => r.y + r.h - (v - lo) / (hiV - lo) * r.h;
+      ctx.strokeStyle = colour; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath();
+      let pen = false;
+      for (const s of S) { const v = pn.get(s); if (v === null || !Number.isFinite(v)) { pen = false; continue; } const x = X(s.t / 3600), y = Y(v); if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y); pen = true; }
+      ctx.stroke();
+      const lastV = pn.get(S[S.length - 1]!);
+      ctx.font = FONT_SMALL; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+      const tail = `（${pn.unit}）${lastV === null ? '' : ' · ' + fmt(lastV, pn.digits)}`, full = `${st.name} ${pn.label}${tail}`;
+      ctx.fillText(ctx.measureText(full).width <= area.x + area.w - r.x - 4 ? full : `${st.name} ${zh(pn.label)}${tail}`, r.x, r.y - 3);
+      if (hover && hi < 0 && hover.x >= r.x && hover.x <= r.x + r.w && hover.y >= area.y && hover.y <= area.y + area.h) {
+        const th = t0 + (hover.x - r.x) / r.w * (t1 - t0);
+        let best = 0; for (let i = 1; i < S.length; i++) if (Math.abs(S[i]!.t / 3600 - th) < Math.abs(S[best]!.t / 3600 - th)) best = i; hi = best;
+      }
+    });
+    if (hi >= 0) {
+      const s = S[hi]!;
+      rects.forEach((r) => { const x = r.x + (s.t / 3600 - t0) / (t1 - t0) * r.w; ctx.fillStyle = INK.secondary; ctx.fillRect(x, r.y, 1, r.h); });
+      tooltip(ctx, [`${st.name} · t = ${(s.t / 3600).toFixed(2)} h`, ...panels.map((pn) => { const v = pn.get(s); return `${zh(pn.label)}: ${v === null ? '—' : fmt(v, pn.digits)} ${pn.unit}`; })], hover!.x, hover!.y, this.canvas.clientWidth, this.canvas.clientHeight);
+    }
+    this.plotF = { r: rects[0]!, kind: 'series', x0: t0, x1: t1, y0: 0, y1: 1, panels: rects };
+    if (trackR) this.drawTrack(trackR, hi >= 0 ? S[hi]!.t : null);
+  }
+
+  /** Tracks of every storm (ground-relative), each in its own colour and named at its latest position; the selected
+   *  storm drawn heavier; before storms were catalogued, the main storm's samples. `mark`: a time to mark on the tracks. */
+  private drawTrack(r: Rect, mark: number | null): void {
+    const ctx = this.ctx;
+    type Pt = { t: number; x: number; y: number };
+    const tracks: { id: number; name: string; pts: Pt[] }[] = [];
+    for (const [id, e] of this.storms) if (e.pts.length) tracks.push({ id, name: e.name, pts: e.pts });
+    if (!tracks.length) { const pts = this.samples.filter((s) => s.storm).map((s) => ({ t: s.t, x: s.storm!.x, y: s.storm!.y })); if (pts.length) tracks.push({ id: -1, name: '', pts }); }
+    if (!tracks.length) return;
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const s of pts) { x0 = Math.min(x0, s.storm!.x); x1 = Math.max(x1, s.storm!.x); y0 = Math.min(y0, s.storm!.y); y1 = Math.max(y1, s.storm!.y); }
-    const span = Math.max(x1 - x0, y1 - y0, 10000) * 1.15, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    for (const tr of tracks) for (const p of tr.pts) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+    const span = Math.max(x1 - x0, y1 - y0, 10000) * 1.2, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
     const lo = { x: (cx - span / 2) / 1000, y: (cy - span / 2) / 1000 }, hiK = { x: (cx + span / 2) / 1000, y: (cy + span / 2) / 1000 };
     drawAxes(ctx, r, { lo: lo.x, hi: hiK.x, label: '對地 x / ground-relative x (km)' }, { lo: lo.y, hi: hiK.y, label: 'y (km)' }, true);
     const X = (x: number): number => r.x + (x / 1000 - lo.x) / (hiK.x - lo.x) * r.w, Y = (y: number): number => r.y + r.h - (y / 1000 - lo.y) / (hiK.y - lo.y) * r.h;
     ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
-    ctx.strokeStyle = SERIES[0]!; ctx.lineWidth = 2; ctx.beginPath();
-    pts.forEach((s, i) => { if (i === 0) ctx.moveTo(X(s.storm!.x), Y(s.storm!.y)); else ctx.lineTo(X(s.storm!.x), Y(s.storm!.y)); });
-    ctx.stroke();
-    const dot = (s: Sample, filled: boolean): void => { ctx.beginPath(); ctx.arc(X(s.storm!.x), Y(s.storm!.y), 5, 0, 2 * Math.PI); ctx.lineWidth = 2; ctx.strokeStyle = INK.surface; if (filled) { ctx.fillStyle = INK.primary; ctx.fill(); } ctx.stroke(); if (!filled) { ctx.strokeStyle = INK.primary; ctx.lineWidth = 1.5; ctx.stroke(); } };
-    dot(pts[0]!, false); dot(pts[pts.length - 1]!, true);
-    if (mark?.storm) { ctx.beginPath(); ctx.arc(X(mark.storm.x), Y(mark.storm.y), 7, 0, 2 * Math.PI); ctx.strokeStyle = '#fafafa'; ctx.lineWidth = 1.5; ctx.stroke(); }
+    for (const tr of tracks) {
+      const col = tr.id < 0 ? SERIES[0]! : this.stormColour(tr.id), selected = tr.id === this.selStorm;
+      ctx.strokeStyle = col; ctx.lineWidth = selected ? 3 : 2; ctx.lineJoin = 'round'; ctx.beginPath();
+      tr.pts.forEach((p, i) => { if (i === 0) ctx.moveTo(X(p.x), Y(p.y)); else ctx.lineTo(X(p.x), Y(p.y)); });
+      ctx.stroke();
+      const a = tr.pts[0]!, b = tr.pts[tr.pts.length - 1]!;
+      // start: hollow ring; latest: filled dot with a surface-coloured ring
+      ctx.beginPath(); ctx.arc(X(a.x), Y(a.y), 4, 0, 2 * Math.PI); ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.beginPath(); ctx.arc(X(b.x), Y(b.y), selected ? 6 : 5, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill(); ctx.strokeStyle = INK.surface; ctx.lineWidth = 2; ctx.stroke();
+      if (mark !== null) {
+        let best = tr.pts[0]!; for (const p of tr.pts) if (Math.abs(p.t - mark) < Math.abs(best.t - mark)) best = p;
+        if (Math.abs(best.t - mark) < 1800) { ctx.beginPath(); ctx.arc(X(best.x), Y(best.y), 7, 0, 2 * Math.PI); ctx.strokeStyle = INK.primary; ctx.lineWidth = 1.5; ctx.stroke(); }
+      }
+      if (tr.name) { ctx.font = FONT_SMALL; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(tr.name, X(b.x) + 7, Y(b.y) - 4); }
+    }
     ctx.restore();
     ctx.font = FONT_SMALL; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-    const tc = !!this.grid?.tc;
-    ctx.fillText(tc ? '颱風中心路徑 / TC centre track' : '風暴路徑 / Storm track', r.x, r.y - 4);
+    ctx.fillText(tracks.length > 1 ? `風暴路徑（${tracks.length} 個）/ Storm tracks` : '風暴路徑 / Storm track', r.x, r.y - 4);
     ctx.fillStyle = INK.secondary; ctx.textBaseline = 'top';
-    ctx.fillText('○ 起點 / start  ● 目前 / now' + (tc ? '' : ' · 位置：最強 UH（無旋轉時為最強上升氣流）/ position: max UH (max updraft before rotation)'), r.x, r.y + r.h + 32, r.w + 40);
+    ctx.fillText('○ 起點 / start  ● 目前 / now', r.x, r.y + r.h + 32);
   }
 
   // ---------------------------------------------------------------- Hovmoller

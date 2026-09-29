@@ -339,4 +339,52 @@ void DRY_AIR;
   check('set-ups: an 8 m/s trade wind stays geostrophic (|v| < 0.05 m/s after 1 h)', dv < 0.05, dv);
 }
 
+// Storm catalogue: nothing before a storm exists; two vortices get two lasting identities while they move (also
+// across a domain roll); two updraft areas are two cells
+{
+  const { findVortices, findCells, StormCatalog } = await import('../regional/storms.js');
+  const { COL, C } = await import('../regional/diagnostics.js');
+  const { tcSounding } = await import('../regional/tropical.js');
+  const nx = 60, dx = 15000, f = 5e-5;
+  const mm = new RegionalModel({ ...base, nx, ny: nx, nz: 10, dx, dy: dx, dz: 1000, dt: 60, f }, tcSounding('unstable', 301.15), 6);
+  const vortex = (xc: number, yc: number, v: number): void => {
+    for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+      const x = (i + 0.5) * dx - xc, y = (j + 0.5) * dx - yc, r = Math.hypot(x, y), R = 80000, e = Math.exp(-(r * r) / (R * R));
+      const q = mm.idx(i, j, 0);
+      mm.pp[q] = mm.pp[q]! - v * v * e / (1004.5 * 300);            // cyclostrophic-sized pressure dip
+      if (r > 0) { const vt = v * (r / R) * Math.exp(0.5 - 0.5 * (r * r) / (R * R)); mm.u[q] = mm.u[q]! - vt * y / r; mm.v[q] = mm.v[q]! + vt * x / r; }
+    }
+  };
+  const cat = new StormCatalog(), frame = { u: 0, v: 0 }, L = { x: nx * dx, y: nx * dx };
+  cat.update(0, findVortices(mm, frame), { x: 0, y: 0 }, L);
+  const none = cat.active.length;
+  vortex(250000, 300000, 20); vortex(650000, 500000, 30);
+  cat.update(600, findVortices(mm, frame), { x: 0, y: 0 }, L);
+  cat.update(1200, findVortices(mm, frame), { x: 0, y: 0 }, L);
+  const ids1 = cat.active.map((s) => s.id).sort().join(',');
+  // the domain rolls by 5 cells (the origin moves back by the same distance): the storms keep their identities
+  mm.roll(5, 0); cat.update(1800, findVortices(mm, frame), { x: -5 * dx, y: 0 }, L);
+  const ids2 = cat.active.map((s) => s.id).sort().join(',');
+  const strongest = cat.main();
+  check('storms: no storm before one exists, two vortices keep their identities across a roll, the deeper is the main one', none === 0 && ids1 === '1,2' && ids2 === ids1 && (strongest?.dp ?? 0) > 8 && Math.abs((strongest?.x ?? 0) - 650000) < 20000,
+    `before ${none}, ids ${ids1} -> ${ids2}, main ${strongest?.name} (${strongest?.dp?.toFixed(1)} hPa)`);
+  const n = 40, col = new Float32Array(n * n * COL);
+  for (const [ic, jc] of [[10, 10], [30, 25]] as const) for (let j = jc - 1; j <= jc + 1; j++) for (let i = ic - 1; i <= ic + 1; i++) col[COL * (j * n + i) + C.wmax] = 15;
+  const cells = findCells(n, n, 1000, 1000, col, true);
+  check('storms: two updraft areas are two cells', cells.length === 2 && Math.abs(cells[0]!.xd - 10500) < 600, cells.map((c) => `(${(c.xd / 1000).toFixed(1)}, ${(c.yd / 1000).toFixed(1)})`).join(' '));
+}
+
+// Satellite-like columns: a clear tropical column has no cloud albedo, about 50-70 mm of precipitable water and a
+// water-vapour channel temperature of the upper troposphere (-45 to -10 °C)
+{
+  const { columnDiagnostics, C, COL } = await import('../regional/diagnostics.js');
+  const { tcSounding } = await import('../regional/tropical.js');
+  const mm = new RegionalModel({ ...base, nx: 4, ny: 4, nz: 50, dx: 5000, dy: 5000, dz: 500, dt: 10 }, tcSounding('unstable', 301.15), 6);
+  for (let k = 0; k < mm.c.nz; k++) for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) mm.scalars[0]![mm.idx(i, j, k)] = mm.qv0[k]!;
+  const cd = columnDiagnostics(mm), o = COL * 5;
+  const vis = cd[o + C.vis]!, pw = cd[o + C.pw]!, wv = cd[o + C.wvT]! - 273.15;
+  check('satellite columns: clear tropical column: albedo 0, precipitable water 45-75 mm, water-vapour channel -45 to -10 °C', vis === 0 && pw > 45 && pw < 75 && wv > -45 && wv < -10,
+    `albedo ${vis.toFixed(2)}, PW ${pw.toFixed(1)} mm, WV ${wv.toFixed(1)} °C`);
+}
+
 summary('regional');

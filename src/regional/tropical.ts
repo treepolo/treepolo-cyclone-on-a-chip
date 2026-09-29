@@ -172,9 +172,9 @@ export function tcMetrics(m: RegionalModel): { pmin: number; vmax: number; ic: n
  * minimum ("moat") at least 10 % below the weaker one indicate concentric eyewalls; an inner maximum
  * decaying while the outer one strengthens is the signature of an eyewall replacement cycle.
  */
-export function eyewallProfile(m: RegionalModel, z = 1500): { r: number[]; vt: number[]; peaks: { r: number; v: number }[]; concentric: boolean } {
+export function eyewallProfile(m: RegionalModel, z = 1500, centre?: { ic: number; jc: number }): { r: number[]; vt: number[]; peaks: { r: number; v: number }[]; concentric: boolean } {
   const { nx, ny, dx, nz } = m.c, sx = m.sx;
-  const { ic, jc } = tcMetrics(m);
+  const { ic, jc } = centre ?? tcMetrics(m);
   let k = 0; for (let kk = 0; kk < nz; kk++) if (Math.abs(m.zc[kk]! - z) < Math.abs(m.zc[k]! - z)) k = kk;
   const nb = Math.floor(Math.min(nx, ny) / 2), sum = new Float64Array(nb), cnt = new Float64Array(nb);
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
