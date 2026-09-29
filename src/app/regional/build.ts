@@ -87,7 +87,7 @@ export function buildModel(input: RegionalSetup, gpuOk: boolean): Built {
       lh: les ? 0.21 * delta : 0.2 * s.dx, lv: les ? 0.21 * delta : 100, sst: 0, ck: 1.2e-3,
       radTau: s.radiation === 'relax' ? 12 * 3600 : s.radiation === 'const' ? 12 * 3600 : 0, radMax: (s.radiation === 'relax' ? s.radRate : 2) / 86400,
       radConst: s.radiation === 'const' ? s.radRate / 86400 : 0,
-      vmin: s.vmin, gust: s.gust, blNoise: s.blNoise, frameVel: { ...frame },
+      vmin: s.vmin, gust: s.gust, blNoise: s.blNoise, cumulus: !!s.cumulus, frameVel: { ...frame },
     };
     if (s.fluxes) {
       const n2 = nx * nx, sea = s.surface === 'sea';
@@ -107,7 +107,7 @@ export function setupFromLegacy(exp: RegionalExperiment, tcEnv: Partial<AxiParam
   if (exp === 'tc' || exp === 'tc_hr' || exp === 'tc_3') {
     const e = { snd: 're87', radConst: 0, radMax: 2, vmin: 1, blNoise: 0, sst: 301.15, vmax0: 15, f: 5e-5, ...(tcEnv ?? {}) };
     return { ...s, sounding: e.snd === 'unstable' ? 'tropical' : 're87', radiation: e.radConst ? 'const' : 'relax', radRate: e.radConst || e.radMax, vmin: e.vmin, blNoise: e.blNoise ?? 0,
-      gust: false, sst: e.sst - 273.15, initAmp: e.vmax0, lat: Math.asin(Math.min(1, e.f / (2 * 7.292e-5))) * 180 / Math.PI };
+      gust: false, cumulus: false, sst: e.sst - 273.15, initAmp: e.vmax0, lat: Math.asin(Math.min(1, e.f / (2 * 7.292e-5))) * 180 / Math.PI };
   }
   if (exp === 'tornado' || exp === 'tornado_c') {
     const e = tornadoEnv ?? TORNADO_WK82;

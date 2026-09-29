@@ -12,6 +12,7 @@ import { DRY_AIR } from '../core/constants.js';
 import { RegionalModel } from './core.js';
 import { QV, QR } from './kessler.js';
 import { pcg, rnd } from './tracers.js';
+import { applyCumulus, cumulusScale, type CumulusInfo } from './cumulus.js';
 
 export interface RegionalPhysicsConfig {
   lh: number;              // horizontal mixing length (m)
@@ -42,6 +43,8 @@ export interface RegionalPhysicsConfig {
    *  surface buoyancy flux (Beljaars 1995, boundary layer 1 km deep) and Ug from the near-surface rain rate (convective
    *  downdraft gusts, Redelsperger et al. 2000), never below vmin: calm air over a warm sea still evaporates */
   gust?: boolean;
+  /** scale-aware simplified Betts-Miller cumulus parameterization (cumulus.ts), applied at the start of every step */
+  cumulus?: boolean;
 }
 
 /** Effective wind speed of the bulk fluxes (m/s): mean wind `spd`, gustiness from the surface buoyancy flux (surface minus
@@ -97,8 +100,12 @@ export class RegionalPhysics {
     this.shf = new Float64Array(m.c.nx * m.c.ny);
     this.lhf = new Float64Array(m.c.nx * m.c.ny);
     m.physicsTend = (mm, t, stage): void => this.tendencies(mm, t, stage);
-    if ((cfg.blNoise ?? 0) > 0) m.preStep = (mm): void => this.noise(mm);
+    const noise = (cfg.blNoise ?? 0) > 0, cu = !!cfg.cumulus && cumulusScale(m.c.dx) > 0;
+    if (cu) { const n = m.c.nx * m.c.ny; this.cu = { kb: new Int16Array(n).fill(-1), kt: new Int16Array(n).fill(-1), rate: new Float32Array(n) }; }
+    if (noise || cu) m.preStep = (mm): void => { if (noise) this.noise(mm); if (this.cu) applyCumulus(mm, mm.c.dt, mm.scalars.length >= 6, this.cu); };
   }
+  /** parameterized convection of the last step (cloud base / top level, rain rate), null without the scheme */
+  cu: CumulusInfo | null = null;
 
   /** last noise interval applied (the first step only records it) */
   private noiseEpoch = -1;

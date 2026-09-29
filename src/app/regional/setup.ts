@@ -37,6 +37,8 @@ export interface RegionalSetup {
   radiation: Radiation; radRate: number;
   /** minimum wind in the surface fluxes (m/s), surface gustiness, boundary-layer perturbations (K per 10 min) */
   vmin: number; gust: boolean; blNoise: number;
+  /** scale-aware cumulus parameterization (sub-grid convection on grids coarser than 3 km, full from 12 km) */
+  cumulus: boolean;
   /** initial disturbance: balanced warm-core vortex (vmax m/s), warm bubble (K), or none */
   init: InitKind; initAmp: number;
 }
@@ -44,12 +46,12 @@ export interface RegionalSetup {
 /** Tropical sea: conditionally unstable sounding, constant cooling, gustiness, trade wind off. */
 const TROPICAL: Omit<RegionalSetup, 'preset' | 'L' | 'dx' | 'top' | 'dz' | 'dt'> = {
   boundary: 'periodic', follow: false, lat: 20, surface: 'sea', sst: 28, fluxes: true, sounding: 'tropical', qvBL: 16,
-  wind: 'calm', windU: 5, windR: 12, windDepth: 1000, radiation: 'const', radRate: 1.5, vmin: 1, gust: true, blNoise: 0.1, init: 'vortex', initAmp: 15,
+  wind: 'calm', windU: 5, windR: 12, windDepth: 1000, radiation: 'const', radRate: 1.5, vmin: 1, gust: true, blNoise: 0.1, cumulus: true, init: 'vortex', initAmp: 15,
 };
 /** Continental convective-storm environment: WK82 sounding, no surface fluxes or radiation. */
 const STORM: Omit<RegionalSetup, 'preset' | 'L' | 'dx' | 'top' | 'dz' | 'dt'> = {
   boundary: 'periodic', follow: false, lat: 0, surface: 'land', sst: 28, fluxes: false, sounding: 'wk82', qvBL: 14,
-  wind: 'shear', windU: 30, windR: 12, windDepth: 1000, radiation: 'none', radRate: 1.5, vmin: 1, gust: false, blNoise: 0, init: 'bubble', initAmp: 2,
+  wind: 'shear', windU: 30, windR: 12, windDepth: 1000, radiation: 'none', radRate: 1.5, vmin: 1, gust: false, blNoise: 0, cumulus: false, init: 'bubble', initAmp: 2,
 };
 /** Tornadic supercell: strong low-level shear, moist boundary layer, open boundaries following the storm, surface drag. */
 const TORNADIC: Omit<RegionalSetup, 'preset' | 'L' | 'dx' | 'top' | 'dz' | 'dt'> = {
@@ -88,7 +90,7 @@ export function sanitize(s: RegionalSetup): RegionalSetup {
   const L = c(Math.round(s.L / dx) * dx, 16 * dx, 1024 * dx, 1200000), top = c(Math.round(Math.min(s.top, 200 * dz) / dz) * dz, 8 * dz, 40000, 25000);
   return { ...s, dx, dz, L, top, dt: c(s.dt, 0, 2 * defaultDt({ dx, dz }), 0), lat: c(s.lat, -80, 80, 20), sst: c(s.sst, -2, 36, 28), qvBL: c(s.qvBL, 8, 20, 14),
     windU: c(s.windU, -60, 60, 5), windR: c(s.windR, 0, 40, 12), windDepth: c(s.windDepth, 250, 5500, 1000), radRate: c(s.radRate, 0, 5, 1.5),
-    vmin: c(s.vmin, 0, 10, 1), blNoise: c(s.blNoise, 0, 1, 0.1), initAmp: c(s.initAmp, 0, s.init === 'vortex' ? 60 : 10, s.init === 'vortex' ? 15 : 2) };
+    vmin: c(s.vmin, 0, 10, 1), blNoise: c(s.blNoise, 0, 1, 0.1), cumulus: !!s.cumulus, initAmp: c(s.initAmp, 0, s.init === 'vortex' ? 60 : 10, s.init === 'vortex' ? 15 : 2) };
 }
 
 /** Short description of a set-up (Chinese / English). */
@@ -97,5 +99,5 @@ export function describe(s: RegionalSetup): string {
   const snd = { tropical: '熱帶不穩定 / unstable tropical', re87: 'RE87 中性 / neutral', wk82: `WK82（${s.qvBL} g/kg）` }[s.sounding];
   const wind = { calm: '無風 / calm', trade: `信風 ${s.windU} m/s / trade`, shear: `風切 ${s.windU} m/s / shear`, quarter: `四分之一圓 ${s.windR}–${s.windU} m/s / quarter circle` }[s.wind];
   return `${km(s.L)} × ${km(s.top)}，Δx ${km(s.dx)}，${s.boundary === 'periodic' ? '週期邊界 / periodic' : '開放邊界 / open'}${s.follow ? '，跟隨風暴 / following' : ''}，` +
-    `${s.lat}°，${s.surface === 'sea' ? `海 ${s.sst} °C / sea` : '陸地 / land'}，${snd}，${wind}`;
+    `${s.lat}°，${s.surface === 'sea' ? `海 ${s.sst} °C / sea` : '陸地 / land'}，${snd}，${wind}${s.cumulus && s.dx > 3000 ? '，積雲參數化 / cumulus scheme' : ''}`;
 }

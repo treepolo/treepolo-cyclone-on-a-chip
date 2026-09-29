@@ -232,6 +232,7 @@ document.querySelectorAll<HTMLDetailsElement>('details[id]').forEach((d) => {
 });
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
+$('cuShow').onchange = (): void => send({ type: 'cuShow', on: $<HTMLInputElement>('cuShow').checked });
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
 $('adaptive').onchange = (): void => send({ type: 'adaptive', on: $<HTMLInputElement>('adaptive').checked });
 // Nesting: embedded by the global page (in-page overlay, #nest...) or opened with ?nest=1; the

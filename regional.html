@@ -95,6 +95,7 @@ a{color:#8fc1ff}
 <label class="f"><span>地面 / Ground</span><select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="snow">累積雪與霰 / Snow + graupel</option><option value="wind">地面風速 / Surface wind</option><option value="theta">地面溫度擾動 / Surface θ′</option><option value="none">海陸（只看雲）/ Sea and land only</option></select></label>
 <div id="legend" class="muted"></div>
 <label class="f"><span>雲的不透明度 / Cloud opacity</span><input id="cloudK" type="range" min="2" max="80" value="35" /></label>
+<label class="f chk" title="積雲參數化代表的次網格對流：半透明的塔從雲底到雲頂，雨越大越濃；淺對流是薄的積雲。只在有積雲方案的粗網格出現 / the sub-grid convection of the cumulus scheme: translucent towers from cloud base to top, denser with more rain; shallow convection as thin cumulus; only on coarse grids with the scheme"><input id="cuShow" type="checkbox" checked /><span>顯示次網格積雲（參數化）/ Show parameterized convection</span></label>
 </details>
 
 <details id="secDiag" open><summary>診斷 / Diagnostics</summary>

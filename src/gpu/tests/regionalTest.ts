@@ -2,7 +2,7 @@
 import { RegionalModel } from '../../regional/core.js';
 import { KesslerMicrophysics, weismanKlemp, QV, QC, QR } from '../../regional/kessler.js';
 import { RegionalPhysics } from '../../regional/physics.js';
-import { tropicalSounding, insertVortex } from '../../regional/tropical.js';
+import { tropicalSounding, insertVortex, tcSounding } from '../../regional/tropical.js';
 import { GpuRegional, COL } from '../regionalGpu.js';
 import { gcheck, getDevice } from './harness.js';
 import { nestFromGlobal, GlobalSnapshot } from '../../regional/nest.js';
@@ -104,6 +104,28 @@ export async function regionalTests(): Promise<void> {
     const st = await g.readState();
     const du = cmp(m, st, 0, m.u, nz), dth = cmp(m, st, 3, m.th, nz), dq = cmp(m, st, 5, m.scalars[QV]!, nz);
     gcheck('regional TC physics with gustiness and a geostrophic trade wind, 5 steps: u < 1e-3, theta < 1e-5, qv < 1e-3', du < 1e-3 && dth < 1e-5 && dq < 1e-3, `${du.toExponential(1)} ${dth.toExponential(1)} ${dq.toExponential(1)}`);
+  }
+  // ---- cumulus parameterization (cumulus.ts) with ice microphysics on a 15 km grid
+  {
+    const nx = 12, nz = 25, dx = 15000, dz = 1000, f = 5e-5;
+    const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt: 60, nsound: 6, f, beta: 0.3, divDamp: 0.1, dampDepth: 5000, dampRate: 1 / 300, kdiff2: 0 }, tcSounding('unstable', 301.15), 6);
+    const mp = new IceMicrophysics(m);
+    for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+      const q = m.idx(i, j, k);
+      // columns of different moisture: some deep, some shallow, some none
+      m.scalars[QV]![q] = m.qv0[k]! * (0.85 + 0.3 * (((i * 7 + j * 3) % 5) / 4)) * (i % 3 === 0 && m.zc[k]! > 2000 ? 0.5 : 1);
+    }
+    const cfg = { lh: 3000, lv: 100, sst: 301.15, ck: 1.2e-3, radTau: 0, radMax: 0, cumulus: true };
+    const phy = new RegionalPhysics(m, cfg);
+    const g = new GpuRegional(device, m, { moist: true, physics: cfg, ice: true });
+    g.uploadFrom(m);
+    for (let s = 0; s < 3; s++) { m.step(); mp.apply(60); }
+    g.step(3);
+    const st = await g.readState();
+    const dth = cmp(m, st, 3, m.th, nz), dq = cmp(m, st, 5, m.scalars[QV]!, nz), dr = cmp(m, st, 7, m.scalars[QR]!, nz), di = cmp(m, st, 8, m.scalars[QI]!, nz);
+    const cu = phy.cu!, deep = Array.from(cu.kt).filter((x) => x >= 0).length, shallow = Array.from(cu.kt).filter((x) => x < -1).length;
+    gcheck('regional cumulus + ice, 3 steps: theta < 1e-5, qv < 1e-3, qr and qi < 2e-2 (rel L2); deep and shallow columns present',
+      dth < 1e-5 && dq < 1e-3 && dr < 2e-2 && di < 2e-2 && deep > 0 && shallow > 0, `${dth.toExponential(1)} ${dq.toExponential(1)} ${dr.toExponential(1)} ${di.toExponential(1)} (deep ${deep}, shallow ${shallow})`);
   }
   // ---- lasting wind forcings (forcing.ts): a tilted push across the periodic edge and a clockwise rotation
   {

@@ -59,11 +59,12 @@ const VI: Record<string, VarInfo> = {
   vis: { label: '可見光雲圖（雲反照率）/ Visible satellite (cloud albedo)', unit: '', scale: 'vis', lo: 0, hi: 1, digits: 2 },
   wvT: { label: '水氣雲圖（上層水氣）/ Water-vapour imagery (upper-level moisture)', unit: '°C', scale: 'wv', lo: -80, hi: 20, digits: 1 },
   pw: { label: '可降水量 / Precipitable water', unit: 'mm', scale: 'seq', digits: 1 },
+  cuRain: { label: '參數化對流降水率（積雲方案產生）/ Parameterized convective rain', unit: 'mm/h', scale: 'seq', lo: 0, clear: 0.05, gamma: 0.5, digits: 2 },
   div: { label: '水平輻散（高層正值 = 外流）/ Horizontal divergence (aloft positive = outflow)', unit: '10⁻⁵ s⁻¹', scale: 'div', digits: 1 },
   cond: { label: '總凝結物 / Total condensate', unit: 'g/kg', scale: 'seq', lo: 0, clear: 0.01, gamma: 0.5, digits: 2 },
 };
 const SLICE_CHOICES: SliceVar[] = ['dbz', 'w', 'speed', 'zeta', 'div', 'thp', 'thetaE', 'rh', 'pp', 'qv', 'cloud', 'precip', 'u', 'v'];
-const MAP_CHOICES: MapVar[] = ['vis', 'ctopT', 'wvT', 'dbzMax', 'rainRate', 'pw', 'rain', 'snow', 'uh', 'wMax', 'slp', 'sfcWind', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'ctopZ'];
+const MAP_CHOICES: MapVar[] = ['vis', 'ctopT', 'wvT', 'dbzMax', 'rainRate', 'cuRain', 'pw', 'rain', 'snow', 'uh', 'wMax', 'slp', 'sfcWind', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'ctopZ'];
 const SECTION_CHOICES: SecVar[] = ['dbz', 'w', 'along', 'normal', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'qv', 'pp', 'T'];
 const RZ_CHOICES: RzVar[] = ['vt', 'vr', 'w', 'thp', 'cond'];
 

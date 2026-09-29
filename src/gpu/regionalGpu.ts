@@ -10,6 +10,7 @@ import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } 
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
 import { COL, WV_PATH } from '../regional/diagnostics.js';
 import { FORCING_TAU, MAX_FORCINGS, forcingTable, type WindForcing } from '../regional/forcing.js';
+import { CU_TAU, CU_RH, CU_MIN_DEPTH, CU_DETRAIN, CU_DETRAIN_DEPTH, CU_TOWER, CU_SHALLOW, CU_DRAW_PERIOD, cumulusScale } from '../regional/cumulus.js';
 import type { TracerParams } from '../regional/tracers.js';
 
 const WG = 64;
@@ -114,6 +115,7 @@ export class GpuRegional {
     device.queue.writeBuffer(baseBuf, 0, base);
     const ph = opts.physics;
     this.blNoise = ph?.blNoise ?? 0;
+    this.cuScale = ph?.cumulus ? cumulusScale(dx) : 0;
     const open = m.c.lateral === 'open';
     const sfc = ph ? surfaceState(m, ph) : null;
     const bnd = open ? (opts.boundary ?? m.boundary) : null;
@@ -368,6 +370,112 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dev.queue.submit([enc.finish()]);
   }
 
+  /** scale-aware cumulus parameterization (cumulus.ts): strength (0: off), kernel and per-column state (cloud base and top
+   *  level, rain rate mm/h, CAPE) of the last step */
+  private readonly cuScale: number;
+  private cuK: { pipe: GPUComputePipeline; P: GPUBuffer; bind: GPUBindGroup } | null = null;
+  cuBuf: GPUBuffer | null = null;
+  /** the per-column cumulus state (kb, kt, rate, CAPE), no convection until the first step (a 16-byte stand-in without the scheme) */
+  private ensureCuBuf(): GPUBuffer {
+    if (!this.cuBuf) {
+      const n = this.cuScale > 0 ? this.cpu.c.nx * this.cpu.c.ny : 1, init = new Float32Array(4 * n);
+      for (let c = 0; c < n; c++) { init[4 * c] = -1; init[4 * c + 1] = -1; }
+      this.cuBuf = this.device.createBuffer({ size: 16 * n, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(this.cuBuf, 0, init);
+    }
+    return this.cuBuf;
+  }
+  private cumulus(): void {
+    const dev = this.device, m = this.cpu, { nx, ny, nz, dz } = m.c;
+    if (!this.cuK) {
+      const nd = Math.max(1, Math.round(CU_DETRAIN_DEPTH / dz));
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code: this.consts + `
+@group(0) @binding(0) var<storage, read_write> S: array<f32>;
+@group(0) @binding(1) var<storage, read> LC: array<f32>;      // per level: pi0, rho0
+@group(0) @binding(2) var<storage, read_write> CU: array<f32>;  // per column: cloud base, top level, rain rate (mm/h), CAPE
+@group(0) @binding(3) var<uniform> CP_: vec4<f32>;             // dt, strength
+fn esat(T: f32) -> f32 { return 611.2 * exp(17.67 * (T - 273.15) / (T - 29.65)); }
+// cumulusColumn / applyCumulus in src/regional/cumulus.ts
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= NX * NY) { return; }
+  let j = t / NX; let i = t % NX;
+  CU[4u * t] = -1.0; CU[4u * t + 1u] = -1.0; CU[4u * t + 2u] = 0.0; CU[4u * t + 3u] = 0.0;
+  var T: array<f32, ${nz}>; var p: array<f32, ${nz}>; var qv: array<f32, ${nz}>; var pk_: array<f32, ${nz}>; var Tp: array<f32, ${nz}>;
+  for (var k = 0u; k < NZ; k++) {
+    let q = ix(i, j, k); let pik = LC[2u * k] + S[4u * SIZE + q];
+    pk_[k] = pik; T[k] = S[3u * SIZE + q] * pik; p[k] = 1e5 * pow(pik, CP / RD); qv[k] = S[5u * SIZE + q];
+  }
+  var pth = T[0] / pk_[0]; var pq = max(qv[0], 0.0); var kb = -1; var lfc = -1; var kt = -1; var cape = 0.0;
+  Tp[0] = T[0];
+  for (var k = 1u; k < NZ; k++) {
+    let pk = p[k]; let pik = pk_[k];
+    var tp = pth * pik; var d = 0.0;
+    let es0 = esat(tp);
+    if (pq > 0.622 * es0 / max(pk - es0, 1.0)) {
+      for (var it = 0; it < 4; it++) {
+        let tt = tp + XLV * d / CP; let es = esat(tt); let qs = 0.622 * es / max(pk - es, 1.0);
+        let dqs = qs * pk / max(pk - es, 1.0) * 17.67 * 243.5 / ((tt - 29.65) * (tt - 29.65));
+        d += (pq - d - qs) / (1.0 + XLV / CP * dqs);
+      }
+      d = clamp(d, 0.0, pq);
+      if (kb < 0) { kb = i32(k); }
+    }
+    tp += XLV * d / CP; pq -= d; pth = tp / pik; Tp[k] = tp;
+    let tve = T[k] * (1.0 + 0.61 * max(qv[k], 0.0)); let b = G * (tp * (1.0 + 0.61 * pq) - tve) / tve;
+    if (lfc < 0) { if (kb >= 0 && b > 0.0) { lfc = i32(k); cape += b * DZ; kt = i32(k); } }
+    else if (kt == i32(k) - 1 && b > 0.0) { cape += b * DZ; kt = i32(k); }
+  }
+  if (lfc < 0 || cape <= 0.0 || kt <= kb) { return; }
+  let a = CP_.x / ${CU_TAU.toFixed(1)};
+  var dT: array<f32, ${nz}>; var dq: array<f32, ${nz}>;
+  var Pq = 0.0; var kq = -1;
+  for (var k = 0; k <= kt; k++) {
+    let Tr = Tp[k]; let es = esat(Tr); let qr = ${CU_RH} * 0.622 * es / max(p[k] - es, 1.0);
+    dT[k] = -(T[k] - Tr) * a; dq[k] = -(qv[k] - qr) * a;
+    Pq -= dq[k] * LC[2u * u32(k) + 1u] * DZ;
+    if (Pq >= 0.0) { kq = k; }
+  }
+  // deep convection, else shallow convection up to the highest level where the vapour loss is still non-negative
+  let deep = Pq > 0.0 && f32(kt - kb) * DZ >= ${CU_MIN_DEPTH.toFixed(1)};
+  if (!deep) { if (kq <= kb) { return; } kt = kq; }
+  var P0 = 0.0; var PT = 0.0; var mass = 0.0;
+  for (var k = 0; k <= kt; k++) { let md = LC[2u * u32(k) + 1u] * DZ; P0 -= dq[k] * md; PT += CP * dT[k] * md / XLV; mass += md; }
+  if (!(P0 >= 0.0)) { return; }
+  let c = (P0 - PT) * XLV / (CP * mass); let sc = CP_.y; let P = sc * P0;
+  for (var k = 0; k <= kt; k++) {
+    let q = ix(i, j, u32(k));
+    S[3u * SIZE + q] = S[3u * SIZE + q] + sc * (dT[k] + c) / pk_[k];
+    S[5u * SIZE + q] = max(0.0, S[5u * SIZE + q] + sc * dq[k]);
+  }
+  CU[4u * t] = f32(kb); CU[4u * t + 1u] = select(f32(-kt - 2), f32(kt), deep); CU[4u * t + 2u] = P / CP_.x * 3600.0; CU[4u * t + 3u] = cape;
+  if (!(P > 0.0)) { return; }
+  let k0 = max(kb, kt - ${nd - 1});
+  var mt = 0.0; for (var k = k0; k <= kt; k++) { mt += LC[2u * u32(k) + 1u] * DZ; }
+  for (var k = k0; k <= kt; k++) {
+    let q = ix(i, j, u32(k)); let add = ${CU_DETRAIN} * P / mt;
+    if (NQ == 6u && T[k] < 273.15) { S[8u * SIZE + q] = S[8u * SIZE + q] + add; } else { S[6u * SIZE + q] = S[6u * SIZE + q] + add; }
+  }
+  let kr = max(1, kb);
+  var mb = 0.0; for (var k = 0; k < kr; k++) { mb += LC[2u * u32(k) + 1u] * DZ; }
+  for (var k = 0; k < kr; k++) { let q = ix(i, j, u32(k)); S[7u * SIZE + q] = S[7u * SIZE + q] + (1.0 - ${CU_DETRAIN}) * P / mb; }
+}` }), entryPoint: 'main' } });
+      const lc = new Float32Array(2 * nz);
+      for (let k = 0; k < nz; k++) { lc[2 * k] = m.pi0[k]!; lc[2 * k + 1] = m.rho0[k]!; }
+      const LC = dev.createBuffer({ size: lc.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      dev.queue.writeBuffer(LC, 0, lc);
+      this.ensureCuBuf();
+      const P = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.cuK = { pipe, P, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: LC } }, { binding: 2, resource: { buffer: this.cuBuf! } }, { binding: 3, resource: { buffer: P } }] }) };
+    }
+    const k = this.cuK;
+    dev.queue.writeBuffer(k.P, 0, new Float32Array([this.dt, this.cuScale, 0, 0]));
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny / 64)); pass.end();
+    dev.queue.submit([enc.finish()]);
+  }
+
   /** lasting wind forcings (forcing.ts) applied at the start of every step */
   private nForce = 0;
   private forceK: { pipe: GPUComputePipeline; T: GPUBuffer; FP: GPUBuffer; bind: GPUBindGroup } | null = null;
@@ -441,12 +549,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // long submission can trip the OS GPU watchdog (Windows TDR, ~2 s), which resets the device
     const chunk = Math.max(4, Math.ceil(PASS_CELLS / this.cpu.size));
     for (let s = 0; s < n; s++) {
-      if (this.nForce > 0) this.force();
+      // the CPU pre-step order: boundary-layer noise, cumulus, wind forcing
       if (this.blNoise > 0) {
         const e = Math.floor(this.time / BL_NOISE_PERIOD + 1e-6);
         if (this.noiseEpoch < 0 || e <= this.noiseEpoch) this.noiseEpoch = Math.max(this.noiseEpoch, e);
         else { this.noiseEpoch = e; this.noise(e); }
       }
+      if (this.cuScale > 0) this.cumulus();
+      if (this.nForce > 0) this.force();
       for (let p0 = 0; p0 < this.passes.length; p0 += chunk) {
         const enc = this.device.createCommandEncoder();
         const pass = enc.beginComputePass();
@@ -541,7 +651,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
    * (m^2/s^2), surface-based CAPE and CIN (J/kg; same steps as parcelAscent); `planes`: every prognostic
    * field at the requested levels (w also at the level above); accumulated rain and snow at level 0.
    */
-  async readDisplay(levels: number[], volMode = 0): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, DisplayPlanes>; rain: Float32Array; snow: Float32Array; tracers: Float32Array | null }> {
+  async readDisplay(levels: number[], volMode = 0, cuShow = true): Promise<{ packed: Uint32Array; col: Float32Array; planes: Map<number, DisplayPlanes>; rain: Float32Array; snow: Float32Array; tracers: Float32Array | null; cu: Float32Array | null }> {
     const m = this.cpu, { nx, ny, nz, dx, dy } = m.c, n = nx * ny * nz, dev = this.device, PL = m.plane, SIZE = m.size, NFp = this.nf;
     if (!this.disp) {
       const code = `
@@ -552,6 +662,9 @@ const DX: f32 = ${dx}; const DY: f32 = ${dy}; const COL: u32 = ${COL}u;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @group(0) @binding(3) var<storage, read> LB: array<f32>;     // per level: pi0, rho0, zc, dz
 @group(0) @binding(4) var<uniform> MODE: vec4<u32>;
+@group(0) @binding(5) var<storage, read> CUD: array<f32>;       // cumulus state per column (kb, kt, rate mm/h, CAPE)
+const CUON: bool = ${this.cuScale > 0};
+fn pcgd(v: u32) -> u32 { let s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
 fn cs(f: u32, q: u32) -> f32 { return select(0.0, S[f * SIZE + q], MOIST); }
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -583,7 +696,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (cl > 1e-5) { ctz = zc; ctt = S[3u * SIZE + q] * (LB[4u * k] + S[4u * SIZE + q]); }
     // 3-D view: snow is drawn with the cloud (anvils and the outflow shield are mostly snow in this scheme),
     // channel 2 with rain and graupel
-    let cb = u32(min(255.0, round(sqrt((cl + qs) / 3e-3) * 255.0)));
+    var cb = u32(min(255.0, round(sqrt((cl + qs) / 3e-3) * 255.0)));
+    // parameterized convection (MODE.y = 1): a translucent tower from the cloud base to the top, denser with more rain;
+    // shallow convection as thin cumulus (cumulusCloud in src/regional/cumulus.ts)
+    if (CUON && MODE.y == 1u) {
+      let kb = CUD[4u * t]; let kt = CUD[4u * t + 1u];
+      let r = f32(pcgd(t ^ pcgd(MODE.z + 0x9e37u))) / 4294967296.0;
+      var top = kt; var cover = min(0.6, 0.1 + 0.08 * CUD[4u * t + 2u]); var qc2 = ${CU_TOWER};
+      if (kt < -1.5) { top = -kt - 2.0; cover = 0.15; qc2 = ${CU_SHALLOW}; }
+      if (kb >= 0.0 && f32(k) >= kb && f32(k) <= top && r < cover) { cb = max(cb, u32(min(255.0, round(sqrt(qc2 / 3e-3) * 255.0)))); }
+    }
     var v2 = sqrt(max(pr - qs, 0.0) / 8e-3);
     if (MODE.x == 1u) { v2 = sqrt(max(wc, 0.0) / 40.0); }
     if (MODE.x == 2u) { v2 = sqrt(max(zeta, 0.0) / 0.05); }
@@ -644,14 +766,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const LB = dev.createBuffer({ size: lb.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       dev.queue.writeBuffer(LB, 0, lb);
       const MODE = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const bind = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: D } }, { binding: 2, resource: { buffer: C } }, { binding: 3, resource: { buffer: LB } }, { binding: 4, resource: { buffer: MODE } }] });
+      const bind = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: D } }, { binding: 2, resource: { buffer: C } }, { binding: 3, resource: { buffer: LB } }, { binding: 4, resource: { buffer: MODE } }, { binding: 5, resource: { buffer: this.ensureCuBuf() } }] });
       this.disp = { pipe, bind, D, C, LB, MODE };
     }
     const d = this.disp, planeBytes = PL * 4;
-    dev.queue.writeBuffer(d.MODE, 0, new Uint32Array([volMode, 0, 0, 0]));
+    dev.queue.writeBuffer(d.MODE, 0, new Uint32Array([volMode, cuShow ? 1 : 0, Math.floor(this.time / CU_DRAW_PERIOD) >>> 0, 0]));
     const perLevel = NFp + 1;
     const trBytes = this.trK ? this.trK.n * 16 : 0;
-    const total = n * 4 + nx * ny * COL * 4 + levels.length * perLevel * planeBytes + 2 * planeBytes + trBytes;
+    const cuBytes = this.cuScale > 0 ? 16 * nx * ny : 0;
+    const total = n * 4 + nx * ny * COL * 4 + levels.length * perLevel * planeBytes + 2 * planeBytes + trBytes + cuBytes;
     const st = dev.createBuffer({ size: total, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = dev.createCommandEncoder();
     const pass = enc.beginComputePass(); pass.setPipeline(d.pipe); pass.setBindGroup(0, d.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny / 64)); pass.end();
@@ -664,7 +787,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     enc.copyBufferToBuffer(this.aux, 2 * SIZE * 4, st, off, planeBytes); off += planeBytes;
     enc.copyBufferToBuffer(this.aux, 3 * SIZE * 4, st, off, planeBytes); off += planeBytes;
-    if (this.trK) enc.copyBufferToBuffer(this.trK.T, 0, st, off, trBytes);
+    if (this.trK) { enc.copyBufferToBuffer(this.trK.T, 0, st, off, trBytes); off += trBytes; }
+    if (cuBytes) enc.copyBufferToBuffer(this.ensureCuBuf(), 0, st, off, cuBytes);
     dev.queue.submit([enc.finish()]);
     await st.mapAsync(GPUMapMode.READ);
     const buf = st.getMappedRange().slice(0);
@@ -680,8 +804,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     const rain = new Float32Array(buf, o, PL); o += planeBytes;
     const snow = new Float32Array(buf, o, PL); o += planeBytes;
-    const tracers = trBytes ? new Float32Array(buf, o, trBytes / 4) : null;
-    return { packed, col, planes, rain, snow, tracers };
+    const tracers = trBytes ? new Float32Array(buf, o, trBytes / 4) : null; o += trBytes;
+    const cu = cuBytes ? new Float32Array(buf, o, cuBytes / 4) : null;
+    return { packed, col, planes, rain, snow, tracers, cu };
   }
 
   /** Column profiles at grid columns (i, j): per point, per level, the cell-centred u, v, w, theta, pi' and

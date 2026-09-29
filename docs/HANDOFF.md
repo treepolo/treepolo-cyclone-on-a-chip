@@ -9,6 +9,9 @@
 - 使用者**不要**：垂直網格下密上疏、聲波子步 6→4、移動巢狀、GPU 深度優化、在他電腦上裝 Claude Code。
   龍捲項目若要用「地面附近垂直加密」必須先問。
 - 原則：**天氣現象必須從方程自己長出來**，不可用程式畫假雲、假渦旋。
+- **開發測試只驗證程式**（不崩潰、沒寫錯、參數沒錯）；**模擬結果由使用者自己玩、自己判斷**。每批做完告訴使用者什麼算正常、
+  什麼算不正常。不要跑很久的模擬對照；真的需要時只跑一組、用 15 km，不要用軸對稱模式判斷 3D 樣子。
+  截圖判斷雲的樣子時雲的不透明度要調到最大，看正側面與正上方，地面選「海陸（只看雲）」。
 
 ## 專案
 - Repo `treepolo/treepolo-cyclone-on-a-chip`，分支 `claude/3d-earth-atmosphere-simulator-ncy8n4`（在此開發與推送，不要開 PR）。
@@ -33,7 +36,8 @@
   slab 海洋、海冰、q-flux）。GPU 版 `src/gpu/dycoreGpu.ts`、`moistGpu.ts`。預設 T21/T42/T85/T170。
   起轉狀態 `data/spinup_earth_t42q.bin`（7/8，T42＋觀測海洋熱傳輸，可載入任何解析度：`src/model/spinup.ts`）。
 - 區域模式：全可壓縮非靜力 RK3＋聲波分裂（`src/regional/core.ts`），冰相微物理 `ice.ts`，物理 `physics.ts`，
-  GPU 版 `src/gpu/regionalGpu.ts`。實驗定義在 `src/app/regional/worker.ts` 的 `build()`；巢狀 `src/regional/nest.ts`。
+  GPU 版 `src/gpu/regionalGpu.ts`。實驗是「設定」（`src/app/regional/setup.ts` 的 `RegionalSetup`，原本的實驗變成 `PRESETS`），
+  由 `build.ts` 的 `buildModel()` 建模式；巢狀 `src/regional/nest.ts`。
 - 頁面：`index.html` + `src/app/main.ts`/`worker.ts`/`globe.ts`；`regional.html` + `src/app/regional/main.ts`/`worker.ts`/`volume.ts`。
 - 已完成的重要功能：GPU 效能優化（自動時間步長、θρ 預算、亂流只算第一 RK 階段、晴空凝結物跳過、效能分析按鈕）、
   先粗後細細化（`src/regional/refine.ts`，15→5 km 颱風、2→1 km 超大胞、1 km→250 m 龍捲）、
@@ -95,13 +99,31 @@
   `environment`（改完重建 GPU，因為阻尼層風與邊界目標在 GPU 表內）。圖表的滑鼠工具在 `charts.ts`（`MapTool`）。
 - 自由飛行：`VolumeView.setCamera('fly')`。挑戰任務：`missions.ts`（localStorage 記完成，try/catch）。
 
+## 使用者大需求清單（2026-09，六批，已完成）
+1. 安全互動與介面：互動前快照、發散時自動還原並暫停（`worker.ts` `takeUndo`／`blowUp`）；3D 畫面上的執行／暫停／單步；
+   相機（拖曳轉、右鍵或雙指平移、雙擊飛到該點、滾輪、WASD）。
+2. 陣風（`physics.ts` `gustSpeed`：Beljaars 1995 自由對流＋Redelsperger 2000 降雨陣風，CPU/GPU）、信風（`build.ts` `envWind`；
+   有科氏力時背景風是地轉的：`RegionalConfig.geostrophic`，科氏力作用在 u−ub、v−vb）。
+3. 設定：`setup.ts`（所有條件＋預設組合、`sanitize`、`autoDt`）、`build.ts`（建模式、舊存檔對應 `setupFromLegacy`、細化 `refinedSetup`）、
+   右側面板 `setupForm.ts`（欄位表產生、依條件顯示／隱藏、CAPE/LCL/SRH 與格點數、超過 3000 萬格不能套用）。
+   邊界週期／開放、跟隨風暴、海／陸、診斷顯示海陸比例；跟隨時地表（塗的陸地）跟著地面移動，開放邊界新進的格柱取環境場。
+4. 多風暴：`src/regional/storms.ts`（渦旋：海平面氣壓平滑 30 km 的極小、比中位數低 ≥ 2 hPa、150 km 內氣旋式環流 ≥ 3 m/s、相距 ≥ 200 km；
+   對流胞：柱最大上升 ≥ 10 m/s 的連通區；對地座標配對、看到兩次才顯示），風暴出現前不追蹤、不跟隨。頁面清單點選看單一風暴時間序列、
+   3D 標籤、所有路徑。中心氣壓是海平面氣壓（`dpEnv` 也是）。新圖：可見光、水氣、可降水量、參數化對流降水率、水平輻散切面。
+5. 3D 互動：`tools3d.ts`（工具列、預覽圈、持續風畫在 3D）、`volume.ts`（`toolActive`、`onToolDrag`、`project`）；
+   `src/regional/forcing.ts`（推送／旋轉／輻合的風，一次或持續＝向目標鬆弛 τ 10 分，CPU pre-step 與 GPU kernel 同公式）；
+   增濕／變乾、暖泡冷池可指定高度半徑。
+6. 積雲參數化：`src/regional/cumulus.ts`（Frierson 2007 簡化 Betts–Miller：τ 2 h、RH 0.7、能量一致；深對流降水變成雲底下的雨水，
+   20% 留在雲頂當冰（外流卷雲來源）；太乾時用 Frierson 的淺對流把邊界層水氣往上送；尺度感知 3 km 以下關、12 km 以上全開）。
+   GPU kernel 在每步開頭（順序：邊界層擾動→積雲→持續風，與 CPU pre-step 相同）。3D 的次網格積雲只是顯示：每個對流格柱依雲量
+   機率（每 30 分鐘重抽）畫一根塔，可在「顯示」關掉。熱帶預設（tc 系列）預設開啟。
+- 測試：`node dist/tests/regional.js` 36 項；GPU `?only=rbasic` 15 項（含陣風＋信風、積雲、持續風）、`?only=charts` 9 項（含新雲圖）。
+
 ## 文件截圖
 - `docs/results/charts_*.png`（RESULTS 4.6）：在 Node 用 CPU 跑出成熟狀態存檔（超大胞 `packSave`；軸對稱用 `AxiDriver`＋`packSave`），
   再用 playwright 匯入頁面、切換圖表、只截 `#stage` 區域。
 
 ## 下一步
-- 等使用者在 GPU 上的結果（用 ArtifactData 讀 `runs` 集合）：
-  1. 雨帶：5 km（tc_hr）用新預設（條件不穩定探空），看有沒有螺旋雨帶、`rain_outer`／`wet_outer`。
-  2. 雙眼牆：tc → 細化 tc_hr → 細化 tc_3，成熟後跑 2–3 天，看 `ew2r`（第二眼牆）與 Hovmöller。
-- 若 5 km 仍沒有雨帶：可試較大的區域（1800–2400 km，週期區域的外流下沉）或較小的水平混合長度（目前 0.2·Δx）。
-- 要問使用者：龍捲的地面附近垂直加密（約 50 m）；「放山」需要地形座標（大改動）；颱風預設要不要改（目前建議不改）。
+- 等使用者玩完六批的回饋（模擬樣子由使用者判斷）：15 km 颱風＋積雲方案的樣子（遍地對流、外流卷雲）、陣風與信風、多風暴清單、3D 工具。
+- 已答應但延後：龍捲的地面附近垂直加密（使用者同意過，排在颱風之後）。
+- 「放山」需要地形座標（大改動，使用者說不要）。

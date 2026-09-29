@@ -17,6 +17,7 @@ import { Pacer } from '../pacer.js';
 import { StormTracker, type TornadoEnv } from '../../regional/supercell.js';
 import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.js';
 import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcing.js';
+import { cumulusCloud, cumulusDraw, CU_DRAW_PERIOD } from '../../regional/cumulus.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
@@ -94,6 +95,8 @@ function frameDue(): boolean {
 let nestSource: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } | null = null;
 // charts: what the page wants in each frame, the 3-D view's second channel
 let chartReq: ChartRequest | null = null, volMode = 0;
+/** draw the parameterized convection in the 3-D view; its rain rate per column (mm/h) of the last frame, null without the scheme */
+let cuShow = true, cuRate: Float32Array | null = null;
 // ground-relative position of the domain origin: advances with the frame velocity, jumps with rolls and refinement
 let origin = { x: 0, y: 0 }, originT = 0;
 function advanceOrigin(): void { const t = modelNow(); origin.x += frameVel.u * (t - originT); origin.y += frameVel.v * (t - originT); originT = t; }
@@ -402,6 +405,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'ground') { ground = msg.field; await refreshFrame(); }
     else if (msg.type === 'charts') { chartReq = msg.req; await refreshFrame(); }
     else if (msg.type === 'volMode') { volMode = msg.mode | 0; await refreshFrame(); }
+    else if (msg.type === 'cuShow') { cuShow = msg.on; await refreshFrame(); }
     else if (msg.type === 'tracers') {
       while (busy) await new Promise((r) => setTimeout(r, 5));
       tracerN = Math.max(0, Math.min(65536, msg.n | 0)); setupTracers(); await refreshFrame();
@@ -879,7 +883,8 @@ async function sendFrameRaw(): Promise<void> {
   if (gpu) {
     // GPU: packed display bytes, column composites and the few horizontal planes the diagnostics need
     const levels = [...new Set([0, k15, ...(sliceK >= 0 ? [sliceK] : [])])];
-    const d = await gpu.readDisplay(levels, volMode);
+    const d = await gpu.readDisplay(levels, volMode, cuShow);
+    cuRate = d.cu ? Float32Array.from({ length: nx * ny }, (_, c) => d.cu![4 * c + 2]!) : null;
     const tNow = gpu.time, sNow = gpu.steps;
     for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; }
     col = d.col;
@@ -901,7 +906,8 @@ async function sendFrameRaw(): Promise<void> {
     for (let q = 0; q < m.size && !bad; q += 97) if (!Number.isFinite(m.w[q]!) || Math.abs(m.w[q]!) > W_BLOWUP || !Number.isFinite(m.th[q]!)) bad = true;
     if (bad) { blowPending = true; return; }
     const qc = m.scalars[QC]!, qr = m.scalars[QR]!, qi = m.scalars[QI]!, qs = m.scalars[QS]!, qg = m.scalars[QG]!;
-    const vm = volMode;
+    const vm = volMode, cu = phys?.cu ?? null, cuEpoch = Math.floor(m.time / CU_DRAW_PERIOD);
+    cuRate = cu ? Float32Array.from(cu.rate) : null;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const q = m.idx(i, j, k), o = (k * ny + j) * nx + i;
       // cloud: liquid and ice cloud and snow (anvils are mostly snow); channel 2: precipitation (rain + graupel), updraft or vorticity
@@ -914,6 +920,8 @@ async function sendFrameRaw(): Promise<void> {
         v2 = Math.sqrt(Math.max(zeta, 0) / 0.05);
       }
       rain[o] = Math.min(255, Math.round(v2 * 255));
+      // parameterized convection (same drawing as the GPU display kernel)
+      if (cu && cuShow) { const c = j * nx + i, qd = cumulusCloud(cu.kb[c]!, cu.kt[c]!, cu.rate[c]!, k, cumulusDraw(c, cuEpoch)); if (qd > 0) cloud[o] = Math.max(cloud[o]!, Math.min(255, Math.round(Math.sqrt(qd / 3e-3) * 255))); }
       qcmax = Math.max(qcmax, cl); qrmax = Math.max(qrmax, pr);
       const w = m.w[q]!; wmax = Math.max(wmax, w); wmin = Math.min(wmin, w);
     }
@@ -1034,7 +1042,7 @@ async function buildCharts(req: ChartRequest, col: Float32Array, planes: Map<num
   if (!prevAcc || t > prevAcc.t + 1e-6 || t < prevAcc.t) prevAcc = { t, rain: acc };
   const charts: ChartData = { maps: {}, slice: null, section: null, sounding: null, rz: null };
   const pl0 = planes.get(0) ?? modelPlanes(mm, 0);
-  if (req.maps.length) charts.maps = compositeMaps(mm, col, pl0, { rain: mpp.rainAcc, snow: mpp.snowAcc, rate: lastRate }, req.maps, frameVel);
+  if (req.maps.length) charts.maps = compositeMaps(mm, col, pl0, { rain: mpp.rainAcc, snow: mpp.snowAcc, rate: lastRate, cu: cuRate }, req.maps, frameVel);
   if (sliceK >= 0 && req.slice) {
     const pl = planes.get(sliceK) ?? modelPlanes(mm, sliceK);
     charts.slice = { k: sliceK, z: mm.zc[sliceK]!, vars: sliceFields(mm, pl, sliceK, req.slice.vars, frameVel) };

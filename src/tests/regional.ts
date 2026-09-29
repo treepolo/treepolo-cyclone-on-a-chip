@@ -411,4 +411,36 @@ void DRY_AIR;
     `${u1.toFixed(2)}, ${u2.toFixed(2)}, v ${vEast.toFixed(2)}, w0 ${w0}, w1 ${wUp.toFixed(2)}`);
 }
 
+// Cumulus parameterization (simplified Betts-Miller): active in the unstable tropical column, energy-consistent (heating
+// = latent heat of the vapour removed), total water conserved (the removed vapour becomes rain water and detrained
+// ice), inactive over the neutral RE87 column and on a 3 km grid
+{
+  const { applyCumulus, cumulusScale } = await import('../regional/cumulus.js');
+  const { tcSounding } = await import('../regional/tropical.js');
+  const { IceMicrophysics: Ice } = await import('../regional/ice.js');
+  const mk = (kind: 'unstable' | 're87', dx: number): RegionalModel => {
+    const mm = new RegionalModel({ ...base, nx: 3, ny: 3, nz: 25, dx, dy: dx, dz: 1000, dt: 60 }, tcSounding(kind, 301.15), 6);
+    new Ice(mm);
+    for (let k = 0; k < 25; k++) for (let j = 0; j < 3; j++) for (let i = 0; i < 3; i++) mm.scalars[0]![mm.idx(i, j, k)] = mm.qv0[k]!;
+    return mm;
+  };
+  const col = (mm: RegionalModel): { h: number; w: number } => {
+    let h = 0, w = 0;
+    for (let k = 0; k < 25; k++) {
+      const q = mm.idx(1, 1, k), md = mm.rho0[k]! * 1000, T = mm.th[q]! * (mm.pi0[k]! + mm.pp[q]!);
+      h += 1004.5 * T * md; w += md * (mm.scalars[0]![q]! + mm.scalars[1]![q]! + mm.scalars[2]![q]! + mm.scalars[3]![q]!);
+    }
+    return { h, w };
+  };
+  const u = mk('unstable', 15000), a0 = col(u), info = { kb: new Int16Array(9), kt: new Int16Array(9), rate: new Float32Array(9) };
+  applyCumulus(u, 60, true, info);
+  const a1 = col(u), P = info.rate[4]! / 3600 * 60, lat = 2.5e6 * P;
+  const n = mk('re87', 15000), info2 = { kb: new Int16Array(9), kt: new Int16Array(9), rate: new Float32Array(9) };
+  applyCumulus(n, 60, true, info2);
+  const f = mk('unstable', 3000), f0 = col(f); applyCumulus(f, 60, true, null);
+  check('cumulus: active in the unstable column (rain > 0, top above 8 km), heating = latent heat (1 %), water conserved, none over RE87 or at 3 km',
+    P > 0 && info.kt[4]! >= 8 && Math.abs((a1.h - a0.h) - lat) < 0.01 * lat && Math.abs(a1.w - a0.w) < 1e-9 * a0.w && info2.kt[4] === -1 && col(f).h === f0.h && cumulusScale(3000) === 0,
+    `rate ${info.rate[4]!.toFixed(2)} mm/h, top level ${info.kt[4]}, heating ${((a1.h - a0.h) / lat).toFixed(4)} x latent, water ${((a1.w - a0.w) / a0.w).toExponential(1)}`);
+}
+
 summary('regional');

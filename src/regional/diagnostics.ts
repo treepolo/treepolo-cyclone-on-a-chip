@@ -49,7 +49,7 @@ export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh',
 /** Fields of a cross-section or sounding (per level). */
 export const SECTION_VARS = ['dbz', 'w', 'u', 'v', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'T', 'Td', 'p', 'qv', 'pp'] as const;
 /** Composite (column / surface) maps. */
-export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'wvT', 'pw'] as const;
+export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'wvT', 'pw', 'cuRain'] as const;
 /** Azimuthal-mean (radius-height) fields. */
 export const RZ_VARS = ['vt', 'vr', 'w', 'thp', 'cond'] as const;
 export type SliceVar = (typeof SLICE_VARS)[number];
@@ -238,7 +238,7 @@ export function sliceFields(m: RegionalModel, pl: LevelPlanes, k: number, vars: 
 
 /** Composite and surface maps ([j][i]) from the column records, the lowest-level planes and the
  *  precipitation accumulations (mm) and rates (mm/h). */
-export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPlanes, acc: { rain: ArrayLike<number>; snow: ArrayLike<number>; rate: ArrayLike<number> | null },
+export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPlanes, acc: { rain: ArrayLike<number>; snow: ArrayLike<number>; rate: ArrayLike<number> | null; cu?: ArrayLike<number> | null },
   vars: readonly MapVar[], frame: { u: number; v: number }): Partial<Record<MapVar, Float32Array>> {
   const { nx, ny } = m.c, sx = m.sx, n = nx * ny, out: Partial<Record<MapVar, Float32Array>> = {};
   const th0 = m.th0[0]!, pi0 = m.pi0[0]!, z0 = m.zc[0]!;
@@ -261,6 +261,7 @@ export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPla
         case 'rain': x = acc.rain[c]!; break;
         case 'snow': x = acc.snow[c]!; break;
         case 'rainRate': x = acc.rate ? acc.rate[c]! : 0; break;
+        case 'cuRain': x = acc.cu ? acc.cu[c]! : 0; break;
         case 'sfcU': x = 0.5 * (pl0.u[q]! + pl0.u[q + 1]!) + frame.u; break;
         case 'sfcV': x = 0.5 * (pl0.v[q]! + pl0.v[q + sx]!) + frame.v; break;
         case 'sfcWind': x = Math.hypot(0.5 * (pl0.u[q]! + pl0.u[q + 1]!) + frame.u, 0.5 * (pl0.v[q]! + pl0.v[q + sx]!) + frame.v); break;

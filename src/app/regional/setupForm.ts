@@ -44,6 +44,8 @@ const FIELDS: Field[] = [
   { key: 'vmin', label: '通量最小風速 / Min. flux wind (m/s)', group: 'env', kind: 'num', step: 0.5, show: (s) => s.fluxes || !notAxi(s) },
   { key: 'gust', label: '陣風（對流與降雨）/ Gustiness', group: 'env', kind: 'chk', show: (s) => notAxi(s) && s.fluxes,
     tip: '無風時仍有亂流與下衝流造成的陣風，讓海面照常蒸發 / turbulent and downdraft gusts keep the surface fluxes going in light wind' },
+  { key: 'cumulus', label: '積雲參數化（次網格對流）/ Cumulus scheme', group: 'env', kind: 'chk', show: (s) => notAxi(s) && (s.fluxes || s.radiation !== 'none'),
+    tip: '粗網格算不出個別積雲：這個方案讓不穩定的氣柱在約 2 小時內調整、降雨，並在雲頂留下冰雲。3 km 以下自動關閉，12 km 以上全開 / coarse grids cannot resolve single clouds: unstable columns adjust over about 2 h, rain, and leave ice at the cloud top; off at 3 km and finer, full at 12 km and coarser' },
   { key: 'blNoise', label: '邊界層擾動 / BL perturbations (K)', group: 'env', kind: 'num', step: 0.05, show: (s) => notAxi(s) && (s.fluxes || s.radiation !== 'none'),
     tip: '每 10 分鐘在 1 km 以下加入 ± 這麼多的隨機溫度擾動（代表次網格亂流）/ random temperature noise below 1 km every 10 minutes (sub-grid turbulence)' },
   { key: 'init', label: '初始擾動 / Initial disturbance', group: 'init', kind: 'sel', options: [['vortex', '暖心渦旋 / warm-core vortex'], ['bubble', '暖泡 / warm bubble'], ['none', '無 / none']], show: notAxi },
