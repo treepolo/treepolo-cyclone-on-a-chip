@@ -19,7 +19,8 @@ in vec2 vUv; out vec4 o;
 uniform sampler3D uVol;    // r cloud extinction, g precipitation (or updraft / vorticity), b kind of cloud, a plume updraft (CloudDetail)
 uniform sampler3D uLight;  // r transmittance to the sun, g transmittance straight up (precomputed per volume)
 uniform sampler3D uNoise;  // g large lumpy pattern, b small lumpy pattern, a flat sheets (tileable)
-uniform sampler3D uOct;    // bubbles, one size per channel: r 4, g 8, b 16, a 2 per tile
+uniform sampler3D uOct;    // bubbles, one size per channel: r 4, g 8, b 16, a 2 per tile (large sizes: flattened caps)
+uniform sampler3D uOctS;   // the same for the small sizes (nearly round): r 4, g 8, b 16 per tile
 uniform sampler2D uGround;
 uniform mat4 uInvVP; uniform vec3 uEye; uniform vec3 uBox; uniform vec3 uSun;
 uniform float uK;     // extinction multiplier (the opacity slider; 1 = physical)
@@ -87,10 +88,11 @@ vec4 lumps(vec4 lam, float Lf, float pf, float mpb){
   return 0.5*S_CONV/uDx*lam*(1.0 - smoothstep(Lf, 2.0*Lf, lam))*(1.0 - smoothstep(1.5*uDx, 3.0*uDx, lam))*smoothstep(pf, 2.5*pf, lam/mpb);
 }
 // c cloud and pr precipitation extinction (1/m), g the grid's cloud value, vig how vigorous (full-body) the cloud is,
-// m how far inside the full body (box units; its gradient gives the way the surface faces)
-struct Cl { float c; float pr; float g; float vig; float m; };
+// m how far inside the full body (box units; its gradient gives the way the surface faces), open how open the point is
+// to the light around it (1 on a lump, less down in the cleft between lumps)
+struct Cl { float c; float pr; float g; float vig; float m; float open; };
 Cl dens(vec3 p, float pf, bool detail){
-  Cl r = Cl(0.0, 0.0, 0.0, 0.0, -1.0);
+  Cl r = Cl(0.0, 0.0, 0.0, 0.0, -1.0, 1.0);
   if (uCutOn == 1 && dot(uCut.xyz, p) > uCut.w) return r;
   vec4 s = textureLod(uVol, p/uBox, 0.0);
   float bp = uMode == 0 ? ext(s.g)*uK : s.g*s.g*4e-4;
@@ -143,8 +145,11 @@ Cl dens(vec3 p, float pf, bool detail){
         vec3 qb = q - vec3(0.0, 0.0, uRise*mpb/uMpb);
         // (a tile whose sizes all fall below a couple of pixels, or above the flow's, is not looked up)
         vec4 T = dot(aT, vec4(1.0)) > 1e-6 ? texture(uOct, vec3(0.891*qb.x - 0.454*qb.y, 0.454*qb.x + 0.891*qb.y, qb.z)/17000.0 + vec3(0.37, 0.11, 0.0)) : vec4(0.35);
-        vec4 Bo = dot(aB, vec4(1.0)) > 1e-6 ? texture(uOct, vec3(0.788*qb.x + 0.616*qb.y, -0.616*qb.x + 0.788*qb.y, qb.z)/2120.0) : vec4(0.35);
-        disp = (dot(aT, T - 0.35) + dot(aB, Bo - 0.35))*smoothstep(-0.65*amp, 0.0, e);
+        vec4 Bo = dot(aB, vec4(1.0)) > 1e-6 ? texture(uOctS, vec3(0.788*qb.x + 0.616*qb.y, -0.616*qb.x + 0.788*qb.y, qb.z)/2120.0) : vec4(0.35);
+        float bulge = dot(aT, T - 0.35) + dot(aB, Bo - 0.35), ex = dot(aT + aB, vec4(1.0));
+        disp = bulge*smoothstep(-0.65*amp, 0.0, e);
+        // clefts between lumps (where the lumps are low) see less of the sky and the sun
+        if (ex > 1e-6) r.open = mix(0.5, 1.0, smoothstep(-0.25, 0.45, bulge/ex));
       }
     }
     float m = (s.r - s0 + disp)*uCell/S_CONV;
@@ -201,37 +206,38 @@ void main(){
     float t = t0 + dtC*hash(gl_FragCoord.xy);
     float phase = 0.85 + 1.8*pow(max(mu,0.0), 6.0);
     int fine = 0, budget = 170;
-    float prevC = 0.0;
     bool found = false;
+    // sunlight and skylight factors of the surface of a full cloud body (1: no surface shading); they carry on to the
+    // samples just behind the surface, so the picture does not change abruptly where a surface is found or not
+    float sunF = 1.0, skyF = 1.0;
     for (int i = 0; i < 320; i++) {
       if (t > t1 || trans < 0.004) break;
       if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
       vec3 p = ro + t*rd;
       float pf = t*uPix, dtF = min(dtC, min(0.5*uCell, max(0.8*pf, 0.5*lamB)));
       Cl d = dens(p, pf, fine > 0 && uDetail == 1);
-      if (fine == 0 && d.g >= 0.004 && budget > 0 && dtF < dtC*0.99) { t = max(t0, t - dtC); fine = 24; prevC = 0.0; continue; }
+      if (fine == 0 && d.g >= 0.004 && budget > 0 && dtF < dtC*0.99) { t = max(t0, t - dtC); fine = 24; continue; }
       float dt = fine > 0 ? dtF : dtC;
-      // sunlight and skylight factors of the surface of a full cloud body (1: no surface shading)
-      float sunF = 1.0, skyF = 1.0;
-      if (uDetail == 1 && !found && fine > 0 && d.vig > 0.05 && d.c*dt*uMpb > 1.0 && prevC*dt*uMpb < 0.3) {
+      if (uDetail == 1 && !found && fine > 0 && d.vig > 0.05 && d.c*dt*uMpb > 0.7) {
         // entering an opaque body (the first on this ray; what lies behind it hardly shows): find its surface
         // (bisection) and light it by the way it faces
         found = true;
         float ta = t - dt, tb = t;
-        for (int k = 0; k < 3; k++) { float tm = 0.5*(ta + tb); if (dens(ro + tm*rd, pf, true).c*dt*uMpb > 1.0) tb = tm; else ta = tm; }
+        for (int k = 0; k < 3; k++) { float tm = 0.5*(ta + tb); if (dens(ro + tm*rd, pf, true).c*dt*uMpb > 0.7) tb = tm; else ta = tm; }
         t = tb; p = ro + t*rd; d = dens(p, pf, true);
         // the way the surface faces: down the slope of the body's margin (lobes included)
         float hn = max(0.05*lamB, pf);
         vec3 g = vec3(dens(p + vec3(hn, 0.0, 0.0), pf, true).m, dens(p + vec3(0.0, hn, 0.0), pf, true).m, dens(p + vec3(0.0, 0.0, hn), pf, true).m) - d.m;
         if (dot(g, g) > 1e-12) {
           vec3 n = -normalize(g);
-          // light wraps well round a lobe (it scatters through the cloud), so the shaded side is soft; faces turned up
-          // see more sky
-          sunF = mix(1.0, clamp((dot(n, uSun) + 0.45)/1.45, 0.0, 1.0)*1.25, d.vig);
-          skyF = mix(1.0, 0.5 + 0.5*clamp(0.5 + 0.5*n.z, 0.0, 1.0), d.vig);
+          // light wraps far round a lump (it scatters through the cloud), so light fades into shade gradually; on the
+          // shaded side the sky lights faces turned up, the ground (a little) faces turned down, and clefts less, so
+          // the lumps show there too
+          float wrap = clamp((dot(n, uSun) + 0.7)/1.7, 0.0, 1.0);
+          sunF = mix(1.0, wrap*wrap*(3.0 - 2.0*wrap)*1.25*(0.75 + 0.25*d.open), d.vig);
+          skyF = mix(1.0, (0.45 + 0.55*clamp(0.5 + 0.5*n.z, 0.0, 1.0) + 0.2*clamp(0.5 - 0.5*n.z, 0.0, 1.0))*d.open, d.vig);
         }
       }
-      prevC = d.c;
       float b = d.c + d.pr;
       if (b > 1e-9) {
         vec2 L = texture(uLight, p/uBox).rg;
@@ -240,7 +246,8 @@ void main(){
         float ls = 1.0;
         if (fine > 0 && d.c > 0.0 && trans > 0.02) {
           float h = min(0.5*uCell, max(0.6*lamB, 2.0*pf)), tl = dens(p + uSun*h, pf, false).c*h*uMpb;
-          ls = (exp(-tl) + 0.5*exp(-0.25*tl))/1.5;
+          // (multiple scattering: some light diffuses deep into the cloud, so the shade is not black)
+          ls = (exp(-tl) + 0.55*exp(-0.2*tl) + 0.3*exp(-0.05*tl))/1.85;
         }
         float a = 1.0 - exp(-b*dt*uMpb);
         vec3 cc = sunCol*(L.r*ls*phase*sunF + 0.25*sqrt(L.r)) + ambCol*(0.32 + 0.5*L.g)*skyF;
@@ -263,37 +270,65 @@ void main(){
  * Tileable 3-D noise (n^3 RGBA bytes, two textures) for the cloud shapes, each channel equalised to a uniform
  * distribution (so that "noise above 1 - f" covers the fraction f). main: g lumpy value noise with most variance at the
  * largest scale (2 to 16 cells per tile), b lumpy value noise (4 to 16 cells), a flat sheets (value noise twice as fine
- * vertically as horizontally). oct: bubbles (inverted Worley distance, round lobes), one size per channel so the 3-D
- * view can weight each size by the flow: r 4, g 8, b 16, a 2 lobes per tile.
+ * vertically as horizontally). oct and octS: bubbles (inverted Worley distance), one size per channel so the 3-D view
+ * can weight each size by the flow, shaped like rising thermals (domed on top, flattened below and wider than tall, the
+ * more so the larger): oct the large sizes (r 4, g 8, b 16, a 2 lobes per tile), octS the small ones (r 4, g 8, b 16).
  */
-function cloudNoise(n: number): { main: Uint8Array; oct: Uint8Array } {
-  const out = new Uint8Array(4 * n * n * n), oct = new Uint8Array(4 * n * n * n), N = n * n * n;
+export function cloudNoise(n: number): { main: Uint8Array; oct: Uint8Array; octS: Uint8Array } {
+  const out = new Uint8Array(4 * n * n * n), oct = new Uint8Array(4 * n * n * n), octS = new Uint8Array(4 * n * n * n), N = n * n * n;
   const h = (a: number): number => { let x = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b); x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35); x ^= x >>> 16; return (x >>> 0) / 4294967296; };
-  const worley = (C: number): Float32Array => {
+  // inverted distance to the nearest of C^3 jittered points per tile. shape: a bubble's width (1 / hor) and its depth
+  // below its centre (1 / below), relative to its height above (a rising thermal: a dome in front, flattened behind)
+  const worley = (C: number, hor = 1, below = 1): Float32Array => {
     const pts = new Float32Array(3 * C * C * C);
     for (let c = 0; c < C * C * C; c++) for (let d = 0; d < 3; d++) pts[3 * c + d] = h(c * 3 + d + C * 7919);
-    const f = new Float32Array(N), s = C / n;
-    for (let k = 0; k < n; k++) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
-      const x = (i + 0.5) * s, y = (j + 0.5) * s, z = (k + 0.5) * s, ci = Math.floor(x), cj = Math.floor(y), ck = Math.floor(z);
-      let best = 9;
-      for (let c = -1; c <= 1; c++) for (let b = -1; b <= 1; b++) for (let a = -1; a <= 1; a++) {
-        const ii = ci + a, jj = cj + b, kk = ck + c, w = ((((kk % C) + C) % C) * C + (((jj % C) + C) % C)) * C + (((ii % C) + C) % C);
-        const dx = ii + pts[3 * w]! - x, dy = jj + pts[3 * w + 1]! - y, dz = kk + pts[3 * w + 2]! - z, d = dx * dx + dy * dy + dz * dz;
-        if (d < best) best = d;
+    const f = new Float32Array(N), s = C / n, h2 = hor * hor;
+    // wrapped cell index of cell c - 1 + o (o = 0, 1, 2) for c = 0 .. C - 1
+    const wrap = new Int32Array(C + 2); for (let c = -1; c <= C; c++) wrap[c + 1] = ((c % C) + C) % C;
+    for (let k = 0; k < n; k++) {
+      const z = (k + 0.5) * s, ck = Math.floor(z);
+      for (let j = 0; j < n; j++) {
+        const y = (j + 0.5) * s, cj = Math.floor(y);
+        for (let i = 0; i < n; i++) {
+          const x = (i + 0.5) * s, ci = Math.floor(x);
+          let best = 9;
+          for (let c = 0; c < 3; c++) {
+            const kk = ck + c - 1, wk = wrap[ck + c]! * C;
+            for (let b = 0; b < 3; b++) {
+              const jj = cj + b - 1, wj = (wk + wrap[cj + b]!) * C;
+              for (let a = 0; a < 3; a++) {
+                const ii = ci + a - 1, w = 3 * (wj + wrap[ci + a]!);
+                // dz < 0: the point lies above the bubble's centre
+                const dx = ii + pts[w]! - x, dy = jj + pts[w + 1]! - y, dz0 = kk + pts[w + 2]! - z, dz = dz0 < 0 ? dz0 : dz0 * below;
+                const d = (dx * dx + dy * dy) * h2 + dz * dz;
+                if (d < best) best = d;
+              }
+            }
+          }
+          f[(k * n + j) * n + i] = Math.max(0, 1 - Math.sqrt(best));
+        }
       }
-      f[(k * n + j) * n + i] = Math.max(0, 1 - Math.sqrt(best));
     }
     return f;
   };
   // value noise with P x P x Pz lattice cells per tile
   const value = (P: number, Pz: number, seed: number): Float32Array => {
     const f = new Float32Array(N), s = P / n, sz = Pz / n;
-    const g = (a: number, b: number, c: number): number => h(((((c % Pz) + Pz) % Pz) * P + (((b % P) + P) % P)) * P + (((a % P) + P) % P) + seed);
+    // the lattice values once (wrapping), then interpolated
+    const G = new Float32Array(P * P * Pz);
+    for (let c = 0; c < Pz; c++) for (let b = 0; b < P; b++) for (let a = 0; a < P; a++) G[(c * P + b) * P + a] = h((c * P + b) * P + a + seed);
     const sm = (t: number): number => t * t * (3 - 2 * t);
-    for (let k = 0; k < n; k++) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
-      const x = i * s, y = j * s, z = k * sz, a = Math.floor(x), b = Math.floor(y), c = Math.floor(z), u = sm(x - a), v = sm(y - b), w = sm(z - c);
-      const l = (cc: number): number => (1 - v) * ((1 - u) * g(a, b, cc) + u * g(a + 1, b, cc)) + v * ((1 - u) * g(a, b + 1, cc) + u * g(a + 1, b + 1, cc));
-      f[(k * n + j) * n + i] = (1 - w) * l(c) + w * l(c + 1);
+    for (let k = 0; k < n; k++) {
+      const z = k * sz, c = Math.floor(z), w = sm(z - c), c0 = (c % Pz) * P * P, c1 = ((c + 1) % Pz) * P * P;
+      for (let j = 0; j < n; j++) {
+        const y = j * s, b = Math.floor(y), v = sm(y - b), b0 = (b % P) * P, b1 = ((b + 1) % P) * P;
+        for (let i = 0; i < n; i++) {
+          const x = i * s, a = Math.floor(x), u = sm(x - a), a0 = a % P, a1 = (a + 1) % P;
+          const l0 = (1 - v) * ((1 - u) * G[c0 + b0 + a0]! + u * G[c0 + b0 + a1]!) + v * ((1 - u) * G[c0 + b1 + a0]! + u * G[c0 + b1 + a1]!);
+          const l1 = (1 - v) * ((1 - u) * G[c1 + b0 + a0]! + u * G[c1 + b0 + a1]!) + v * ((1 - u) * G[c1 + b1 + a0]! + u * G[c1 + b1 + a1]!);
+          f[(k * n + j) * n + i] = (1 - w) * l0 + w * l1;
+        }
+      }
     }
     return f;
   };
@@ -306,9 +341,14 @@ function cloudNoise(n: number): { main: Uint8Array; oct: Uint8Array } {
     for (let b = 1; b <= B; b++) cnt[b] = cnt[b]! + cnt[b - 1]!;
     for (let q = 0; q < N; q++) { const b = Math.floor((x[q]! - lo) * sc); dst[4 * q + ch] = Math.round(255 * (cnt[b]! + 0.5 * (cnt[b + 1]! - cnt[b]!)) / N); }
   };
-  // bubbles, one size per channel (the 3-D view weights each size by the flow): 4, 8, 16 and 2 cells per tile
-  const w2 = worley(2), w4 = worley(4), w8 = worley(8), w16 = worley(16);
-  put(0, (q) => w4[q]!, oct); put(1, (q) => w8[q]!, oct); put(2, (q) => w16[q]!, oct); put(3, (q) => w2[q]!, oct);
+  // bubbles, one size per channel (the 3-D view weights each size by the flow). A rising thermal is shaped by drag and
+  // buoyancy: a rounded dome in front, flattened behind, wider than tall; the larger the lump the more (small ones are
+  // turbulent and nearly round). oct, the large tile (sizes 4.25, 2.1, 1.06, 8.5 km on the 17 km tile): 4, 8, 16, 2 per
+  // tile; octS, the small tile (0.53, 0.27, 0.13 km on 2.12 km): 4, 8, 16 per tile
+  const L4 = worley(4, 0.84, 2.1), L8 = worley(8, 0.88, 1.8), L16 = worley(16, 0.92, 1.55), L2 = worley(2, 0.8, 2.4);
+  put(0, (q) => L4[q]!, oct); put(1, (q) => L8[q]!, oct); put(2, (q) => L16[q]!, oct); put(3, (q) => L2[q]!, oct);
+  const S4 = worley(4, 0.95, 1.35), S8 = worley(8, 0.98, 1.2), S16 = worley(16, 1, 1.1);
+  put(0, (q) => S4[q]!, octS); put(1, (q) => S8[q]!, octS); put(2, (q) => S16[q]!, octS);
   for (let q = 0; q < N; q++) out[4 * q] = 128;
   // large lumpy pattern: most of its variance in the largest features (clusters and gaps)
   const g2 = value(2, 2, 5), g4 = value(4, 4, 7), g8 = value(8, 8, 13), g16 = value(16, 16, 17);
@@ -317,7 +357,7 @@ function cloudNoise(n: number): { main: Uint8Array; oct: Uint8Array } {
   put(2, (q) => v4[q]! + 0.5 * v8[q]! + 0.25 * v16[q]!);
   const s4 = value(4, 8, 41), s8 = value(8, 16, 53), s16 = value(16, 32, 67);
   put(3, (q) => s4[q]! + 0.5 * s8[q]! + 0.25 * s16[q]!);
-  return { main: out, oct };
+  return { main: out, oct, octS };
 }
 
 // tracer lines / points: colour by height (orange near the ground, pale yellow aloft), alpha fades along the trail
@@ -487,6 +527,7 @@ export class VolumeView {
   private readonly light: WebGLTexture;
   private readonly noise: WebGLTexture;
   private readonly oct: WebGLTexture;
+  private readonly octS: WebGLTexture;
   private readonly groundTex: WebGLTexture;
   private box: [number, number, number] = [1, 1, 0.3];
   // tracer particles
@@ -531,10 +572,11 @@ export class VolumeView {
     this.light = gl.createTexture()!;
     this.noise = gl.createTexture()!;
     this.oct = gl.createTexture()!;
+    this.octS = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
     // the cloud texture's noise (once; tiles, repeats)
     const nz3 = cloudNoise(64);
-    for (const [tex, data] of [[this.noise, nz3.main], [this.oct, nz3.oct]] as const) {
+    for (const [tex, data] of [[this.noise, nz3.main], [this.oct, nz3.oct], [this.octS, nz3.octS]] as const) {
       gl.bindTexture(gl.TEXTURE_3D, tex);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
       gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 64, 64, 64, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
@@ -1049,6 +1091,7 @@ export class VolumeView {
     gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_3D, this.light); gl.uniform1i(u('uLight'), 4);
     gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_3D, this.noise); gl.uniform1i(u('uNoise'), 5);
     gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_3D, this.oct); gl.uniform1i(u('uOct'), 6);
+    gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_3D, this.octS); gl.uniform1i(u('uOctS'), 7);
     gl.uniform1i(u('uTrOn'), trOn ? 1 : 0);
     if (trOn) {
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.trFbo!.c); gl.uniform1i(u('uTrC'), 2);
