@@ -81,11 +81,11 @@ float shape(float x, float y, float a, float th, float e, float wx, float wy){
   float noX = clamp((a + (1.0 - a)*y - st)/a, 0.0, 1.0);
   return mix(1.0 - th, mix(noX, full, wx), wy);
 }
-// bulge (model field units) of lumps of sizes lam (m) on a cloud whose flow makes lumps up to Lf: about half as high as
-// wide; none larger than about Lf, none the grid resolves (larger than about 2 cells: the model's own), none smaller
+// bulge (model field units) of lumps of sizes lam (m) on a cloud whose flow makes lumps up to Lf: round and full, about
+// as high as their radius; none larger than about Lf, none the grid resolves (larger than about 2 cells: the model's own), none smaller
 // than about two pixels
 vec4 lumps(vec4 lam, float Lf, float pf, float mpb){
-  return 0.5*S_CONV/uDx*lam*(1.0 - smoothstep(Lf, 2.0*Lf, lam))*(1.0 - smoothstep(1.5*uDx, 3.0*uDx, lam))*smoothstep(pf, 2.5*pf, lam/mpb);
+  return 0.7*S_CONV/uDx*lam*(1.0 - smoothstep(Lf, 2.0*Lf, lam))*(1.0 - smoothstep(1.5*uDx, 3.0*uDx, lam))*smoothstep(pf, 2.5*pf, lam/mpb);
 }
 // c cloud and pr precipitation extinction (1/m), g the grid's cloud value, vig how vigorous (full-body) the cloud is,
 // m how far inside the full body (box units; its gradient gives the way the surface faces), open how open the point is
@@ -102,7 +102,10 @@ Cl dens(vec3 p, float pf, bool detail){
   // how vigorous the convection this cloud belongs to is (computed by the page for every box, see setVolume)
   // the kind of cloud (1 vigorous, 0.5 weak liquid, 0 ice sheet) and the updraft of its plume (CloudDetail)
   float conv = max(0.0, 2.0*s.b - 1.0), ice = max(0.0, 1.0 - 2.0*s.b), up = s.a;
-  float bc = mix(mix(B_LAYER, B_CONV, conv), B_ICE, ice);
+  // weak cloud: scattered pieces hold less water (diluted by the air they mix with: about 0.05 g/m3, translucent), a
+  // widespread layer about 0.2 g/m3
+  float bl = mix(0.2*B_LAYER, B_LAYER, smoothstep(0.15, 0.7, bm/B_LAYER));
+  float bc = mix(mix(bl, B_CONV, conv), B_ICE, ice);
   float th = 1.0 - min(1.0, bm/bc);
   float vig = smoothstep(0.1, 0.5, conv);
   // metres (horizontal scale of the box; the view's heights are stretched alike, so bubbles look round)
@@ -120,7 +123,7 @@ Cl dens(vec3 p, float pf, bool detail){
     float Ag = u2(A1.g, A2.g, 0.5), Aa = u2(A1.a, A2.a, 0.5);
     // how much of each scale a pixel resolves (details need about two pixels)
     float wB = smoothstep(pf, 2.5*pf, 1500.0/mpb), wA = smoothstep(pf, 2.5*pf, 5000.0/mpb);
-    dl = shape(B.b, Ag, 0.5, th, 0.07, wB, wA);
+    dl = shape(B.b, Ag, 0.5, th, 0.12, wB, wA);
     di = shape(B.a, Aa, 0.5, th, 0.18, wB, wA);
   }
   // vigorous cloud: a full body (where the model's field exceeds the cloud-edge value, about 0.04 g/m3 of water) whose
@@ -139,17 +142,17 @@ Cl dens(vec3 p, float pf, bool detail){
       float Lf = clamp(150.0*30.0*up*up, 250.0, 8500.0), e = s.r - s0;
       // lumps matter only near the surface: nothing is worked out deep inside or well outside (the sizes add up to at
       // most twice the largest)
-      float amp = S_CONV/uDx*min(2.0*Lf, 3.0*uDx);
-      if (e > -0.65*amp && e < 0.35*amp) {
+      float amp = 1.4*S_CONV/uDx*min(2.0*Lf, 3.0*uDx);
+      if (e > -0.72*amp && e < 0.28*amp) {
         vec4 aT = lumps(vec4(4250.0, 2125.0, 1062.0, 8500.0), Lf, pf, mpb), aB = lumps(vec4(530.0, 265.0, 133.0, 0.0), Lf, pf, mpb);
         vec3 qb = q - vec3(0.0, 0.0, uRise*mpb/uMpb);
         // (a tile whose sizes all fall below a couple of pixels, or above the flow's, is not looked up)
-        vec4 T = dot(aT, vec4(1.0)) > 1e-6 ? texture(uOct, vec3(0.891*qb.x - 0.454*qb.y, 0.454*qb.x + 0.891*qb.y, qb.z)/17000.0 + vec3(0.37, 0.11, 0.0)) : vec4(0.35);
-        vec4 Bo = dot(aB, vec4(1.0)) > 1e-6 ? texture(uOctS, vec3(0.788*qb.x + 0.616*qb.y, -0.616*qb.x + 0.788*qb.y, qb.z)/2120.0) : vec4(0.35);
-        float bulge = dot(aT, T - 0.35) + dot(aB, Bo - 0.35), ex = dot(aT + aB, vec4(1.0));
-        disp = bulge*smoothstep(-0.65*amp, 0.0, e);
+        vec4 T = dot(aT, vec4(1.0)) > 1e-6 ? texture(uOct, vec3(0.891*qb.x - 0.454*qb.y, 0.454*qb.x + 0.891*qb.y, qb.z)/17000.0 + vec3(0.37, 0.11, 0.0)) : vec4(0.28);
+        vec4 Bo = dot(aB, vec4(1.0)) > 1e-6 ? texture(uOctS, vec3(0.788*qb.x + 0.616*qb.y, -0.616*qb.x + 0.788*qb.y, qb.z)/2120.0) : vec4(0.28);
+        float bulge = dot(aT, T - 0.28) + dot(aB, Bo - 0.28), ex = dot(aT + aB, vec4(1.0));
+        disp = bulge*smoothstep(-0.72*amp, 0.0, e);
         // clefts between lumps (where the lumps are low) see less of the sky and the sun
-        if (ex > 1e-6) r.open = mix(0.5, 1.0, smoothstep(-0.25, 0.45, bulge/ex));
+        if (ex > 1e-6) r.open = mix(0.5, 1.0, smoothstep(-0.2, 0.5, bulge/ex));
       }
     }
     float m = (s.r - s0 + disp)*uCell/S_CONV;
@@ -278,7 +281,7 @@ export function cloudNoise(n: number): { main: Uint8Array; oct: Uint8Array; octS
   const out = new Uint8Array(4 * n * n * n), oct = new Uint8Array(4 * n * n * n), octS = new Uint8Array(4 * n * n * n), N = n * n * n;
   const h = (a: number): number => { let x = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b); x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35); x ^= x >>> 16; return (x >>> 0) / 4294967296; };
   // inverted distance to the nearest of C^3 jittered points per tile. shape: a bubble's width (1 / hor) and its depth
-  // below its centre (1 / below), relative to its height above (a rising thermal: a dome in front, flattened behind)
+  // below its centre (1 / below), relative to its height above
   const worley = (C: number, hor = 1, below = 1): Float32Array => {
     const pts = new Float32Array(3 * C * C * C);
     for (let c = 0; c < C * C * C; c++) for (let d = 0; d < 3; d++) pts[3 * c + d] = h(c * 3 + d + C * 7919);
@@ -341,13 +344,13 @@ export function cloudNoise(n: number): { main: Uint8Array; oct: Uint8Array; octS
     for (let b = 1; b <= B; b++) cnt[b] = cnt[b]! + cnt[b - 1]!;
     for (let q = 0; q < N; q++) { const b = Math.floor((x[q]! - lo) * sc); dst[4 * q + ch] = Math.round(255 * (cnt[b]! + 0.5 * (cnt[b + 1]! - cnt[b]!)) / N); }
   };
-  // bubbles, one size per channel (the 3-D view weights each size by the flow). A rising thermal is shaped by drag and
-  // buoyancy: a rounded dome in front, flattened behind, wider than tall; the larger the lump the more (small ones are
-  // turbulent and nearly round). oct, the large tile (sizes 4.25, 2.1, 1.06, 8.5 km on the 17 km tile): 4, 8, 16, 2 per
-  // tile; octS, the small tile (0.53, 0.27, 0.13 km on 2.12 km): 4, 8, 16 per tile
-  const L4 = worley(4, 0.84, 2.1), L8 = worley(8, 0.88, 1.8), L16 = worley(16, 0.92, 1.55), L2 = worley(2, 0.8, 2.4);
+  // bubbles, one size per channel (the 3-D view weights each size by the flow). A rising turret is round and full, a
+  // little taller than wide the larger it is (it is drawn out upward as it rises), its back, where it merges with the
+  // cloud below, a little flatter; small ones are turbulent and round. oct, the large tile (sizes 4.25, 2.1, 1.06,
+  // 8.5 km on the 17 km tile): 4, 8, 16, 2 per tile; octS, the small tile (0.53, 0.27, 0.13 km on 2.12 km): 4, 8, 16
+  const L4 = worley(4, 1.06, 1.25), L8 = worley(8, 1.04, 1.2), L16 = worley(16, 1.03, 1.15), L2 = worley(2, 1.08, 1.3);
   put(0, (q) => L4[q]!, oct); put(1, (q) => L8[q]!, oct); put(2, (q) => L16[q]!, oct); put(3, (q) => L2[q]!, oct);
-  const S4 = worley(4, 0.95, 1.35), S8 = worley(8, 0.98, 1.2), S16 = worley(16, 1, 1.1);
+  const S4 = worley(4, 1.02, 1.1), S8 = worley(8, 1, 1.05), S16 = worley(16, 1, 1);
   put(0, (q) => S4[q]!, octS); put(1, (q) => S8[q]!, octS); put(2, (q) => S16[q]!, octS);
   for (let q = 0; q < N; q++) out[4 * q] = 128;
   // large lumpy pattern: most of its variance in the largest features (clusters and gaps)
