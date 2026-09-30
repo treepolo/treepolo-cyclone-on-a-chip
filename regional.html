@@ -110,6 +110,7 @@ a{color:#8fc1ff}
 <label class="f"><span>地面 / Ground</span><select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="snow">累積雪與霰 / Snow + graupel</option><option value="wind">地面風速 / Surface wind</option><option value="theta">地面溫度擾動 / Surface θ′</option><option value="none">海陸（只看雲）/ Sea and land only</option></select></label>
 <div id="legend" class="muted"></div>
 <label class="f"><span>雲的不透明度 / Cloud opacity</span><input id="cloudK" type="range" min="2" max="80" value="65" /></label>
+<label class="f chk" title="強烈對流的雲塊與泡泡、準確的雲面與光影；手機或較慢的顯卡可以關掉 / lumps and bubbles of vigorous cloud with exact surfaces and lighting; turn off on a phone or a slower GPU"><input id="cloudDetail" type="checkbox" checked /><span>雲的細節（較耗效能）/ Cloud detail (costs more)</span></label>
 <label class="f" title="高度方向放大幾倍（1× 是真實比例：颱風其實很扁）/ how many times the heights are stretched (1× is true scale: a tropical cyclone is really flat)"><span>垂直誇大 / Vertical exaggeration <span id="exagV" class="muted">8×</span></span><input id="exag" type="range" min="1" max="15" step="0.5" value="8" /></label>
 <label class="f" title="廣角適合在颱風眼裡往上看整圈眼牆 / a wide angle suits looking up at the whole eyewall from inside the eye"><span>視野廣度 / Field of view <span id="fovV" class="muted">52°</span></span><input id="fov" type="range" min="20" max="140" value="52" /></label>
 <label class="f chk"><input id="showLabels" type="checkbox" checked /><span>顯示風暴標籤 / Storm labels</span></label>

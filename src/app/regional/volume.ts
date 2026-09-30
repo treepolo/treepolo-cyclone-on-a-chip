@@ -16,7 +16,7 @@ void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }`;
 const FS = `#version 300 es
 precision highp float; precision highp sampler3D;
 in vec2 vUv; out vec4 o;
-uniform sampler3D uVol;    // r cloud extinction, g precipitation (or updraft / vorticity), b vertical velocity, a ice fraction
+uniform sampler3D uVol;    // r cloud extinction, g precipitation (or updraft / vorticity), b vigour of the convection, a ice fraction
 uniform sampler3D uLight;  // r transmittance to the sun, g transmittance straight up (precomputed per volume)
 uniform sampler3D uNoise;  // r bubbles, g large lumpy pattern, b small lumpy pattern, a flat sheets (tileable)
 uniform sampler2D uGround;
@@ -26,6 +26,7 @@ uniform float uMpb;   // metres per box unit (vertical scale)
 uniform float uCell;  // grid spacing in box units
 uniform float uDx;    // grid spacing (m)
 uniform float uPix;   // size of a screen pixel per unit distance from the eye
+uniform int uDetail;  // 1: lumps of vigorous cloud, their surfaces found exactly and lit by the way they face
 uniform vec3 uOut;    // surface colour beyond the domain (sea or land)
 uniform int uMode;    // channel 2: 0 precipitation, 1 updraft, 2 cyclonic vorticity
 uniform vec4 uCut; uniform int uCutOn;  // cutaway: nothing where dot(uCut.xyz, p) > uCut.w
@@ -39,20 +40,22 @@ bool hitBox(vec3 ro, vec3 rd, out float t0, out float t1){
 }
 float ext(float v){ return EXTMAX*v*v*v; }
 float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); }
-float wOf(float b){ float x = (b*255.0 - 128.0)/127.0; return sign(x)*x*x*40.0; }
-// Cloud and precipitation extinction at p (box units), the cloud's own coded amount, and how open the point is to the
-// sky (1; less in the folds between cloud bubbles); pf is the size of a screen pixel there (box units).
-// The grid box holds the model's mean extinction; inside the box the cloud is drawn as the part of it that is cloudy.
-// With an in-cloud extinction for the kind of cloud (liquid water 0.2 g/m3 in layer cloud, 0.6 g/m3 in convective cloud,
-// ice 0.02 g/m3) the cloud fraction is mean / in-cloud, and a noise value (uniformly distributed) picks where that
-// fraction is: cloud where the noise exceeds 1 - fraction, so the box mean stays the model's. The noise has real sizes
-// whatever the grid: groups of clouds (2.5-30 km) plus single clouds and their bubbles (0.4-1.5 km); the tiles have
-// unrelated sizes and angles, so nothing repeats. Detail smaller than a pixel is replaced by its exact average (a
-// distant cumulus field is a fine grain, a near one single clouds). The small-scale shape follows the model at that
-// point: rising cloud (updraft strong for this grid spacing, liquid or glaciating) is built of bubbles with crisp edges,
-// more of them the stronger the updraft, which the sun lights on one side and they shade one another (cauliflower);
-// calm liquid cloud is lumpy, ice that hardly rises (anvils, cirrus) flat sheets with soft edges. The model's field decides where and how much cloud.
+// Cloud and precipitation extinction at p (box units) (dens below); pf is the size of a screen pixel there (box units).
+// The grid box holds the model's mean extinction, and how vigorous the convection it belongs to is (convectionVigour,
+// computed by the page from the model's vertical velocity and cloud). Weak, sinking or dissipating cloud is drawn as
+// the part of the box that is cloudy: with an in-cloud extinction for the kind of cloud (liquid water 0.2 g/m3 in
+// layer cloud, 0.6 g/m3 in convective cloud, ice 0.02 g/m3) the cloud fraction is mean / in-cloud, and a noise value
+// (uniformly distributed) picks where that fraction is (cloud where the noise exceeds 1 - fraction), so the box mean
+// stays the model's; the noise has real sizes whatever the grid, groups of clouds (2.5-30 km) plus single clouds
+// (0.4-1.5 km), at unrelated tile sizes and angles so nothing repeats, and detail smaller than a pixel enters as its
+// exact average. Vigorous cloud (a rising tower, liquid or glaciating) is drawn full: a solid body whose surface
+// bulges into turrets and bubbles, found exactly and lit by the way it faces, so the sun lights the lumps on one side
+// and they shade one another (cauliflower; there the box mean is not kept exactly). Ice that hardly rises away from
+// updrafts (anvils, cirrus) spreads into flat sheets with soft edges. The model's field decides where and how much
+// cloud there is.
 const float B_LAYER = 0.03, B_CONV = 0.09, B_ICE = 0.0011;
+// display value (cube root of extinction / EXTMAX) of the convective in-cloud extinction
+const float S_CONV = ${Math.cbrt(0.09 / EXT_MAX).toFixed(4)};
 // uniform value of a*x + (1 - a)*y for independent uniform x, y (the distribution function of the weighted sum)
 float u2(float x, float y, float a){
   float b = 1.0 - a, lo = min(a, b), hi = max(a, b), s = a*x + b*y;
@@ -74,41 +77,67 @@ float shape(float x, float y, float a, float th, float e, float wx, float wy){
   float noX = clamp((a + (1.0 - a)*y - st)/a, 0.0, 1.0);
   return mix(1.0 - th, mix(noX, full, wx), wy);
 }
-vec4 dens(vec3 p, float pf){
-  if (uCutOn == 1 && dot(uCut.xyz, p) > uCut.w) return vec4(0.0, 0.0, 0.0, 1.0);
-  vec4 s = texture(uVol, p/uBox);
+// c cloud and pr precipitation extinction (1/m), g the grid's cloud value, vig how vigorous (full-body) the cloud is,
+// m how far inside the full body (box units; its gradient gives the way the surface faces)
+struct Cl { float c; float pr; float g; float vig; float m; };
+Cl dens(vec3 p, float pf, bool detail){
+  Cl r = Cl(0.0, 0.0, 0.0, 0.0, -1.0);
+  if (uCutOn == 1 && dot(uCut.xyz, p) > uCut.w) return r;
+  vec4 s = textureLod(uVol, p/uBox, 0.0);
   float bp = uMode == 0 ? ext(s.g)*uK : s.g*s.g*4e-4;
-  if (s.r < 0.004) return vec4(0.0, bp, s.r, 1.0);
+  r.pr = bp; r.g = s.r;
+  if (s.r < 0.004) return r;
   float bm = ext(s.r);
-  // updraft of a convective box at this grid spacing (a plume fills less of a larger box)
-  float wc = 1.5*min(1.0, 3000.0/uDx);
-  // a rising tower bulges whether its water is liquid or frozen; ice spreads into sheets where it hardly rises
-  float conv = smoothstep(0.15*wc, 2.0*wc, wOf(s.b));
+  // how vigorous the convection this cloud belongs to is (computed by the page for every box, see setVolume)
+  float conv = s.b;
   float ice = s.a*(1.0 - conv);
   float bc = mix(mix(B_LAYER, B_CONV, conv), B_ICE, ice);
   float th = 1.0 - min(1.0, bm/bc);
+  float vig = smoothstep(0.1, 0.5, conv);
   // metres (horizontal scale of the box; the view's heights are stretched alike, so bubbles look round)
   float mpb = uDx/uCell;
-  vec3 q = p*mpb;
-  // groups: two tiles (40 km turned 27 degrees, 64.7 km turned -71 degrees) whose sum never repeats in a domain;
-  // clouds and bubbles: tile of 6 km turned -38 degrees
-  vec4 A1 = texture(uNoise, vec3(0.891*q.x - 0.454*q.y, 0.454*q.x + 0.891*q.y, q.z)/40000.0 + vec3(0.37, 0.11, 0.0));
-  vec4 A2 = texture(uNoise, vec3(0.326*q.x + 0.946*q.y, -0.946*q.x + 0.326*q.y, q.z)/64700.0 + vec3(0.71, 0.29, 0.5));
-  vec4 B = texture(uNoise, vec3(0.788*q.x + 0.616*q.y, -0.616*q.x + 0.788*q.y, q.z)/6000.0);
-  float Ag = u2(A1.g, A2.g, 0.5), Aa = u2(A1.a, A2.a, 0.5);
-  // how much of each scale a pixel resolves (bubbles need about two pixels)
-  float wB = smoothstep(pf, 2.5*pf, 1500.0/mpb), wA = smoothstep(pf, 2.5*pf, 5000.0/mpb);
-  float dc = shape(B.r, Ag, 0.5 + 0.3*conv, th, mix(0.05, 0.02, conv), wB, wA);
-  float dl = shape(B.b, Ag, 0.5, th, 0.07, wB, wA);
-  float di = shape(B.a, Aa, 0.5, th, 0.18, wB, wA);
-  float d = mix(mix(dl, dc, conv), di, ice);
+  // weak, short-lived or dissipating cloud: the cloudy part of the box, in pieces; ice that hardly rises: sheets
+  float dl = 0.0, di = 0.0;
+  if (vig < 0.999 || ice > 0.001) {
+    vec3 q = p*mpb;
+    // groups: two tiles (40 km turned 27 degrees, 64.7 km turned -71 degrees) whose sum never repeats in a domain;
+    // clouds: tile of 6 km turned -38 degrees
+    vec4 A1 = texture(uNoise, vec3(0.891*q.x - 0.454*q.y, 0.454*q.x + 0.891*q.y, q.z)/40000.0 + vec3(0.37, 0.11, 0.0));
+    vec4 A2 = texture(uNoise, vec3(0.326*q.x + 0.946*q.y, -0.946*q.x + 0.326*q.y, q.z)/64700.0 + vec3(0.71, 0.29, 0.5));
+    vec4 B = texture(uNoise, vec3(0.788*q.x + 0.616*q.y, -0.616*q.x + 0.788*q.y, q.z)/6000.0);
+    float Ag = u2(A1.g, A2.g, 0.5), Aa = u2(A1.a, A2.a, 0.5);
+    // how much of each scale a pixel resolves (details need about two pixels)
+    float wB = smoothstep(pf, 2.5*pf, 1500.0/mpb), wA = smoothstep(pf, 2.5*pf, 5000.0/mpb);
+    dl = shape(B.b, Ag, 0.5, th, 0.07, wB, wA);
+    di = shape(B.a, Aa, 0.5, th, 0.18, wB, wA);
+  }
+  // vigorous cloud: a full body (where the model's field exceeds the cloud-edge value, about 0.04 g/m3 of water) whose
+  // surface bulges into turrets (lobes about 4 km) with bubbles on them (about 1.5 km), from bubble noise at two
+  // unrelated tile sizes and angles. The bulges push mostly outward and only next to the body, so it stays full and
+  // nothing floats free; a pixel larger than a lobe shows the smooth body instead. They scale with lobe size / grid
+  // spacing in the model's field units. m: how far inside (box units, from the field's typical slope S_CONV per cell)
+  float dv = 0.0;
+  if (vig > 0.0) {
+    float s0 = 0.4*S_CONV, disp = 0.0;
+    if (detail) {
+      vec3 q = p*mpb;
+      float T = texture(uNoise, vec3(0.891*q.x - 0.454*q.y, 0.454*q.x + 0.891*q.y, q.z)/17000.0 + vec3(0.37, 0.11, 0.0)).r;
+      float Bb = texture(uNoise, vec3(0.788*q.x + 0.616*q.y, -0.616*q.x + 0.788*q.y, q.z)/6000.0).r;
+      float aT = min(0.24, 0.5*(4250.0/uDx)*S_CONV)*smoothstep(pf, 2.5*pf, 4250.0/mpb);
+      float aB = min(0.14, 0.5*(1500.0/uDx)*S_CONV)*smoothstep(pf, 2.5*pf, 1500.0/mpb);
+      disp = (aT*(T - 0.3) + aB*(Bb - 0.3))*smoothstep(s0 - 0.6*(aT + aB), s0, s.r);
+    }
+    float m = (s.r - s0 + disp)*uCell/S_CONV;
+    dv = smoothstep(-0.7*pf, 0.7*pf, m);
+    r.m = m;
+  }
+  float d = mix(mix(dl, dv, vig), di, ice);
   // precipitation inside cloud (graupel in a tower, rain in a raining cloud) is in its cloudy part (same box mean); below
   // the cloud it falls as a smooth shaft
   float f = 1.0 - th;
   if (uMode == 0) bp *= mix(1.0, d/max(f, 1e-3), smoothstep(0.1, 0.4, f));
-  // folds between bubbles (low bubble value) get less light from the sky and the sun
-  float open = mix(1.0, mix(0.55, 1.0, smoothstep(0.15, 0.75, B.r)), conv*wB);
-  return vec4(max(bm, bc)*d*uK, bp, s.r, open);
+  r.c = max(bm, bc)*d*uK; r.pr = bp; r.vig = vig*(1.0 - ice);
+  return r;
 }
 void main(){
   vec4 ndc = vec4(vUv*2.0-1.0, 1.0, 1.0);
@@ -152,31 +181,51 @@ void main(){
     float t = t0 + dtC*hash(gl_FragCoord.xy);
     float phase = 0.85 + 1.8*pow(max(mu,0.0), 6.0);
     int fine = 0, budget = 170;
+    float prevC = 0.0;
     for (int i = 0; i < 320; i++) {
       if (t > t1 || trans < 0.004) break;
       if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
       vec3 p = ro + t*rd;
-      float pf = t*uPix, dtF = min(dtC, min(0.5*uCell, max(0.8*pf, 0.25*lamB)));
-      vec4 d = dens(p, pf);
-      if (fine == 0 && d.z >= 0.004 && budget > 0 && dtF < dtC*0.99) { t = max(t0, t - dtC); fine = 24; continue; }
+      float pf = t*uPix, dtF = min(dtC, min(0.5*uCell, max(0.8*pf, 0.35*lamB)));
+      Cl d = dens(p, pf, fine > 0 && uDetail == 1);
+      if (fine == 0 && d.g >= 0.004 && budget > 0 && dtF < dtC*0.99) { t = max(t0, t - dtC); fine = 24; prevC = 0.0; continue; }
       float dt = fine > 0 ? dtF : dtC;
-      float b = d.x + d.y;
+      // sunlight and skylight factors of the surface of a full cloud body (1: no surface shading)
+      float sunF = 1.0, skyF = 1.0;
+      if (uDetail == 1 && fine > 0 && d.vig > 0.05 && d.c*dt*uMpb > 1.0 && prevC*dt*uMpb < 0.3) {
+        // entering an opaque body: find its surface (bisection) and light it by the way it faces
+        float ta = t - dt, tb = t;
+        for (int k = 0; k < 4; k++) { float tm = 0.5*(ta + tb); if (dens(ro + tm*rd, pf, true).c*dt*uMpb > 1.0) tb = tm; else ta = tm; }
+        t = tb; p = ro + t*rd; d = dens(p, pf, true);
+        // the way the surface faces: down the slope of the body's margin (lobes included)
+        float hn = max(0.08*lamB, 0.6*pf);
+        vec3 g = vec3(dens(p + vec3(hn, 0.0, 0.0), pf, true).m, dens(p + vec3(0.0, hn, 0.0), pf, true).m, dens(p + vec3(0.0, 0.0, hn), pf, true).m) - d.m;
+        if (dot(g, g) > 1e-12) {
+          vec3 n = -normalize(g);
+          // light wraps well round a lobe (it scatters through the cloud), so the shaded side is soft; faces turned up
+          // see more sky
+          sunF = mix(1.0, clamp((dot(n, uSun) + 0.45)/1.45, 0.0, 1.0)*1.25, d.vig);
+          skyF = mix(1.0, 0.5 + 0.5*clamp(0.5 + 0.5*n.z, 0.0, 1.0), d.vig);
+        }
+      }
+      prevC = d.c;
+      float b = d.c + d.pr;
       if (b > 1e-9) {
         vec2 L = texture(uLight, p/uBox).rg;
         // the cloud a short way toward the sun shades the bubbles (the precomputed light has no small-scale shape), with a
         // multiple-scattering tail (light diffusing into the shaded side of a bubble)
         float ls = 1.0;
-        if (fine > 0 && d.x > 0.0 && trans > 0.02) {
-          float h = min(0.5*uCell, max(0.6*lamB, 2.0*pf)), tl = dens(p + uSun*h, pf).x*h*uMpb;
+        if (fine > 0 && d.c > 0.0 && trans > 0.02) {
+          float h = min(0.5*uCell, max(0.6*lamB, 2.0*pf)), tl = dens(p + uSun*h, pf, false).c*h*uMpb;
           ls = (exp(-tl) + 0.5*exp(-0.25*tl))/1.5;
         }
         float a = 1.0 - exp(-b*dt*uMpb);
-        vec3 cc = sunCol*(L.r*ls*phase + 0.25*sqrt(L.r))*(0.75 + 0.25*d.w) + ambCol*(0.32 + 0.5*L.g)*d.w;
+        vec3 cc = sunCol*(L.r*ls*phase*sunF + 0.25*sqrt(L.r)) + ambCol*(0.32 + 0.5*L.g)*skyF;
         vec3 cp = uMode == 0 ? vec3(0.46,0.54,0.66)*(0.35 + 0.65*L.r) + ambCol*0.1 : (uMode == 1 ? vec3(1.0,0.45,0.2) : vec3(0.35,0.55,1.0));
-        vec3 c = (cc*d.x + cp*d.y)/b;
+        vec3 c = (cc*d.c + cp*d.pr)/b;
         col += trans*a*c; trans *= 1.0-a;
       }
-      if (fine > 0) { fine--; budget--; if (d.z >= 0.004) fine = max(fine, 8); }
+      if (fine > 0) { fine--; budget--; if (d.g >= 0.004) fine = max(fine, 8); }
       t += dt;
     }
   }
@@ -234,7 +283,7 @@ function cloudNoise(n: number): Uint8Array {
     for (let q = 0; q < N; q++) { const b = Math.floor((x[q]! - lo) * sc); out[4 * q + ch] = Math.round(255 * (cnt[b]! + 0.5 * (cnt[b + 1]! - cnt[b]!)) / N); }
   };
   const w4 = worley(4), w8 = worley(8), w16 = worley(16);
-  put(0, (q) => w4[q]! + 0.5 * w8[q]! + 0.25 * w16[q]!);
+  put(0, (q) => w4[q]! + 0.4 * w8[q]! + 0.15 * w16[q]!);
   // large lumpy pattern: most of its variance in the largest features (clusters and gaps)
   const g2 = value(2, 2, 5), g4 = value(4, 4, 7), g8 = value(8, 8, 13), g16 = value(16, 16, 17);
   put(1, (q) => g2[q]! + 0.6 * g4[q]! + 0.36 * g8[q]! + 0.22 * g16[q]!);
@@ -261,6 +310,70 @@ void main(){
   oD = vec4(h / 255.0, (v - h * 256.0) / 255.0, 0.0, 1.0);
 }`;
 const TRAIL = 8;
+
+/**
+ * How vigorous the convection each box's cloud belongs to is (0..1 as a byte), which decides how the 3-D view draws it
+ * (full and bulging, or in pieces). From the display bytes: vertical velocity (wByte) and cloud (extByte) per box, on
+ * a grid of spacing dx (m). A box counts as vigorous when the air there or in the boxes around rises (the strength
+ * that counts is scale-aware: a plume fills less of a larger box, 1.5 m/s at 3 km or finer, 0.3 m/s at 15 km), when a
+ * strong updraft rises within about 4 km (a tower's sides and overshooting top, where the air itself hardly rises),
+ * or when the boxes around are mostly liquid cloud that is not sinking. Sinking, thin cloud away from updrafts is
+ * not (dissipating: drawn in pieces).
+ */
+export function convectionVigour(nx: number, ny: number, nz: number, cloud: Uint8Array, aux: Uint8Array, dx: number): Uint8Array {
+  const n = nx * ny * nz, np = nx * ny, wc = 1.5 * Math.min(1, 3000 / Math.max(dx, 1));
+  const W = new Float32Array(256);
+  for (let b = 0; b < 256; b++) { const x = (b - 128) / 127; W[b] = Math.sign(x) * x * x * 40; }
+  const ss = (a: number, b: number, x: number): number => { const t = x <= a ? 0 : x >= b ? 1 : (x - a) / (b - a); return t * t * (3 - 2 * t); };
+  // vertical velocity and cloud (0..1), then their means over the 3 x 3 x 3 boxes around (separable, fewer at the edges)
+  const w = new Float32Array(n), c = new Float32Array(n), wa = new Float32Array(n), ca = new Float32Array(n);
+  for (let q = 0; q < n; q++) { w[q] = W[aux[2 * q]!]!; c[q] = cloud[q]! / 255; }
+  for (let r = 0; r < nz * ny; r++) {
+    const o = r * nx;
+    for (let i = 0; i < nx; i++) {
+      const q = o + i, lo = i > 0 ? q - 1 : q, hi = i < nx - 1 ? q + 1 : q, cn = 1 + (i > 0 ? 1 : 0) + (i < nx - 1 ? 1 : 0);
+      wa[q] = (w[q]! + (lo !== q ? w[lo]! : 0) + (hi !== q ? w[hi]! : 0)) / cn;
+      ca[q] = (c[q]! + (lo !== q ? c[lo]! : 0) + (hi !== q ? c[hi]! : 0)) / cn;
+    }
+  }
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {
+    const o = (k * ny + j) * nx, dn = j > 0 ? -nx : 0, up = j < ny - 1 ? nx : 0, cn = 1 + (dn ? 1 : 0) + (up ? 1 : 0);
+    for (let i = 0; i < nx; i++) {
+      const q = o + i;
+      w[q] = (wa[q]! + (dn ? wa[q + dn]! : 0) + (up ? wa[q + up]! : 0)) / cn;
+      c[q] = (ca[q]! + (dn ? ca[q + dn]! : 0) + (up ? ca[q + up]! : 0)) / cn;
+    }
+  }
+  for (let k = 0; k < nz; k++) {
+    const o = k * np, dn = k > 0 ? -np : 0, up = k < nz - 1 ? np : 0, cn = 1 + (dn ? 1 : 0) + (up ? 1 : 0);
+    for (let q2 = 0; q2 < np; q2++) {
+      const q = o + q2;
+      wa[q] = (w[q]! + (dn ? w[q + dn]! : 0) + (up ? w[q + up]! : 0)) / cn;
+      ca[q] = (c[q]! + (dn ? c[q + dn]! : 0) + (up ? c[q + up]! : 0)) / cn;
+    }
+  }
+  // the strongest updraft of each column, then the largest within about 4 km (a square of that half width)
+  const col = new Float32Array(np).fill(-99), tmp = new Float32Array(np), wCol = new Float32Array(np);
+  for (let q = 0; q < n; q++) { const v = W[aux[2 * q]!]!, q2 = q % np; if (v > col[q2]!) col[q2] = v; }
+  const R = Math.max(1, Math.round(4000 / Math.max(dx, 1)));
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    let m = -99; for (let a = Math.max(0, i - R); a <= Math.min(nx - 1, i + R); a++) m = Math.max(m, col[j * nx + a]!);
+    tmp[j * nx + i] = m;
+  }
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    let m = -99; for (let b = Math.max(0, j - R); b <= Math.min(ny - 1, j + R); b++) m = Math.max(m, tmp[b * nx + i]!);
+    wCol[j * nx + i] = m;
+  }
+  const out = new Uint8Array(n);
+  for (let q = 0; q < n; q++) {
+    const cN = ca[q]!;
+    if (cloud[q] === 0 && cN === 0) continue;
+    const wN = wa[q]!, wl = W[aux[2 * q]!]!;
+    const v = Math.max(ss(0.15 * wc, 2 * wc, wl > wN ? wl : wN), ss(0.5 * wc, 3 * wc, wCol[q % np]!), ss(0.35, 0.6, cN) * ss(-wc, 0, wN) * (1 - aux[2 * q + 1]! / 255));
+    out[q] = Math.round(255 * v);
+  }
+  return out;
+}
 
 /** Cutaway of the 3-D view: the plane and which side stays (positions as fractions of the domain; x east, y north). */
 export interface Cut {
@@ -584,7 +697,8 @@ export class VolumeView {
    *  a domain `top` metres high with grid spacing dx (m), set the box aspect (x, y normalised to 1) and light it. */
   setVolume(nx: number, ny: number, nz: number, cloud: Uint8Array, rain: Uint8Array, aux: Uint8Array | null, aspectZ: number, top: number, dx: number): void {
     const gl = this.gl, rg = new Uint8Array(nx * ny * nz * 4);
-    for (let i = 0; i < cloud.length; i++) { rg[4 * i] = cloud[i]!; rg[4 * i + 1] = rain[i]!; rg[4 * i + 2] = aux ? aux[2 * i]! : 128; rg[4 * i + 3] = aux ? aux[2 * i + 1]! : 0; }
+    const vig = aux ? convectionVigour(nx, ny, nz, cloud, aux, dx) : null;
+    for (let i = 0; i < cloud.length; i++) { rg[4 * i] = cloud[i]!; rg[4 * i + 1] = rain[i]!; rg[4 * i + 2] = vig ? vig[i]! : 0; rg[4 * i + 3] = aux ? aux[2 * i + 1]! : 0; }
     gl.bindTexture(gl.TEXTURE_3D, this.vol);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, nx, ny, nz, 0, gl.RGBA, gl.UNSIGNED_BYTE, rg);
@@ -726,6 +840,9 @@ export class VolumeView {
 
   private outside: V3 = [0.10, 0.17, 0.30];
   private cut: Cut | null = null;
+  private detail = true;
+  /** Lumps of vigorous cloud and their lighting (off: a lighter picture for slower devices). */
+  setDetail(on: boolean): void { this.detail = on; this.dirty = true; }
   /** time (ms) at which the light is recomputed for a changed cutaway (0: none due) */
   private lightDue = 0;
   /** Cutaway (null: whole volume). The light is recomputed without the removed part (shortly after the last change). */
@@ -821,6 +938,7 @@ export class VolumeView {
     gl.uniform1f(u('uCell'), this.data ? bx / this.data.nx : 0.01);
     gl.uniform1f(u('uDx'), this.data ? this.data.dx : 3000);
     gl.uniform1f(u('uPix'), 2 * Math.tan(this.fov / 2) / h);
+    gl.uniform1i(u('uDetail'), this.detail ? 1 : 0);
     gl.uniform3f(u('uOut'), this.outside[0], this.outside[1], this.outside[2]);
     const cp = this.cutPlane();
     gl.uniform1i(u('uCutOn'), cp ? 1 : 0);

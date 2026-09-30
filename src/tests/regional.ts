@@ -480,4 +480,24 @@ void DRY_AIR;
     `theta ${eth.toExponential(1)} K, u ${eu.toExponential(1)} m/s; box: outside ${out}, centre ${mid.toFixed(3)}, edge ${edge.toFixed(3)}`);
 }
 
+// 3-D view: how vigorous the convection a box's cloud belongs to is (full, bulging cloud or pieces)
+{
+  const { convectionVigour } = await import('../app/regional/volume.js');
+  const { wByte, extByte } = await import('../regional/display.js');
+  const nx = 20, ny = 20, nz = 10, n = nx * ny * nz, at = (i: number, j: number, k: number): number => (k * ny + j) * nx + i;
+  const cloud = new Uint8Array(n), aux = new Uint8Array(2 * n);
+  for (let q = 0; q < n; q++) aux[2 * q] = wByte(0);
+  const dense = extByte(0.08);
+  // a tower with a 10 m/s updraft in its core column; a thin sinking cloud far away; a calm dense layer far away
+  for (let k = 2; k <= 8; k++) for (let j = 5; j <= 7; j++) for (let i = 5; i <= 7; i++) cloud[at(i, j, k)] = dense;
+  for (let k = 2; k <= 8; k++) aux[2 * at(6, 6, k)] = wByte(10);
+  cloud[at(15, 15, 4)] = extByte(0.002); aux[2 * at(15, 15, 4)] = wByte(-2);
+  for (let k = 3; k <= 5; k++) for (let j = 0; j <= 4; j++) for (let i = 13; i <= 19; i++) cloud[at(i, j, k)] = dense;
+  const v = convectionVigour(nx, ny, nz, cloud, aux, 2000);
+  const side = v[at(7, 5, 4)]!, top = v[at(6, 6, 8)]!, thin = v[at(15, 15, 4)]!, layer = v[at(16, 2, 4)]!;
+  let clear = 0; for (let q = 0; q < n; q++) if (cloud[q] === 0 && v[q]! > 0 && Math.abs((q % nx) - 6) > 4) clear = Math.max(clear, v[q]!);
+  check('3-D view: a tower\'s side and top near a strong updraft are vigorous, so is a calm dense liquid layer; a thin sinking cloud far from updrafts is not; clear air far from cloud is 0',
+    side === 255 && top === 255 && layer > 200 && thin === 0 && clear === 0, `side ${side}, top ${top}, layer ${layer}, thin sinking ${thin}, clear ${clear}`);
+}
+
 summary('regional');

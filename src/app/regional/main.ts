@@ -259,6 +259,7 @@ document.querySelectorAll<HTMLDetailsElement>('details[id]').forEach((d) => {
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('subgrid').onchange = (): void => send({ type: 'subgrid', on: $<HTMLInputElement>('subgrid').checked });
+$('cloudDetail').onchange = (): void => { view.setDetail($<HTMLInputElement>('cloudDetail').checked); };
 $('exag').oninput = (): void => {
   exag = Number($<HTMLInputElement>('exag').value); $('exagV').textContent = `${exag}×`;
   const f = replayIdx !== null ? replay.frames[replayIdx] : lastVol;
