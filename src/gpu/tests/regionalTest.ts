@@ -197,6 +197,100 @@ export async function regionalNestTests(): Promise<void> {
 }
 
 /** Six-class ice microphysics: GPU vs CPU in a deep convective cloud (Weisman–Klemp sounding). */
+/** Two-way nest in a cylinder (twoway.ts, nestGpu.ts): GPU targets and feedback against the CPU, and a coupled run. */
+export async function regionalTwoWayTest(): Promise<void> {
+  const device = await getDevice();
+  const { nestGeometry, nestTargets, nestFeedback, emptyTargets, parentState, nestRelax } = await import('../../regional/twoway.js');
+  const { refineInto } = await import('../../regional/refine.js');
+  const { GpuNest } = await import('../nestGpu.js');
+  const pcfg = { nx: 32, ny: 32, nz: 12, dx: 4000, dy: 4000, dz: 1000, dt: 12, nsound: 6, f: 5e-5, beta: 0.2, divDamp: 0.1, dampDepth: 3000, dampRate: 1 / 300, kdiff2: 0, lateral: 'periodic' as const };
+  const mk = (): { p: RegionalModel; mp: KesslerMicrophysics } => {
+    const p = new RegionalModel(pcfg, weismanKlemp, 3), mp = new KesslerMicrophysics(p);
+    p.setBaseWind((z) => ({ u: 5 * Math.tanh(z / 3000), v: -2 }));
+    for (let k = 0; k < pcfg.nz; k++) for (let j = 0; j < 32; j++) for (let i = 0; i < 32; i++) {
+      const q = p.idx(i, j, k), r = Math.hypot(((i + 0.5) * 4000 - 64000) / 10000, ((j + 0.5) * 4000 - 64000) / 10000, (p.zc[k]! - 1500) / 1500);
+      p.scalars[QV]![q] = p.qv0[k]!;
+      if (r < 1) p.th[q] = p.th[q]! + 2.5 * Math.cos(0.5 * Math.PI * r) ** 2;
+    }
+    for (let s = 0; s < 40; s++) { p.step(); mp.apply(12); }       // 8 min: a growing cloud at the centre
+    return { p, mp };
+  };
+  const { p, mp } = mk();
+  const g = nestGeometry(p.c, 24000, 2000, 500);
+  if (typeof g === 'string') throw new Error(g);
+  const mkChild = (): { c: RegionalModel; cp: KesslerMicrophysics } => {
+    const c = new RegionalModel({ ...pcfg, nx: g.nx, ny: g.nx, nz: g.nz, dx: g.dx, dy: g.dx, dz: g.dz, dt: 6, lateral: 'open', ...nestRelax(g) }, weismanKlemp, 3);
+    c.setBaseWind((z) => ({ u: 5 * Math.tanh(z / 3000), v: -2 }));
+    c.boundary = emptyTargets(c);
+    refineInto(p, c, g.i0 * 4000, g.j0 * 4000);
+    nestTargets(p, null, c, g, 1, c.boundary);
+    return { c, cp: new KesslerMicrophysics(c) };
+  };
+  const { c, cp } = mkChild();
+  const gp = new GpuRegional(device, p, { moist: true, physics: null }), gc = new GpuRegional(device, c, { moist: true, physics: null, boundary: c.boundary });
+  gp.uploadFrom(p); gc.uploadFrom(c);
+  const link = new GpuNest(gp, gc, g);
+  // targets after one parent step, half-way through it; the CPU reference from the GPU parent's own states at the start
+  // and the end of the step (the kernel alone: CPU and GPU parents differ by f32 rounding, most visibly in pi')
+  p.step(); mp.apply(12);
+  gp.step(1);
+  const gNow = await gp.readState(), gOld = await gp.readBuffer(gp.S0, gp.nf * p.size * 4);
+  const pg = new RegionalModel(pcfg, weismanKlemp, 3);
+  pg.setBaseWind((z) => ({ u: 5 * Math.tanh(z / 3000), v: -2 }));
+  [pg.u, pg.v, pg.w, pg.th, pg.pp, ...pg.scalars].forEach((a, f) => { for (let i = 0; i < p.size; i++) a[i] = gNow[f * p.size + i]!; });
+  const fOld = (f: number): Float64Array => Float64Array.from(gOld.subarray(f * p.size, (f + 1) * p.size));
+  const st = { u: fOld(0), v: fOld(1), th: fOld(3), pp: fOld(4), qv: fOld(5) };
+  const tg = emptyTargets(c);
+  nestTargets(pg, st, c, g, 0.5, tg);
+  link.targets(0.5);
+  const B = await gc.readBuffer(gc.B!, 5 * c.size * 4);
+  const rel = (f: number, a: Float64Array): number => {
+    let e = 0, s = 0;
+    for (let k = 0; k < c.c.nz; k++) for (let j = 0; j < c.c.ny; j++) for (let i = 0; i < c.c.nx; i++) {
+      if (Math.hypot(i + 0.5 - c.c.nx / 2, j + 0.5 - c.c.ny / 2) <= c.c.relaxCyl!.r) continue;
+      const q = c.idx(i, j, k); e += (B[f * c.size + q]! - a[q]!) ** 2; s += a[q]! ** 2;
+    }
+    return Math.sqrt(e / Math.max(s, 1e-300));
+  };
+  const et = [rel(0, tg.u), rel(1, tg.v), rel(2, tg.th), rel(3, tg.qv!), rel(4, tg.pp!)];
+  gcheck('two-way nest: GPU relaxation targets match the CPU (u, v, theta, qv, pi\'; rel L2 < 1e-4)', et.every((x) => x < 1e-4), et.map((x) => x.toExponential(1)).join(' '));
+  // feedback of a changed child (warmer and moister in the middle) into the parent
+  for (let k = 0; k < c.c.nz; k++) for (let j = 0; j < c.c.ny; j++) for (let i = 0; i < c.c.nx; i++) {
+    const q = c.idx(i, j, k), r = Math.hypot(i + 0.5 - c.c.nx / 2, j + 0.5 - c.c.ny / 2) / 8;
+    if (r < 1) { c.th[q] = c.th[q]! + 1.5 * (1 - r); c.scalars[QV]![q] = c.scalars[QV]![q]! * (1 + 0.1 * (1 - r)); c.u[q] = c.u[q]! + 3 * (1 - r); }
+  }
+  gc.uploadFrom(c); gp.uploadFrom(p);
+  nestFeedback(c, p, g);
+  link.feedback();
+  const sp = await gp.readState();
+  const ef = [cmp(p, sp, 0, p.u, pcfg.nz), cmp(p, sp, 2, p.w, pcfg.nz + 1), cmp(p, sp, 3, p.th, pcfg.nz), cmp(p, sp, 5, p.scalars[QV]!, pcfg.nz), cmp(p, sp, 6, p.scalars[QC]!, pcfg.nz)];
+  gcheck('two-way nest: GPU feedback matches the CPU (u, w, theta, qv, qc; rel L2 < 1e-5, qc < 1e-4)', ef[0]! < 1e-5 && ef[1]! < 1e-5 && ef[2]! < 1e-7 && ef[3]! < 1e-5 && ef[4]! < 1e-4, ef.map((x) => x.toExponential(1)).join(' '));
+  // a coupled run of 10 parent steps (2 child sub-steps each) on both
+  const a = mk(), b = mkChild();
+  const P = a.p, Pm = a.mp;
+  // (mkChild used the first parent; rebuild the child from this one)
+  refineInto(P, b.c, g.i0 * 4000, g.j0 * 4000); nestTargets(P, null, b.c, g, 1, b.c.boundary!);
+  const gP = new GpuRegional(device, P, { moist: true, physics: null }), gC = new GpuRegional(device, b.c, { moist: true, physics: null, boundary: b.c.boundary });
+  gP.uploadFrom(P); gC.uploadFrom(b.c);
+  const L2 = new GpuNest(gP, gC, g);
+  for (let s = 0; s < 10; s++) {
+    const s0 = parentState(P);
+    P.step(); Pm.apply(12);
+    for (let n = 0; n < 2; n++) { nestTargets(P, s0, b.c, g, (n + 0.5) / 2, b.c.boundary!); b.c.step(); b.cp.apply(6); }
+    nestFeedback(b.c, P, g);
+  }
+  for (let s = 0; s < 10; s++) L2.step(2);
+  const sP = await gP.readState(), sC = await gC.readState();
+  const dP = [cmp(P, sP, 2, P.w, pcfg.nz + 1), cmp(P, sP, 3, P.th, pcfg.nz), cmp(P, sP, 6, P.scalars[QC]!, pcfg.nz)];
+  const dC = [cmp(b.c, sC, 2, b.c.w, b.c.c.nz + 1), cmp(b.c, sC, 3, b.c.th, b.c.c.nz), cmp(b.c, sC, 6, b.c.scalars[QC]!, b.c.c.nz)];
+  let wmax = 0; for (let q = 0; q < b.c.size; q++) wmax = Math.max(wmax, Math.abs(b.c.w[q]!));
+  gcheck('two-way nest: 10 coupled steps on the GPU follow the CPU (w < 2e-2, theta < 1e-5, qc < 5e-2 rel L2, outer and inner) with a rising cloud in the nest',
+    dP[0]! < 2e-2 && dP[1]! < 1e-5 && dP[2]! < 5e-2 && dC[0]! < 2e-2 && dC[1]! < 1e-5 && dC[2]! < 5e-2 && wmax > 1,
+    `outer ${dP.map((x) => x.toExponential(1)).join(' ')}, inner ${dC.map((x) => x.toExponential(1)).join(' ')}, inner w max ${wmax.toFixed(1)} m/s`);
+  for (const x of [gp, gc, gP, gC]) x.destroy();
+  link.destroy(); L2.destroy();
+}
+
 export async function regionalIceTests(): Promise<void> {
   const device = await getDevice();
   const nx = 20, nz = 30, dx = 3000, dz = 600;

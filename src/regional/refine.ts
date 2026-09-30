@@ -15,8 +15,11 @@ export interface Accumulations { rain: Float64Array; snow: Float64Array }
 
 /** Trilinear sampler of a model's fields at any point of its domain (m, the model's own coordinates), each variable at
  *  its staggered position: sx, sy horizontal staggering (0 = face, 0.5 = centre), faceZ for w levels. Periodic
- *  domains wrap, open ones clamp at the edges. */
-export function makeSampler(mc: RegionalModel): (a: Float64Array, x: number, y: number, z: number, sx: number, sy: number, faceZ: boolean) => number {
+ *  domains wrap, open ones clamp at the edges (and below the lowest / above the highest level). With `base` (a profile
+ *  per level) it samples the departure from it: fields with a strong mean vertical gradient (theta, qv, the base wind)
+ *  are interpolated as departures and the target grid's own profile added back, so the clamping near the ground and
+ *  the lid does not carry, e.g., the potential temperature of 500 m down to 250 m. */
+export function makeSampler(mc: RegionalModel): (a: Float64Array, x: number, y: number, z: number, sx: number, sy: number, faceZ: boolean, base?: Float64Array) => number {
   const c = mc.c, periodic = c.lateral !== 'open';
   // sample index along one axis: fractional index -> two integer indices and a weight
   const axis = (p: number, n: number): [number, number, number] => {
@@ -31,12 +34,12 @@ export function makeSampler(mc: RegionalModel): (a: Float64Array, x: number, y: 
     const q = Math.max(0, Math.min(n - 1, p)), i0 = Math.min(Math.floor(q), Math.max(0, n - 2));
     return n < 2 ? [0, 0, 0] : [i0, i0 + 1, q - i0];
   };
-  return (a, x, y, z, sx, sy, faceZ) => {
+  return (a, x, y, z, sx, sy, faceZ, base) => {
     // number of distinct points along each axis (faces: nx + 1 with open boundaries, nx if periodic)
     const nI = sx === 0 && !periodic ? c.nx + 1 : c.nx, nJ = sy === 0 && !periodic ? c.ny + 1 : c.ny;
     const [i0, i1, wx] = axis(x / c.dx - sx, nI), [j0, j1, wy] = axis(y / c.dy - sy, nJ);
     const [k0, k1, wz] = faceZ ? vaxis(z / c.dz, c.nz + 1) : vaxis(z / c.dz - 0.5, c.nz);
-    const g = (i: number, j: number, k: number): number => a[mc.idx(i, j, k)]!;
+    const g = base ? (i: number, j: number, k: number): number => a[mc.idx(i, j, k)]! - base[k]! : (i: number, j: number, k: number): number => a[mc.idx(i, j, k)]!;
     const l0 = (1 - wy) * ((1 - wx) * g(i0, j0, k0) + wx * g(i1, j0, k0)) + wy * ((1 - wx) * g(i0, j1, k0) + wx * g(i1, j1, k0));
     const l1 = (1 - wy) * ((1 - wx) * g(i0, j0, k1) + wx * g(i1, j0, k1)) + wy * ((1 - wx) * g(i0, j1, k1) + wx * g(i1, j1, k1));
     return (1 - wz) * l0 + wz * l1;
@@ -62,24 +65,26 @@ function surfaceSampler(mc: RegionalModel): (a: ArrayLike<number>, x: number, y:
  *  too. The fine model's time is set to the coarse model's. */
 export function refineInto(mc: RegionalModel, mf: RegionalModel, x0 = 0, y0 = 0, accC?: Accumulations, accF?: Accumulations): void {
   const f = mf.c, sample = makeSampler(mc), ssf = surfaceSampler(mc);
-  const fill = (dst: Float64Array, src: Float64Array, sx: number, sy: number, faceZ: boolean, iMax: number, jMax: number, kMax: number): void => {
+  // theta, qv and the horizontal wind as departures from each grid's own base profile (makeSampler)
+  const fill = (dst: Float64Array, src: Float64Array, sx: number, sy: number, faceZ: boolean, iMax: number, jMax: number, kMax: number, baseC?: Float64Array, baseF?: Float64Array): void => {
     for (let k = 0; k < kMax; k++) {
-      const z = faceZ ? k * f.dz : (k + 0.5) * f.dz;
+      const z = faceZ ? k * f.dz : (k + 0.5) * f.dz, b = baseF ? baseF[k]! : 0;
       for (let j = 0; j < jMax; j++) {
         const y = y0 + (j + sy) * f.dy;
-        for (let i = 0; i < iMax; i++) dst[mf.idx(i, j, k)] = sample(src, x0 + (i + sx) * f.dx, y, z, sx, sy, faceZ);
+        for (let i = 0; i < iMax; i++) dst[mf.idx(i, j, k)] = b + sample(src, x0 + (i + sx) * f.dx, y, z, sx, sy, faceZ, baseC);
       }
     }
   };
   const fOpen = f.lateral === 'open';
-  fill(mf.u, mc.u, 0, 0.5, false, f.nx + (fOpen ? 1 : 0), f.ny, f.nz);
-  fill(mf.v, mc.v, 0.5, 0, false, f.nx, f.ny + (fOpen ? 1 : 0), f.nz);
+  fill(mf.u, mc.u, 0, 0.5, false, f.nx + (fOpen ? 1 : 0), f.ny, f.nz, mc.ub, mf.ub);
+  fill(mf.v, mc.v, 0.5, 0, false, f.nx, f.ny + (fOpen ? 1 : 0), f.nz, mc.vb, mf.vb);
   fill(mf.w, mc.w, 0.5, 0.5, true, f.nx, f.ny, f.nz + 1);
-  fill(mf.th, mc.th, 0.5, 0.5, false, f.nx, f.ny, f.nz);
+  fill(mf.th, mc.th, 0.5, 0.5, false, f.nx, f.ny, f.nz, mc.th0, mf.th0);
   fill(mf.pp, mc.pp, 0.5, 0.5, false, f.nx, f.ny, f.nz);
   const ns = Math.min(mc.scalars.length, mf.scalars.length);
   for (let s = 0; s < ns; s++) {
-    fill(mf.scalars[s]!, mc.scalars[s]!, 0.5, 0.5, false, f.nx, f.ny, f.nz);
+    if (s === 0) fill(mf.scalars[0]!, mc.scalars[0]!, 0.5, 0.5, false, f.nx, f.ny, f.nz, mc.qv0, mf.qv0);
+    else fill(mf.scalars[s]!, mc.scalars[s]!, 0.5, 0.5, false, f.nx, f.ny, f.nz);
     const a = mf.scalars[s]!;
     for (let i = 0; i < a.length; i++) if (a[i]! < 0) a[i] = 0;
   }

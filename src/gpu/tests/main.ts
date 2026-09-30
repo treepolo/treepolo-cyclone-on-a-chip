@@ -2,7 +2,7 @@ import { gdone } from './harness.js';
 import { transformTests } from './transformTest.js';
 import { dycoreTests } from './dycoreTest.js';
 import { moistTests, earthTests, spinupGpuTest } from './moistTest.js';
-import { regionalTests, regionalNestTests, regionalIceTests, regionalPerf, regionalAdaptiveTest, regionalFlagDebug, regionalRefineTest, regionalChartsTest } from './regionalTest.js';
+import { regionalTests, regionalNestTests, regionalIceTests, regionalPerf, regionalAdaptiveTest, regionalFlagDebug, regionalRefineTest, regionalChartsTest, regionalTwoWayTest } from './regionalTest.js';
 import { regionalDebug } from './regionalDebug.js';
 
 async function main(): Promise<void> {
@@ -15,6 +15,7 @@ async function main(): Promise<void> {
     if (!which || which === 'earth' || which === 'spinup') await spinupGpuTest();
     if (!which || which === 'regional' || which === 'rbasic') await regionalTests();
     if (!which || which === 'regional' || which === 'nest') await regionalNestTests();
+    if (!which || which === 'regional' || which === 'twoway') await regionalTwoWayTest();
     if (!which || which === 'regional' || which === 'ice') await regionalIceTests();
     if (which === 'perf') await regionalPerf();
     if (which === 'flags') await regionalFlagDebug();

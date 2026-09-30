@@ -480,4 +480,85 @@ void DRY_AIR;
     `theta ${eth.toExponential(1)} K, u ${eu.toExponential(1)} m/s; box: outside ${out}, centre ${mid.toFixed(3)}, edge ${edge.toFixed(3)}`);
 }
 
+// Two-way nest in a cylinder (twoway.ts): geometry, relaxation targets, feedback and a short coupled run
+{
+  const { nestGeometry, nestTargets, nestFeedback, emptyTargets, parentState, nestRelax, feedbackWeight } = await import('../regional/twoway.js');
+  const { refineInto: rin } = await import('../regional/refine.js');
+  const pcfg: RegionalConfig = { ...base, nx: 40, ny: 40, nz: 10, dx: 4000, dy: 4000, dz: 1000, dt: 10, lateral: 'periodic' };
+  const p = new RegionalModel(pcfg, weismanKlemp, 1);
+  const g0 = nestGeometry(p.c, 30000, 2000, 500);
+  if (typeof g0 === 'string') throw new Error(g0);
+  const g = g0;
+  check('two-way nest: geometry (ratios 2 and 2, 24 outer cells across centred in the domain, 48 x 48 x 20 inner cells)',
+    g.r === 2 && g.rz === 2 && g.np === 24 && g.i0 === 8 && g.j0 === 8 && g.nx === 48 && g.nz === 20 && g.cx === 80000 && g.cy === 80000,
+    `r ${g.r} rz ${g.rz} np ${g.np} i0 ${g.i0} nx ${g.nx} nz ${g.nz} centre ${g.cx}`);
+  // departures from the base state linear in x, y, z (at each variable's staggered position): interpolation
+  // reproduces them exactly away from the lowest and highest levels
+  const lin = (x: number, y: number, z: number): number => 2e-5 * x - 1e-5 * y + 3e-4 * z;
+  for (let k = 0; k < 10; k++) for (let j = 0; j < 40; j++) for (let i = 0; i < 40; i++) {
+    const q = p.idx(i, j, k), z = (k + 0.5) * 1000;
+    p.th[q] = p.th0[k]! + lin((i + 0.5) * 4000, (j + 0.5) * 4000, z); p.u[q] = lin(i * 4000, (j + 0.5) * 4000, z); p.v[q] = 0.5 * lin((i + 0.5) * 4000, j * 4000, z);
+    p.pp[q] = 1e-4 * lin((i + 0.5) * 4000, (j + 0.5) * 4000, z); p.scalars[0]![q] = p.qv0[k]! * (1 + 0.01 * lin((i + 0.5) * 4000, (j + 0.5) * 4000, z));
+  }
+  const old = parentState(p);
+  for (const a of [old.th, old.u]) for (let i = 0; i < a.length; i++) a[i] = a[i]! - 1;
+  const ccfg: RegionalConfig = { ...pcfg, nx: g.nx, ny: g.nx, nz: g.nz, dx: g.dx, dy: g.dx, dz: g.dz, dt: 5, lateral: 'open', ...nestRelax(g) };
+  const ch = new RegionalModel(ccfg, weismanKlemp, 1), tg = emptyTargets(ch);
+  nestTargets(p, old, ch, g, 0.25, tg);
+  // a child point in the relaxation ring (a corner of the box), mid-troposphere
+  const ci = 1, cj = 2, ck = 9, x0 = g.i0 * 4000, y0 = g.j0 * 4000, zc = (ck + 0.5) * g.dz;
+  const eTh = Math.abs(tg.th[ch.idx(ci, cj, ck)]! - (ch.th0[ck]! + lin(x0 + (ci + 0.5) * g.dx, y0 + (cj + 0.5) * g.dx, zc) - 0.75));
+  const eU = Math.abs(tg.u[ch.idx(ci, cj, ck)]! - (lin(x0 + ci * g.dx, y0 + (cj + 0.5) * g.dx, zc) - 0.75));
+  check('two-way nest: relaxation targets are the outer fields interpolated in space and time (exact for linear fields)', eTh < 1e-9 && eU < 1e-9, `theta ${eTh.toExponential(1)}, u ${eU.toExponential(1)}`);
+  // feedback: a child that is the interpolated parent gives the parent back; a warmer child warms the parent inside only
+  rin(p, ch, x0, y0);
+  const th0 = Float64Array.from(p.th), u0 = Float64Array.from(p.u);
+  nestFeedback(ch, p, g);
+  // (the lowest and highest levels: the child's outer half-levels hold the departure of the nearest outer level)
+  let eBack = 0, eEdge = 0;
+  for (let k = 0; k < 10; k++) for (let j = 0; j < 40; j++) for (let i = 0; i < 40; i++) {
+    const q = p.idx(i, j, k), e = Math.max(Math.abs(p.th[q]! - th0[q]!), Math.abs(p.u[q]! - u0[q]!));
+    if (k === 0 || k === 9) eEdge = Math.max(eEdge, e); else eBack = Math.max(eBack, e);
+  }
+  for (let i = 0; i < ch.th.length; i++) ch.th[i] = ch.th[i]! + 1;
+  nestFeedback(ch, p, g);
+  let inside = 0, outside = 0, taper = 0;
+  for (let j = 0; j < 40; j++) for (let i = 0; i < 40; i++) {
+    const d = Math.hypot((i + 0.5) * 4000 - g.cx, (j + 0.5) * 4000 - g.cy), dth = p.th[p.idx(i, j, 5)]! - th0[p.idx(i, j, 5)]!;
+    if (d <= g.R - g.Wf) inside = Math.max(inside, Math.abs(dth - 1));
+    else if (d >= g.R) outside = Math.max(outside, Math.abs(dth));
+    else taper = Math.max(taper, Math.abs(dth - feedbackWeight(g, d)));
+  }
+  check('two-way nest: feedback returns an unchanged child exactly (lowest / highest level within 0.04); a 1 K warmer child warms the outer grid by 1 K inside, blended at the rim, not at all outside',
+    eBack < 1e-9 && eEdge < 0.04 && inside < 1e-9 && outside === 0 && taper < 1e-9,
+    `unchanged ${eBack.toExponential(1)} (lowest / highest level ${eEdge.toFixed(4)}), inside ${inside.toExponential(1)}, rim ${taper.toExponential(1)}, outside ${outside}`);
+  // a short coupled run: a warm bubble in the middle of a resting atmosphere
+  const q2 = new RegionalModel(pcfg, weismanKlemp, 1);
+  for (let k = 0; k < 10; k++) for (let j = 0; j < 40; j++) for (let i = 0; i < 40; i++) {
+    const rr = Math.hypot(((i + 0.5) * 4000 - 80000) / 12000, ((j + 0.5) * 4000 - 80000) / 12000, ((k + 0.5) * 1000 - 1500) / 1500);
+    q2.scalars[0]![q2.idx(i, j, k)] = q2.qv0[k]!;
+    if (rr < 1) q2.th[q2.idx(i, j, k)] = q2.th[q2.idx(i, j, k)]! + 2 * Math.cos(0.5 * Math.PI * rr) ** 2;
+  }
+  const c2 = new RegionalModel(ccfg, weismanKlemp, 1);
+  c2.boundary = emptyTargets(c2);
+  rin(q2, c2, x0, y0);
+  let finite = true;
+  for (let s = 0; s < 24; s++) {
+    const st = parentState(q2);
+    q2.step();
+    for (let n = 0; n < 2; n++) { nestTargets(q2, st, c2, g, (n + 0.5) / 2, c2.boundary); c2.step(); }
+    nestFeedback(c2, q2, g);
+    if (!Number.isFinite(q2.maxAbs(q2.w, 11)) || !Number.isFinite(c2.maxAbs(c2.w, 21))) finite = false;
+  }
+  // after the feedback the centre of the outer grid is the child's mean there
+  const pc = q2.idx(20, 20, 2);
+  // (as departures from each grid's base profile)
+  let mean = 0; for (let dk = 0; dk < 2; dk++) for (let dj = 0; dj < 2; dj++) for (let di = 0; di < 2; di++) mean += c2.th[c2.idx(24 + di, 24 + dj, 4 + dk)]! - c2.th0[4 + dk]!;
+  mean /= 8;
+  const wIn = c2.maxAbs(c2.w, 21), wOut = q2.maxAbs(q2.w, 11);
+  check('two-way nest: a 4-minute coupled run of a warm bubble stays finite, rises in both grids, and the outer centre holds the child mean',
+    finite && wIn > 0.3 && wIn < 30 && wOut > 0.1 && Math.abs(q2.th[pc]! - (q2.th0[2]! + mean)) < 1e-9 && c2.time === q2.time,
+    `w inner ${wIn.toFixed(2)} outer ${wOut.toFixed(2)} m/s, centre ${(q2.th[pc]! - q2.th0[2]! - mean).toExponential(1)}, times ${c2.time} ${q2.time}`);
+}
+
 summary('regional');

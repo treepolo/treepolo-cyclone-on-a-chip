@@ -14,16 +14,16 @@ import { CU_TAU, CU_RH, CU_MIN_DEPTH, CU_DETRAIN, CU_DETRAIN_DEPTH, cumulusScale
 import { EXT, EXT_MAX, subgridRHc } from '../regional/display.js';
 import type { TracerParams } from '../regional/tracers.js';
 
-const WG = 64;
+export const WG = 64;
 /** workgroups along x per dispatch row; kernels see gid.x = x + y * GX * WG */
-const GX = 32768;
+export const GX = 32768;
 /** kernel passes per command buffer: about PASS_CELLS / grid size (at least 4) */
 const PASS_CELLS = 2e7;
 type Pass = ((pass: GPUComputePassEncoder) => void) & { label: string };
 /** values per column in the display readback (see readDisplay and columnDiagnostics) */
 export { COL } from '../regional/diagnostics.js';
 export interface DisplayPlanes { u: Float32Array; v: Float32Array; w: Float32Array; wTop: Float32Array; th: Float32Array; pp: Float32Array; sc: Float32Array[] }
-const linearGid = (code: string): string => code.replace(/fn main\(@builtin\(global_invocation_id\) gid: vec3<u32>\) \{/g,
+export const linearGid = (code: string): string => code.replace(/fn main\(@builtin\(global_invocation_id\) gid: vec3<u32>\) \{/g,
   `fn main(@builtin(global_invocation_id) gid3: vec3<u32>) { let gid = vec3<u32>(gid3.x + gid3.y * ${GX * WG}u, 0u, 0u);`);
 
 /** Base-state accessors (only for shaders that bind `base`). */
@@ -129,6 +129,7 @@ const BETA: f32 = ${beta}; const DIVD: f32 = ${divDamp};
 const MOIST: bool = ${opts.moist}; const PHYS: bool = ${!!ph}; const NQ: u32 = ${this.nq}u; const NFLD: u32 = ${NF}u;
 const OPEN: bool = ${open}; const NEST: bool = ${!!bnd}; const HASPP: bool = ${!!bnd?.pp};
 const NRELAX: u32 = ${m.c.relaxCells ?? 5}u; const RTAU: f32 = ${m.c.relaxTau ?? 300};
+const CYL: bool = ${!!m.c.relaxCyl}; const CYLR: f32 = ${m.c.relaxCyl?.r ?? 0}; const CYLW: f32 = ${m.c.relaxCyl?.w ?? 1};
 const LH2: f32 = ${ph ? ph.lh * ph.lh : 0}; const LV2: f32 = ${ph ? ph.lv * ph.lv : 0};
 const Z0: f32 = ${ph?.z0 ?? 0}; const FRU: f32 = ${ph?.frameVel?.u ?? 0}; const FRV: f32 = ${ph?.frameVel?.v ?? 0}; const PIS: f32 = ${sfc ? sfc.pis : 1}; const PSFC: f32 = ${sfc ? sfc.psfc : 1e5}; const CK: f32 = ${ph ? ph.ck : 0}; const RADTAU: f32 = ${ph ? ph.radTau : 0}; const RADMAX: f32 = ${ph ? ph.radMax : 0};
 const VMIN: f32 = ${ph?.vmin ?? 1}; const RADC: f32 = ${ph?.radConst ?? 0}; const GUST: bool = ${!!ph?.gust}; const RHO1: f32 = ${m.rho0[0]};
@@ -176,7 +177,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     if (bnd) {
       const bd = new Float32Array(5 * size);
       [bnd.u, bnd.v, bnd.th, bnd.qv, bnd.pp].forEach((a, f) => { if (a) for (let i = 0; i < size; i++) bd[f * size + i] = a[i]!; });
-      this.B = device.createBuffer({ size: bd.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.B = device.createBuffer({ size: bd.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
       device.queue.writeBuffer(this.B, 0, bd);
       const pRelax = pipe(RELAX_WGSL);
       relax = disp(pRelax, bg(pRelax, [this.S, this.F, this.B, baseBuf]), nx * ny * nz, 'relax');
@@ -1398,7 +1399,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-// open lateral boundaries: Davies relaxation toward the nesting targets in the outer NRELAX cells
+// open lateral boundaries: Davies relaxation toward the nesting targets in the outer NRELAX cells (or outside a
+// cylinder: CYL, a two-way nest's ring)
 // (u, v, theta, qv, pi'; w -> 0), and the lid sponge re-targeted from the base state to the 3-D targets
 const RELAX_WGSL = /* wgsl */`
 @group(0) @binding(0) var<storage, read> S: array<f32>;
@@ -1418,9 +1420,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     F[SIZE + q] += rc * (B[SIZE + q] - bvb(k));
     F[3u * SIZE + q] += rc * (B[2u * SIZE + q] - bth0(k));
   }
-  let d = min(min(i, j), min(NX - 1u - i, NY - 1u - j));
-  if (d >= NRELAX) { return; }
-  let x = 1.0 - f32(d) / f32(NRELAX);
+  var x: f32;
+  if (CYL) { x = min(1.0, (length(vec2<f32>(f32(i) + 0.5 - 0.5 * f32(NX), f32(j) + 0.5 - 0.5 * f32(NY))) - CYLR) / CYLW); }
+  else { x = 1.0 - f32(min(min(i, j), min(NX - 1u - i, NY - 1u - j))) / f32(NRELAX); }
+  if (x <= 0.0) { return; }
   let rr = x * x / RTAU;
   F[q] -= rr * (S[q] - B[q]);
   F[SIZE + q] -= rr * (S[SIZE + q] - B[SIZE + q]);

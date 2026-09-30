@@ -32,6 +32,9 @@ export interface RegionalConfig {
   lateral?: 'periodic' | 'open';
   relaxCells?: number;                      // relaxation-zone width (cells), open boundaries
   relaxTau?: number;                        // relaxation time scale at the outer boundary (s)
+  /** relax outside a cylinder instead of along the box edges (a nest in a cylinder, twoway.ts): radius r and ring width w
+   *  (cells, from the box centre); no relaxation inside r, growing over w, full beyond */
+  relaxCyl?: { r: number; w: number };
   /** positive-definite flux limiter for the moisture scalars in the final RK3 stage (default on) */
   positiveDefinite?: boolean;
   /** the base-state wind (ub, vb) is geostrophic: the Coriolis force acts on the departure from it, as if a large-scale
@@ -398,12 +401,14 @@ export class RegionalModel {
   /** Davies-type relaxation toward boundary targets in the outer relaxCells cells (u, v, theta, qv; w -> 0). */
   private relaxBoundaries(): void {
     const { nx, ny, nz } = this.c, nr = this.c.relaxCells ?? 5, tau = this.c.relaxTau ?? 300;
-    const b = this.boundary!;
+    const b = this.boundary!, cyl = this.c.relaxCyl;
     const qv = this.scalars[0];
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-      const d = Math.min(i, j, nx - 1 - i, ny - 1 - j);
-      if (d >= nr) continue;
-      const r = (1 - d / nr) ** 2 / tau;
+      let x: number;
+      if (cyl) x = Math.min(1, (Math.hypot(i + 0.5 - nx / 2, j + 0.5 - ny / 2) - cyl.r) / cyl.w);
+      else x = 1 - Math.min(i, j, nx - 1 - i, ny - 1 - j) / nr;
+      if (x <= 0) continue;
+      const r = x * x / tau;
       for (let k = 0; k < nz; k++) {
         const q = this.idx(i, j, k);
         this.fu[q] = this.fu[q]! - r * (this.u[q]! - b.u[q]!);
