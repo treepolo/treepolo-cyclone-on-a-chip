@@ -31,11 +31,11 @@ void bsTaps(vec2 uv, vec2 size, out vec4 p, out vec2 g0) {
 }
 vec4 bspline2(sampler2D t, vec2 uv, vec2 size) {
   vec4 p; vec2 g0; bsTaps(uv, size, p, g0);
-  return mix(mix(texture(t, p.zw), texture(t, p.xw), g0.x), mix(texture(t, p.zy), texture(t, p.xy), g0.x), g0.y);
+  return mix(mix(textureLod(t, p.zw, 0.0), textureLod(t, p.xw, 0.0), g0.x), mix(textureLod(t, p.zy, 0.0), textureLod(t, p.xy, 0.0), g0.x), g0.y);
 }
 vec4 bspline3(highp sampler3D t, vec3 uvw, vec2 size) {
   vec4 p; vec2 g0; bsTaps(uvw.xy, size, p, g0);
-  return mix(mix(texture(t, vec3(p.zw, uvw.z)), texture(t, vec3(p.xw, uvw.z)), g0.x), mix(texture(t, vec3(p.zy, uvw.z)), texture(t, vec3(p.xy, uvw.z)), g0.x), g0.y);
+  return mix(mix(textureLod(t, vec3(p.zw, uvw.z), 0.0), textureLod(t, vec3(p.xw, uvw.z), 0.0), g0.x), mix(textureLod(t, vec3(p.zy, uvw.z), 0.0), textureLod(t, vec3(p.xy, uvw.z), 0.0), g0.x), g0.y);
 }`;
 // planet surface: relief-displaced sphere, map colours, hillshade, coastline, model field overlay
 const PVS = `#version 300 es
@@ -65,12 +65,12 @@ vec3 landColour(float h){ // h: elevation / 6 km
 }
 void main(){
   vec2 mu = vec2(vUV.x + 0.5 / 1024.0, vUV.y);
-  vec4 m = texture(uMap, mu);
+  vec4 m = textureLod(uMap, mu, 0.0);
   float land = m.g * uLandOn, h = m.r * uLandOn;
   // hillshade from the elevation gradient (map texels: 0.3516 deg)
   float dx = 1.0 / 1024.0, dy = 1.0 / 512.0;
-  float hx = texture(uMap, mu + vec2(dx, 0.0)).r - texture(uMap, mu - vec2(dx, 0.0)).r;
-  float hy = texture(uMap, mu - vec2(0.0, dy)).r - texture(uMap, mu + vec2(0.0, dy)).r;
+  float hx = textureLod(uMap, mu + vec2(dx, 0.0), 0.0).r - textureLod(uMap, mu - vec2(dx, 0.0), 0.0).r;
+  float hy = textureLod(uMap, mu - vec2(0.0, dy), 0.0).r - textureLod(uMap, mu + vec2(0.0, dy), 0.0).r;
   vec3 n = normalize(vP);
   vec3 east = normalize(vec3(-n.z, 0.0, -n.x) + 1e-6), north = cross(n, east);
   vec3 nn = normalize(n - (east * hx + north * hy) * uLandOn * 60.0);
@@ -145,14 +145,14 @@ void main(){
         float kc, kp, shade = 1.0;
         if (nestUV(lat, lon, w, q)) {
           // regional nest: bytes are sqrt(mixing ratio / scale); extinction per unit radius
-          vec2 d = q.z <= 1.0 ? texture(uNest, q).rg : vec2(0.0);
+          vec2 d = q.z <= 1.0 ? textureLod(uNest, q, 0.0).rg : vec2(0.0);
           kc = d.r * d.r * uNestK.x * ds; kp = d.g * d.g * uNestK.y * ds;
           if (kc > 1e-3) {
             // self-shadowing: short march toward the sun through the nest (2 km steps)
             vec3 E = vec3(-sin(lon), 0.0, -cos(lon)), Nn = vec3(-sin(lat) * cos(lon), cos(lat), sin(lat) * sin(lon));
             vec3 dq = vec3(dot(uLight, E) / (uNestL * 6.371e6), dot(uLight, Nn) / (uNestL * 6.371e6), dot(uLight, n) / uNestTop) * 2000.0;
             float od = 0.0;
-            for (int l = 1; l <= 3; l++) { vec3 ql = q + dq * float(l); if (ql.z > 1.0) break; float c = texture(uNest, ql).r; od += c * c; }
+            for (int l = 1; l <= 3; l++) { vec3 ql = q + dq * float(l); if (ql.z > 1.0) break; float c = textureLod(uNest, ql, 0.0).r; od += c * c; }
             shade = 0.45 + 0.55 * exp(-od * uNestK.x / 6.371e6 * 2000.0);
           }
         } else {
@@ -176,7 +176,7 @@ void main(){
 const CFS = `#version 300 es
 precision mediump float;
 in vec2 vQ; uniform sampler2D uImg; out vec4 o;
-void main(){ o = texture(uImg, vQ * 0.5 + 0.5); }`;
+void main(){ o = textureLod(uImg, vQ * 0.5 + 0.5, 0.0); }`;
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
   const s = gl.createShader(type)!;

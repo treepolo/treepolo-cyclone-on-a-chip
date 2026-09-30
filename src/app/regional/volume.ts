@@ -52,7 +52,7 @@ float nestW(vec3 p){
   float c = cos(1.5707963*(d - a)/uNCyl.w); return c*c;
 }
 vec3 nestQ(vec3 p){ return vec3((p.xy - uNBox.xy)/uNBox.z, p.z/uBox.z); }
-vec2 volAt(vec3 p, float w){ vec2 s = texture(uVol, p/uBox).rg; if (w > 0.0) s = mix(s, texture(uNVol, nestQ(p)).rg, w); return s; }
+vec2 volAt(vec3 p, float w){ vec2 s = textureLod(uVol, p/uBox, 0.0).rg; if (w > 0.0) s = mix(s, textureLod(uNVol, nestQ(p), 0.0).rg, w); return s; }
 // sun light (r) and sky light (g) at p: looked up one grid cell toward the sun (the sun is 50 degrees up: that is
 // also most of a cell up, toward the sky), between the light volume's first two mipmap levels. The light of a voxel is that at its centre, so right at the surface of dense cloud
 // it would blend a lit clear voxel with a dark cloudy one by where the surface happens to sit between their centres,
@@ -112,13 +112,13 @@ void main(){
     if (pg.x >= 0.0 && pg.y >= 0.0 && pg.x <= uBox.x && pg.y <= uBox.y) {
       vec3 p0 = vec3(pg.xy, 0.0);
       vec2 L = lightAt(p0, nestW(p0));
-      g = texture(uGround, pg.xy/uBox.xy).rgb * (0.40*(0.35+0.65*L.g) + 0.95*L.r*max(uSun.z,0.0));
+      g = textureLod(uGround, pg.xy/uBox.xy, 0.0).rgb * (0.40*(0.35+0.65*L.g) + 0.95*L.r*max(uSun.z,0.0));
     } else g = uOut * (0.40 + 0.95*max(uSun.z,0.0));
     bg = mix(g, horizon, smoothstep(6.0, 30.0, tg));
   }
   vec3 col = vec3(0.0); float trans = 1.0; int iters = 0, nref = 0;
   vec4 tc = vec4(0.0); float tdist = 1e9;
-  if (uTrOn == 1) { tc = texture(uTrC, vUv); if (tc.a > 0.0) { vec4 d4 = texture(uTrD, vUv); tdist = (d4.r * 65280.0 + d4.g * 255.0) / 65535.0 * 16.0; } }
+  if (uTrOn == 1) { tc = textureLod(uTrC, vUv, 0.0); if (tc.a > 0.0) { vec4 d4 = textureLod(uTrD, vUv, 0.0); tdist = (d4.r * 65280.0 + d4.g * 255.0) / 65535.0 * 16.0; } }
   bool tdone = tc.a <= 0.0;
   float t0, t1;
   bool hit = hitBox(ro, rd, t0, t1);
@@ -156,7 +156,7 @@ void main(){
       // sample: a short path through a corner; clear air within a block of a clear point holds nothing)
       if (t > t1) { if ((inCloud || tP == t0) && tP < t1 - 1e-7) t = t1; else break; }
       vec3 p = ro + t*rd;
-      if (hold == 0 && sub == 0 && uDbg < 3 && texture(uOcc, p/uBox*uOccScale).r == 0.0) {
+      if (hold == 0 && sub == 0 && uDbg < 3 && textureLod(uOcc, p/uBox*uOccScale, 0.0).r == 0.0) {
         // nothing up to here
         if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
         inCloud = false; tP = t; bP = 0.0; vP = vec2(0.0); cP = vec3(0.0);
@@ -790,39 +790,17 @@ export class VolumeView {
     const scale = Math.min(Math.min(1.5, window.devicePixelRatio || 1), Math.sqrt(9e5 / (cssW * cssH)));
     const w = Math.max(1, Math.round(cssW * scale)), h = Math.max(1, Math.round(cssH * scale));
     if (c.width !== w || c.height !== h) { c.width = w; c.height = h; this.dirty = true; }
-    // while the camera moves, a quarter of the pixels (half across and up, scaled up): turning and zooming stay fluid;
-    // the full picture once it has stood still for a moment
-    const { eye, f, r, u: up } = this.basis();
-    const sig = `${eye.map((x) => x.toFixed(5)).join()},${f.map((x) => x.toFixed(5)).join()},${this.fov}`;
-    if (sig !== this.camSig) { this.camSig = sig; this.movedAt = now; }
-    const moving = now - this.movedAt < 200;
-    if (!this.dirty && !(this.lowShown && !moving)) return;
+    if (!this.dirty) return;
     this.dirty = false;
-    const low = moving && w * h > 2e5, lw = low ? Math.max(1, Math.round(w / 2)) : w, lh = low ? Math.max(1, Math.round(h / 2)) : h;
-    this.lowShown = low;
+    const { eye, f, r, u: up } = this.basis();
     gl.useProgram(this.prog);
     const [bx, by, bz] = this.box;
     const vp = viewProj(eye, f, r, up, w / h, this.fov);
     const inv = invert4(vp);
     this.lastInv = inv; this.lastEye = eye; this.lastVP = vp;
     const trOn = this.tracerPass(vp, eye, w, h);
-    if (low) {
-      let l = this.lowFbo;
-      if (!l || l.w !== lw || l.h !== lh) {
-        if (l) { gl.deleteFramebuffer(l.fb); gl.deleteTexture(l.t); }
-        const t = gl.createTexture()!;
-        gl.bindTexture(gl.TEXTURE_2D, t);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lw, lh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        const fb = gl.createFramebuffer()!;
-        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
-        l = this.lowFbo = { fb, t, w: lw, h: lh };
-      }
-      gl.bindFramebuffer(gl.FRAMEBUFFER, l.fb);
-      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
-    } else gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, lw, lh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
     gl.useProgram(this.prog);
     const u = (n: string): WebGLUniformLocation => gl.getUniformLocation(this.prog, n)!;
     gl.uniformMatrix4fv(u('uInvVP'), false, inv);
@@ -862,16 +840,7 @@ export class VolumeView {
       gl.uniform1i(u('uTrC'), 1); gl.uniform1i(u('uTrD'), 1);
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    if (low) {
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.lowFbo!.fb);
-      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-      gl.blitFramebuffer(0, 0, lw, lh, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.LINEAR);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    }
   }
-  /** camera of the last drawn picture, when it last changed (ms), whether a reduced picture is on screen, its buffer */
-  private camSig = ''; private movedAt = 0; private lowShown = false;
-  private lowFbo: { fb: WebGLFramebuffer; t: WebGLTexture; w: number; h: number } | null = null;
 }
 
 /** View-projection matrix (column-major) of an eye with forward f, right s and up u axes. */

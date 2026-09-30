@@ -316,6 +316,8 @@ $('embed').onclick = (): void => {
 $('unembed').onclick = stopEmbed;
 // the regional page opens in the same in-page overlay (it then reaches the artifact capabilities of this page)
 function openRegional(): void {
+  // the global model pauses while the overlay is open (as when a nest is opened from a picked point)
+  running = false; syncRun();
   nestReady = false; pendingNest = null;
   const frame = $<HTMLIFrameElement>('nestFrame');
   frame.src = 'regional.html';

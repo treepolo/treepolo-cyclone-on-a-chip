@@ -82,10 +82,10 @@ vec2 bspline(sampler3D t, vec3 q, vec3 n){
   vec3 w0 = (1.0 - 3.0*f + 3.0*f2 - f3)/6.0, w1 = (4.0 - 6.0*f2 + 3.0*f3)/6.0, w2 = (1.0 + 3.0*f + 3.0*f2 - 3.0*f3)/6.0, w3 = f3/6.0;
   vec3 g0 = w0 + w1, g1 = w2 + w3;
   vec3 h0 = (i - 0.5 + w1/g0)/n, h1 = (i + 1.5 + w3/g1)/n;
-  vec2 a = mix(texture(t, vec3(h1.x, h1.y, h1.z)).rg, texture(t, vec3(h0.x, h1.y, h1.z)).rg, g0.x);
-  vec2 b = mix(texture(t, vec3(h1.x, h0.y, h1.z)).rg, texture(t, vec3(h0.x, h0.y, h1.z)).rg, g0.x);
-  vec2 d = mix(texture(t, vec3(h1.x, h1.y, h0.z)).rg, texture(t, vec3(h0.x, h1.y, h0.z)).rg, g0.x);
-  vec2 e = mix(texture(t, vec3(h1.x, h0.y, h0.z)).rg, texture(t, vec3(h0.x, h0.y, h0.z)).rg, g0.x);
+  vec2 a = mix(textureLod(t, vec3(h1.x, h1.y, h1.z), 0.0).rg, textureLod(t, vec3(h0.x, h1.y, h1.z), 0.0).rg, g0.x);
+  vec2 b = mix(textureLod(t, vec3(h1.x, h0.y, h1.z), 0.0).rg, textureLod(t, vec3(h0.x, h0.y, h1.z), 0.0).rg, g0.x);
+  vec2 d = mix(textureLod(t, vec3(h1.x, h1.y, h0.z), 0.0).rg, textureLod(t, vec3(h0.x, h1.y, h0.z), 0.0).rg, g0.x);
+  vec2 e = mix(textureLod(t, vec3(h1.x, h0.y, h0.z), 0.0).rg, textureLod(t, vec3(h0.x, h0.y, h0.z), 0.0).rg, g0.x);
   return mix(mix(a, b, g0.y), mix(d, e, g0.y), g0.z);
 }
 vec2 bytesAt(vec3 q, vec2 xy, float w){ vec2 s = bspline(uVol, q, uN); if (w > 0.0) s = mix(s, bspline(uNVol, nestQ(xy, q.z), uNN), w); return s; }
@@ -99,7 +99,7 @@ vec2 lightAt(vec3 q, vec2 xy, float w){
 // light scattered up by cloud at a point: sunlight through the (scaled) path toward the sun, softened as light diffusing
 // inside cloud is, and the bluish light of the sky and the surrounding cloud
 vec3 cloudLight(vec2 L){ return vec3(1.0, 0.985, 0.955)*0.80*sqrt(L.r) + vec3(0.60, 0.68, 0.84)*(0.11 + 0.11*L.g); }
-float tempAt(float zf){ return 200.0 + texture(uTz, vec2(zf, 0.5)).r; }
+float tempAt(float zf){ return 200.0 + textureLod(uTz, vec2(zf, 0.5), 0.0).r; }
 float t4(float T){ float x = T*0.01; x *= x; return x*x; }
 // share of the air's path radiance above height fraction zf (density scale height 8 km)
 float hazeAbove(float zf){ float h = uL.z/8000.0; return (exp(-zf*h) - exp(-h))/(1.0 - exp(-h)); }
@@ -121,7 +121,7 @@ void main(){
   for (int i = 0; i < 1400; i++) {
     if (s <= 1e-6 || trans < 0.002) break;
     // clear air around: down by most of a block at once
-    if (eA == 0.0 && texture(uOcc, vec3(uv, s)*uOccScale).r == 0.0) {
+    if (eA == 0.0 && textureLod(uOcc, vec3(uv, s)*uOccScale, 0.0).r == 0.0) {
       float sn = max(0.0, s - jump);
       if (!ir) col += trans*HAZE*(hazeAbove(sn) - hazeAbove(s));
       s = sn; bA = bytesAt(vec3(uv, s), xy, w); eA = cube(bA);
@@ -144,7 +144,7 @@ void main(){
     s = sb; bA = bB; eA = eB; cA = cB; TA = TB;
   }
   if (ir) {
-    em += trans*t4(200.0 + texture(uTs, uv).r);
+    em += trans*t4(200.0 + textureLod(uTs, uv, 0.0).r);
     float bt = 100.0*sqrt(sqrt(max(em, 1e-6)));
     float v = floor(clamp((bt - 150.0)/250.0, 0.0, 1.0)*65535.0 + 0.5), hi = floor(v/256.0);
     o = vec4(hi/255.0, (v - hi*256.0)/255.0, 0.0, 1.0);
@@ -152,7 +152,7 @@ void main(){
   }
   // the surface: sea or land, lit by the sun through the clouds (their shadows) and by the sky
   vec2 Lg = lightAt(vec3(uv, 0.0), xy, w);
-  float land = texture(uLand, uv).r;
+  float land = textureLod(uLand, uv, 0.0).r;
   vec3 alb = mix(vec3(0.004, 0.014, 0.040), vec3(0.042, 0.072, 0.016), land);
   col += trans*alb*(0.80*Lg.r + 0.20*(0.3 + 0.7*Lg.g));
   o = vec4(pow(max(col, vec3(0.0)), vec3(1.0/2.2)), 1.0);
