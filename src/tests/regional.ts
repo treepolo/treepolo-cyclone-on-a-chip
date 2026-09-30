@@ -517,15 +517,16 @@ void DRY_AIR;
   const a = mk(6, 10), v1 = cd.update(0, nx, ny, nz, 2000, a.cloud, a.aux, { x: 0, y: 0 });
   // 5 min later the updraft has stopped and the fields have jumped 2 cells west in the domain (anchor 2 cells east)
   const b = mk(4, 0), v2 = cd.update(300, nx, ny, nz, 2000, b.cloud, b.aux, { x: 4000, y: 0 });
-  const kept = v2[2 * at(5, 6, 5)]!, want = Math.round(255 * Math.exp(-300 / 900)), rise2 = cd.rise;
+  // the kind byte of a remembered liquid tower: 0.5 + vigour / 2
+  const kept = v2[2 * at(5, 6, 5)]!, want = Math.round(255 * (0.5 + 0.5 * Math.round(255 * Math.exp(-300 / 900)) / 255)), rise2 = cd.rise;
   // another 5 min: an updraft again, the lumps rise
   const c = mk(4, 6);
   cd.update(600, nx, ny, nz, 2000, c.cloud, c.aux, { x: 4000, y: 0 });
   const rise3 = cd.rise;
   cd.update(100, nx, ny, nz, 2000, c.cloud, c.aux, { x: 0, y: 0 });
   check('3-D view: a tower that stops rising stays vigorous for a while (fading, e-folding 15 min) at the place its fields moved to; lumps rise with the updraft (at most 8 m/s); an earlier time starts afresh',
-    v1[2 * at(7, 6, 5)] === 255 && Math.abs(kept - want) <= 1 && rise2 === 0 && rise3 > 0 && rise3 <= 8 * 300 && cd.rise === 0,
-    `frame 1 ${v1[2 * at(7, 6, 5)]}, remembered ${kept} (expected ${want}), rise ${rise2} then ${rise3.toFixed(0)} m, after reset ${cd.rise}`);
+    v1[2 * at(7, 6, 5)] === 255 && v1[2 * at(7, 6, 5) + 1]! > 120 && Math.abs(kept - want) <= 1 && rise2 === 0 && rise3 > 0 && rise3 <= 8 * 300 && cd.rise === 0,
+    `frame 1 kind ${v1[2 * at(7, 6, 5)]} plume ${v1[2 * at(7, 6, 5) + 1]}, remembered ${kept} (expected ${want}), rise ${rise2} then ${rise3.toFixed(0)} m, after reset ${cd.rise}`);
 }
 
 summary('regional');

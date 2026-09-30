@@ -16,9 +16,10 @@ void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }`;
 const FS = `#version 300 es
 precision highp float; precision highp sampler3D;
 in vec2 vUv; out vec4 o;
-uniform sampler3D uVol;    // r cloud extinction, g precipitation (or updraft / vorticity), b vigour of the convection, a ice fraction
+uniform sampler3D uVol;    // r cloud extinction, g precipitation (or updraft / vorticity), b kind of cloud, a plume updraft (CloudDetail)
 uniform sampler3D uLight;  // r transmittance to the sun, g transmittance straight up (precomputed per volume)
-uniform sampler3D uNoise;  // r bubbles, g large lumpy pattern, b small lumpy pattern, a flat sheets (tileable)
+uniform sampler3D uNoise;  // g large lumpy pattern, b small lumpy pattern, a flat sheets (tileable)
+uniform sampler3D uOct;    // bubbles, one size per channel: r 4, g 8, b 16, a 2 per tile
 uniform sampler2D uGround;
 uniform mat4 uInvVP; uniform vec3 uEye; uniform vec3 uBox; uniform vec3 uSun;
 uniform float uK;     // extinction multiplier (the opacity slider; 1 = physical)
@@ -79,6 +80,12 @@ float shape(float x, float y, float a, float th, float e, float wx, float wy){
   float noX = clamp((a + (1.0 - a)*y - st)/a, 0.0, 1.0);
   return mix(1.0 - th, mix(noX, full, wx), wy);
 }
+// bulge (model field units) of lumps of sizes lam (m) on a cloud whose flow makes lumps up to Lf: about half as high as
+// wide; none larger than about Lf, none the grid resolves (larger than about 2 cells: the model's own), none smaller
+// than about two pixels
+vec4 lumps(vec4 lam, float Lf, float pf, float mpb){
+  return 0.5*S_CONV/uDx*lam*(1.0 - smoothstep(Lf, 2.0*Lf, lam))*(1.0 - smoothstep(1.5*uDx, 3.0*uDx, lam))*smoothstep(pf, 2.5*pf, lam/mpb);
+}
 // c cloud and pr precipitation extinction (1/m), g the grid's cloud value, vig how vigorous (full-body) the cloud is,
 // m how far inside the full body (box units; its gradient gives the way the surface faces)
 struct Cl { float c; float pr; float g; float vig; float m; };
@@ -91,8 +98,8 @@ Cl dens(vec3 p, float pf, bool detail){
   if (s.r < 0.004) return r;
   float bm = ext(s.r);
   // how vigorous the convection this cloud belongs to is (computed by the page for every box, see setVolume)
-  float conv = s.b;
-  float ice = s.a*(1.0 - conv);
+  // the kind of cloud (1 vigorous, 0.5 weak liquid, 0 ice sheet) and the updraft of its plume (CloudDetail)
+  float conv = max(0.0, 2.0*s.b - 1.0), ice = max(0.0, 1.0 - 2.0*s.b), up = s.a;
   float bc = mix(mix(B_LAYER, B_CONV, conv), B_ICE, ice);
   float th = 1.0 - min(1.0, bm/bc);
   float vig = smoothstep(0.1, 0.5, conv);
@@ -115,23 +122,30 @@ Cl dens(vec3 p, float pf, bool detail){
     di = shape(B.a, Aa, 0.5, th, 0.18, wB, wA);
   }
   // vigorous cloud: a full body (where the model's field exceeds the cloud-edge value, about 0.04 g/m3 of water) whose
-  // surface bulges into lumps on lumps, like a fractal: bubble noise of lobes about 4, 2 and 1 km across on one tile and
-  // 0.5, 0.25 and 0.13 km on another (unrelated sizes and angles), each size bulging in proportion to its size (so every
-  // size shows alike in the light and shade); each tile shows once its middle size spans a couple of pixels, smaller
-  // lobes give way to the smooth body. The bulges push
-  // mostly outward and only next to the body, so it stays full and nothing floats free; they rise with the updraft from
-  // frame to frame (uRise, in the view's stretched heights). m: how far inside (box units, from the field's typical
-  // slope S_CONV per cell)
+  // surface bulges into lumps on lumps. Their size comes from the flow: a thermal is about as wide as it rises in its
+  // turnover time, so the largest lumps are about 150 s x the plume's updraft (0.25-8.5 km: small for a weak cumulus,
+  // kilometres for a strong tower), and every smaller size down to 0.13 km is there too, each bulging about half as
+  // high as it is wide (lumps on lumps, like a fractal), from bubble noise with one size per channel on two tiles of
+  // unrelated size and angle. Sizes the grid resolves are the model's own; sizes smaller than about two pixels give way
+  // to the smooth body. The bulges push mostly outward and only next to the body, and rise with the updraft
+  // from frame to frame (uRise, in the view's stretched heights). m: how far inside (box units, from the field's
+  // typical slope S_CONV per cell)
   float dv = 0.0;
   if (vig > 0.0) {
     float s0 = 0.4*S_CONV, disp = 0.0;
     if (detail) {
-      vec3 qb = q - vec3(0.0, 0.0, uRise*mpb/uMpb);
-      float T = texture(uNoise, vec3(0.891*qb.x - 0.454*qb.y, 0.454*qb.x + 0.891*qb.y, qb.z)/17000.0 + vec3(0.37, 0.11, 0.0)).r;
-      float Bb = texture(uNoise, vec3(0.788*qb.x + 0.616*qb.y, -0.616*qb.x + 0.788*qb.y, qb.z)/2120.0).r;
-      float aT = min(0.24, 0.5*(4250.0/uDx)*S_CONV)*smoothstep(pf, 2.5*pf, 4250.0/mpb);
-      float aB = min(0.1, 0.5*(530.0/uDx)*S_CONV)*smoothstep(pf, 2.5*pf, 265.0/mpb);
-      disp = (aT*(T - 0.3) + aB*(Bb - 0.3))*smoothstep(s0 - 0.6*(aT + aB), s0, s.r);
+      float Lf = clamp(150.0*30.0*up*up, 250.0, 8500.0), e = s.r - s0;
+      // lumps matter only near the surface: nothing is worked out deep inside or well outside (the sizes add up to at
+      // most twice the largest)
+      float amp = S_CONV/uDx*min(2.0*Lf, 3.0*uDx);
+      if (e > -0.65*amp && e < 0.35*amp) {
+        vec4 aT = lumps(vec4(4250.0, 2125.0, 1062.0, 8500.0), Lf, pf, mpb), aB = lumps(vec4(530.0, 265.0, 133.0, 0.0), Lf, pf, mpb);
+        vec3 qb = q - vec3(0.0, 0.0, uRise*mpb/uMpb);
+        // (a tile whose sizes all fall below a couple of pixels, or above the flow's, is not looked up)
+        vec4 T = dot(aT, vec4(1.0)) > 1e-6 ? texture(uOct, vec3(0.891*qb.x - 0.454*qb.y, 0.454*qb.x + 0.891*qb.y, qb.z)/17000.0 + vec3(0.37, 0.11, 0.0)) : vec4(0.35);
+        vec4 Bo = dot(aB, vec4(1.0)) > 1e-6 ? texture(uOct, vec3(0.788*qb.x + 0.616*qb.y, -0.616*qb.x + 0.788*qb.y, qb.z)/2120.0) : vec4(0.35);
+        disp = (dot(aT, T - 0.35) + dot(aB, Bo - 0.35))*smoothstep(-0.65*amp, 0.0, e);
+      }
     }
     float m = (s.r - s0 + disp)*uCell/S_CONV;
     dv = smoothstep(-0.7*pf, 0.7*pf, m);
@@ -183,25 +197,28 @@ void main(){
     // coarse steps through clear air; entering cloud, one step back and fine steps (the billows) until the ray is
     // spent or out again (opaque cloud ends the ray within a few fine steps)
     // fine steps: a quarter of the largest bubble near the eye, about a pixel far away, at most half a grid cell
-    float dtC = (t1 - t0)/120.0, lamB = 1500.0*uCell/uDx;
+    float dtC = (t1 - t0)/88.0, lamB = 1500.0*uCell/uDx;
     float t = t0 + dtC*hash(gl_FragCoord.xy);
     float phase = 0.85 + 1.8*pow(max(mu,0.0), 6.0);
     int fine = 0, budget = 170;
     float prevC = 0.0;
+    bool found = false;
     for (int i = 0; i < 320; i++) {
       if (t > t1 || trans < 0.004) break;
       if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
       vec3 p = ro + t*rd;
-      float pf = t*uPix, dtF = min(dtC, min(0.5*uCell, max(0.8*pf, 0.35*lamB)));
+      float pf = t*uPix, dtF = min(dtC, min(0.5*uCell, max(0.8*pf, 0.5*lamB)));
       Cl d = dens(p, pf, fine > 0 && uDetail == 1);
       if (fine == 0 && d.g >= 0.004 && budget > 0 && dtF < dtC*0.99) { t = max(t0, t - dtC); fine = 24; prevC = 0.0; continue; }
       float dt = fine > 0 ? dtF : dtC;
       // sunlight and skylight factors of the surface of a full cloud body (1: no surface shading)
       float sunF = 1.0, skyF = 1.0;
-      if (uDetail == 1 && fine > 0 && d.vig > 0.05 && d.c*dt*uMpb > 1.0 && prevC*dt*uMpb < 0.3) {
-        // entering an opaque body: find its surface (bisection) and light it by the way it faces
+      if (uDetail == 1 && !found && fine > 0 && d.vig > 0.05 && d.c*dt*uMpb > 1.0 && prevC*dt*uMpb < 0.3) {
+        // entering an opaque body (the first on this ray; what lies behind it hardly shows): find its surface
+        // (bisection) and light it by the way it faces
+        found = true;
         float ta = t - dt, tb = t;
-        for (int k = 0; k < 4; k++) { float tm = 0.5*(ta + tb); if (dens(ro + tm*rd, pf, true).c*dt*uMpb > 1.0) tb = tm; else ta = tm; }
+        for (int k = 0; k < 3; k++) { float tm = 0.5*(ta + tb); if (dens(ro + tm*rd, pf, true).c*dt*uMpb > 1.0) tb = tm; else ta = tm; }
         t = tb; p = ro + t*rd; d = dens(p, pf, true);
         // the way the surface faces: down the slope of the body's margin (lobes included)
         float hn = max(0.05*lamB, pf);
@@ -243,13 +260,14 @@ void main(){
 }`;
 
 /**
- * Tileable 3-D noise (n^3 RGBA bytes) for the cloud shapes, each channel equalised to a uniform distribution (so that
- * "noise above 1 - f" covers the fraction f): r bubbles (inverted Worley distance, 4, 8 and 16 cells per tile: round
- * lobes on lobes), g lumpy value noise with most variance at the largest scale (2 to 16 cells), b lumpy value noise
- * (4 to 16 cells), a flat sheets (value noise twice as fine vertically as horizontally).
+ * Tileable 3-D noise (n^3 RGBA bytes, two textures) for the cloud shapes, each channel equalised to a uniform
+ * distribution (so that "noise above 1 - f" covers the fraction f). main: g lumpy value noise with most variance at the
+ * largest scale (2 to 16 cells per tile), b lumpy value noise (4 to 16 cells), a flat sheets (value noise twice as fine
+ * vertically as horizontally). oct: bubbles (inverted Worley distance, round lobes), one size per channel so the 3-D
+ * view can weight each size by the flow: r 4, g 8, b 16, a 2 lobes per tile.
  */
-function cloudNoise(n: number): Uint8Array {
-  const out = new Uint8Array(4 * n * n * n), N = n * n * n;
+function cloudNoise(n: number): { main: Uint8Array; oct: Uint8Array } {
+  const out = new Uint8Array(4 * n * n * n), oct = new Uint8Array(4 * n * n * n), N = n * n * n;
   const h = (a: number): number => { let x = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b); x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35); x ^= x >>> 16; return (x >>> 0) / 4294967296; };
   const worley = (C: number): Float32Array => {
     const pts = new Float32Array(3 * C * C * C);
@@ -280,16 +298,18 @@ function cloudNoise(n: number): Uint8Array {
     return f;
   };
   // rank of each value among all (histogram equalisation), as a byte
-  const put = (ch: number, v: (q: number) => number): void => {
+  const put = (ch: number, v: (q: number) => number, dst = out): void => {
     const B = 4096, x = new Float32Array(N); let lo = Infinity, hi = -Infinity;
     for (let q = 0; q < N; q++) { const y = v(q); x[q] = y; if (y < lo) lo = y; if (y > hi) hi = y; }
     const cnt = new Float64Array(B + 1), sc = (B - 1) / ((hi - lo) || 1);
     for (let q = 0; q < N; q++) { const b = Math.floor((x[q]! - lo) * sc) + 1; cnt[b] = cnt[b]! + 1; }
     for (let b = 1; b <= B; b++) cnt[b] = cnt[b]! + cnt[b - 1]!;
-    for (let q = 0; q < N; q++) { const b = Math.floor((x[q]! - lo) * sc); out[4 * q + ch] = Math.round(255 * (cnt[b]! + 0.5 * (cnt[b + 1]! - cnt[b]!)) / N); }
+    for (let q = 0; q < N; q++) { const b = Math.floor((x[q]! - lo) * sc); dst[4 * q + ch] = Math.round(255 * (cnt[b]! + 0.5 * (cnt[b + 1]! - cnt[b]!)) / N); }
   };
-  const w4 = worley(4), w8 = worley(8), w16 = worley(16);
-  put(0, (q) => w4[q]! + 0.5 * w8[q]! + 0.25 * w16[q]!);
+  // bubbles, one size per channel (the 3-D view weights each size by the flow): 4, 8, 16 and 2 cells per tile
+  const w2 = worley(2), w4 = worley(4), w8 = worley(8), w16 = worley(16);
+  put(0, (q) => w4[q]!, oct); put(1, (q) => w8[q]!, oct); put(2, (q) => w16[q]!, oct); put(3, (q) => w2[q]!, oct);
+  for (let q = 0; q < N; q++) out[4 * q] = 128;
   // large lumpy pattern: most of its variance in the largest features (clusters and gaps)
   const g2 = value(2, 2, 5), g4 = value(4, 4, 7), g8 = value(8, 8, 13), g16 = value(16, 16, 17);
   put(1, (q) => g2[q]! + 0.6 * g4[q]! + 0.36 * g8[q]! + 0.22 * g16[q]!);
@@ -297,7 +317,7 @@ function cloudNoise(n: number): Uint8Array {
   put(2, (q) => v4[q]! + 0.5 * v8[q]! + 0.25 * v16[q]!);
   const s4 = value(4, 8, 41), s8 = value(8, 16, 53), s16 = value(16, 32, 67);
   put(3, (q) => s4[q]! + 0.5 * s8[q]! + 0.25 * s16[q]!);
-  return out;
+  return { main: out, oct };
 }
 
 // tracer lines / points: colour by height (orange near the ground, pale yellow aloft), alpha fades along the trail
@@ -327,6 +347,15 @@ const TRAIL = 8;
  * not (dissipating: drawn in pieces).
  */
 export function convectionVigour(nx: number, ny: number, nz: number, cloud: Uint8Array, aux: Uint8Array, dx: number): Uint8Array {
+  return convectionFields(nx, ny, nz, cloud, aux, dx).vig;
+}
+/**
+ * convectionVigour, and the updraft of the plume each box belongs to (byte sqrt(w / 30 m/s)): the largest of its own
+ * and its neighbourhood's vertical velocity and 0.6 x the strongest updraft within about 4 km, scaled up on coarse
+ * grids (a plume fills only part of a large box; the scale of convectionVigour), which sets the size of the cloud's
+ * lumps in the 3-D view.
+ */
+export function convectionFields(nx: number, ny: number, nz: number, cloud: Uint8Array, aux: Uint8Array, dx: number): { vig: Uint8Array; up: Uint8Array } {
   const n = nx * ny * nz, np = nx * ny, wc = 1.5 * Math.min(1, 3000 / Math.max(dx, 1));
   const W = new Float32Array(256);
   for (let b = 0; b < 256; b++) { const x = (b - 128) / 127; W[b] = Math.sign(x) * x * x * 40; }
@@ -370,15 +399,19 @@ export function convectionVigour(nx: number, ny: number, nz: number, cloud: Uint
     let m = -99; for (let b = Math.max(0, j - R); b <= Math.min(ny - 1, j + R); b++) m = Math.max(m, tmp[b * nx + i]!);
     wCol[j * nx + i] = m;
   }
-  const out = new Uint8Array(n);
+  const out = new Uint8Array(n), up = new Uint8Array(n), plume = 1.5 / wc;
   for (let q = 0; q < n; q++) {
     const cN = ca[q]!;
     if (cloud[q] === 0 && cN === 0) continue;
-    const wN = wa[q]!, wl = W[aux[2 * q]!]!;
-    const v = Math.max(ss(0.15 * wc, 2 * wc, wl > wN ? wl : wN), ss(0.5 * wc, 3 * wc, wCol[q % np]!), ss(0.35, 0.6, cN) * ss(-wc, 0, wN) * (1 - aux[2 * q + 1]! / 255));
+    const wN = wa[q]!, wl = W[aux[2 * q]!]!, wm = wl > wN ? wl : wN;
+    const v = Math.max(ss(0.15 * wc, 2 * wc, wm), ss(0.5 * wc, 3 * wc, wCol[q % np]!), ss(0.35, 0.6, cN) * ss(-wc, 0, wN) * (1 - aux[2 * q + 1]! / 255));
     out[q] = Math.round(255 * v);
+    // the plume a cloud belongs to: its own rising air, or most of the strongest updraft within about 4 km (a tower's
+    // surface hardly rises itself, yet its lumps are the tower's)
+    const wp = Math.max(wm, 0.6 * wCol[q % np]!);
+    up[q] = Math.round(255 * Math.sqrt(Math.max(0, Math.min(1, wp * plume / 30))));
   }
-  return out;
+  return { vig: out, up };
 }
 
 /**
@@ -393,9 +426,13 @@ export class CloudDetail {
   /** how far (m) the lumps of vigorous cloud have risen since the run began */
   rise = 0;
   reset(): void { this.prev = null; this.rise = 0; }
-  /** Display bytes for the renderer: per box [vigour, ice fraction]; aux holds [w byte, ice fraction]. */
+  /**
+   * Display bytes for the renderer, per box: the kind of cloud (0.5 + vigour / 2 - sheet / 2, sheet = ice fraction x
+   * (1 - vigour): 1 vigorous, 0.5 weak liquid, 0 ice sheet) and the plume updraft (convectionFields); aux holds
+   * [w byte, ice fraction].
+   */
   update(t: number, nx: number, ny: number, nz: number, dx: number, cloud: Uint8Array, aux: Uint8Array, anchor: { x: number; y: number }): Uint8Array {
-    const vig = convectionVigour(nx, ny, nz, cloud, aux, dx), n = nx * ny * nz, np = nx * ny, p = this.prev;
+    const cf = convectionFields(nx, ny, nz, cloud, aux, dx), vig = cf.vig, n = nx * ny * nz, np = nx * ny, p = this.prev;
     if (p && t < p.t - 1e-6) this.reset();
     const q = this.prev;
     if (q && t > q.t) {
@@ -419,7 +456,10 @@ export class CloudDetail {
     }
     if (!q || t !== q.t) this.prev = { nx, ny, nz, dx, t, ax: anchor.x, ay: anchor.y, vig: Uint8Array.from(vig) };
     const out = new Uint8Array(2 * n);
-    for (let c = 0; c < n; c++) { out[2 * c] = vig[c]!; out[2 * c + 1] = aux[2 * c + 1]!; }
+    for (let c = 0; c < n; c++) {
+      const v = vig[c]! / 255, sheet = (aux[2 * c + 1]! / 255) * (1 - v);
+      out[2 * c] = Math.round(255 * (0.5 + 0.5 * v - 0.5 * sheet)); out[2 * c + 1] = cf.up[c]!;
+    }
     return out;
   }
 }
@@ -446,6 +486,7 @@ export class VolumeView {
   private readonly vol: WebGLTexture;
   private readonly light: WebGLTexture;
   private readonly noise: WebGLTexture;
+  private readonly oct: WebGLTexture;
   private readonly groundTex: WebGLTexture;
   private box: [number, number, number] = [1, 1, 0.3];
   // tracer particles
@@ -489,14 +530,18 @@ export class VolumeView {
     this.vol = gl.createTexture()!;
     this.light = gl.createTexture()!;
     this.noise = gl.createTexture()!;
+    this.oct = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
     // the cloud texture's noise (once; tiles, repeats)
-    gl.bindTexture(gl.TEXTURE_3D, this.noise);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 64, 64, 64, 0, gl.RGBA, gl.UNSIGNED_BYTE, cloudNoise(64));
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.REPEAT);
+    const nz3 = cloudNoise(64);
+    for (const [tex, data] of [[this.noise, nz3.main], [this.oct, nz3.oct]] as const) {
+      gl.bindTexture(gl.TEXTURE_3D, tex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 64, 64, 64, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.REPEAT);
+    }
     // empty volume and light until the first frame (the sampler types must be complete)
     gl.bindTexture(gl.TEXTURE_3D, this.vol);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 128, 0]));
@@ -1003,6 +1048,7 @@ export class VolumeView {
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.groundTex); gl.uniform1i(u('uGround'), 1);
     gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_3D, this.light); gl.uniform1i(u('uLight'), 4);
     gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_3D, this.noise); gl.uniform1i(u('uNoise'), 5);
+    gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_3D, this.oct); gl.uniform1i(u('uOct'), 6);
     gl.uniform1i(u('uTrOn'), trOn ? 1 : 0);
     if (trOn) {
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.trFbo!.c); gl.uniform1i(u('uTrC'), 2);
