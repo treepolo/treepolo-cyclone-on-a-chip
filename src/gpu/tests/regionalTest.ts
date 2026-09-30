@@ -10,7 +10,7 @@ import { IceMicrophysics, QI, QS, QG } from '../../regional/ice.js';
 import { C, columnDiagnostics, columnProfiles, azimuthalMeans } from '../../regional/diagnostics.js';
 import { Tracers } from '../../regional/tracers.js';
 import { applyWind, type WindForcing } from '../../regional/forcing.js';
-import { cloudExtinction, precipExtinction, iceExtinction, extByte, wByte, iceByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
+import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
 
 function cmp(m: RegionalModel, g: Float32Array, f: number, a: Float64Array, nk: number): number {
   let e = 0, s = 0;
@@ -383,21 +383,22 @@ export async function regionalChartsTest(): Promise<void> {
   const d = await g.readDisplay([0], 0);
   const cpu = columnDiagnostics(m);
   {
-    // 3-D view bytes (cloud, precipitation, vertical velocity, ice fraction) as the worker computes them on the CPU
+    // 3-D view bytes (cloud, precipitation) as the worker computes them on the CPU
     const qc = m.scalars[QC]!, qr = m.scalars[QR]!, qi = m.scalars[QI]!, qs = m.scalars[QS]!, qg = m.scalars[QG]!, qv = m.scalars[QV]!, rhc = subgridRHc(dx);
-    const bad = [0, 0, 0, 0]; let ncl = 0, nice = 0, nup = 0;
+    const bad = [0, 0]; let ncl = 0, nice = 0;
     for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
       const q = m.idx(i, j, k), o = (k * nx + j) * nx + i, rho = m.rho0[k]!, pi = m.pi0[k]! + m.pp[q]!, T = m.th[q]! * pi;
       const qsub = qc[q]! <= 1e-8 ? subgridCloud(qv[q]!, qsatW(T, 1e5 * Math.pow(pi, 1004.5 / 287.05)), rhc) : 0;
       const bc = cloudExtinction(rho, qc[q]!, qsub, qi[q]!, qs[q]!, T);
-      const want = [extByte(bc), extByte(precipExtinction(rho, qr[q]!, qg[q]!)), wByte(0.5 * (m.w[q]! + m.w[q + m.plane]!)), iceByte(iceExtinction(rho, qsub, qi[q]!, qs[q]!, T), bc)];
-      const v = d.packed[o]!, got = [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, v >>> 24];
-      for (let c = 0; c < 4; c++) if (Math.abs(got[c]! - want[c]!) > 1) bad[c]!++;
-      if (want[0]! > 0) ncl++; if (want[3]! > 128) nice++; if (want[2]! > 160) nup++;
+      const want = [extByte(bc), extByte(precipExtinction(rho, qr[q]!, qg[q]!))];
+      const v = d.packed[o]!, got = [v & 255, (v >>> 8) & 255];
+      for (let c = 0; c < 2; c++) if (Math.abs(got[c]! - want[c]!) > 1) bad[c]!++;
+      if (want[0]! > 0) ncl++; if (want[0]! > 0 && qi[q]! + qs[q]! > qc[q]!) nice++;
+      if (v >>> 16) bad[0]!++;
     }
     const lim = 0.001 * nx * nx * nz;
-    gcheck('charts: GPU 3-D view bytes (cloud, precipitation, vertical velocity, ice fraction) match the CPU within 1 in 99.9 % of cells; cloud, ice and updrafts present',
-      bad.every((b) => b <= lim) && ncl > 100 && nice > 10 && nup > 10, `cells off by > 1: ${bad.join(' ')} of ${nx * nx * nz}; cloudy ${ncl}, ice ${nice}, updraft ${nup}`);
+    gcheck('charts: GPU 3-D view bytes (cloud, precipitation) match the CPU within 1 in 99.9 % of cells; liquid and ice cloud present',
+      bad.every((b) => b <= lim) && ncl > 100 && nice > 10, `cells off by > 1: ${bad.join(' ')} of ${nx * nx * nz}; cloudy ${ncl}, ice-dominated ${nice}`);
   }
   const rel = (f: number): number => {
     let e = 0, n = 0;

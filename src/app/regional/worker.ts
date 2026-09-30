@@ -17,7 +17,7 @@ import { Pacer } from '../pacer.js';
 import { StormTracker, type TornadoEnv } from '../../regional/supercell.js';
 import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.js';
 import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcing.js';
-import { cloudExtinction, precipExtinction, iceExtinction, extByte, wByte, iceByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
+import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
@@ -128,13 +128,8 @@ let origin = { x: 0, y: 0 }, originT = 0;
 function advanceOrigin(): void {
   const t = modelNow();
   origin.x += frameVel.u * (t - originT); origin.y += frameVel.v * (t - originT);
-  drift.x += frameVel.u * (t - originT); drift.y += frameVel.v * (t - originT);
   originT = t;
 }
-/** the domain origin's travel with the frame velocity since the run began: origin - drift moves only when the fields
- *  jump in the domain (rolls of a storm-following domain, refinement into a sub-box), so the 3-D view's cloud detail
- *  can stay with the clouds */
-let drift = { x: 0, y: 0 };
 function resetOrigin(x = 0, y = 0): void { origin = { x, y }; originT = modelNow(); prevAcc = null; tcAcc = null; tcRain = null; undo = null; envDu = 0; }
 // precipitation rate from the change of the accumulation between frames
 let prevAcc: { t: number; rain: Float32Array } | null = null, lastRate: Float32Array | null = null;
@@ -364,7 +359,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
         experiment = 'tc_axi'; frameVel = { u: 0, v: 0 }; setup = { ...msg.setup };
         axi = new AxiDriver(axiFromSetup(msg.setup));
-        resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings(); parents = []; drift = { x: 0, y: 0 };
+        resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings(); parents = [];
         post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu',
           note: '軸對稱模式在 CPU 上執行（很快）；3D 畫面是把半徑–高度場繞軸旋轉 / the axisymmetric model runs on the CPU (fast); the 3-D view revolves the radius-height fields', refineTo: null, tc: true, setup });
         await sendFrame();
@@ -387,7 +382,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       } else if (msg.backend !== 'cpu') note = 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU';
       const c = m!.c, cells = c.nx * c.ny * c.nz;
       if (!gpu && cells > 1.5e6) note += (note ? ' · ' : '') + `這個網格有 ${(cells / 1e6).toFixed(1)} M 格點，在 CPU 上非常慢 / ${(cells / 1e6).toFixed(1)} M cells: very slow on the CPU`;
-      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = []; drift = { x: 0, y: 0 };
+      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = [];
       post({ type: 'ready', land: info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
         tc: isTc(), setup, ...gridOptions() });
       await sendFrame();
@@ -409,7 +404,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         if (reason) { note = gpuFailNote(reason); info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, false); builtGpu = false; }
       } else note = (msg.backend !== 'cpu' ? 'WebGPU 不可用，改用 CPU / WebGPU unavailable, using CPU · ' : '') + 'CPU 使用較粗的網格 / the CPU uses a coarser grid';
       const c = m!.c;
-      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = []; drift = { x: 0, y: 0 };
+      dt0 = c.dt; resetOrigin(); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = [];
       post({ type: 'ready', experiment: 'nest', nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land, refineTo: null, tc: false, setup: null });
       await sendFrame();
       } finally { busy = false; }
@@ -498,7 +493,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           axi = new AxiDriver({ ...AXI_DEFAULTS, ...LEGACY_TC, ...((meta as unknown as { axi?: AxiParams }).axi ?? {}) });
           axi.restore(arrays as Record<string, Float32Array>, M.time, M.steps);
           setup = M.setup ?? setupOf('tc_axi');
-          resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings(); parents = []; drift = { x: 0, y: 0 };
+          resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings(); parents = [];
           post({ type: 'ready', land: null, experiment: 'tc_axi', nx: axi.N, ny: axi.N, nz: axi.ax.a.nz, dx: axi.dxv, dz: axi.ax.a.dz, dt: axi.dt, description: axi.description(), backend: 'cpu', note: `已載入存檔 / save loaded (t = ${(M.time / 3600).toFixed(2)} h)`, refineTo: null, tc: true, setup });
           await sendFrame();
           busy = false;
@@ -540,7 +535,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           else if (gpu) (gpu as GpuRegional).setDt(M.dt);
         } else if (M.builtGpu) note += ' · 此存檔是 GPU 網格，在 CPU 上會很慢 / GPU-sized grid: very slow on the CPU';
         dt0 = mm.c.dt;
-        resetOrigin(M.origin?.x ?? 0, M.origin?.y ?? 0); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = []; drift = { x: 0, y: 0 };
+        resetOrigin(M.origin?.x ?? 0, M.origin?.y ?? 0); stormDomain = null; setupTracers(); catalog.reset(); followId = null; clearForcings(); parents = [];
         const c = mm.c;
         post({ type: 'ready', experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note, land: info.land ?? null,
           tc: isTc(), setup: experiment === 'nest' ? null : setup, ...gridOptions() });
@@ -992,7 +987,7 @@ async function sendFrameRaw(): Promise<void> {
   if (!m || !mp) return;
   lastFrame = performance.now(); lastFrameModel = modelNow();
   const { nx, ny, nz, dx, dz } = m.c, n = nx * ny * nz;
-  const cloud = new Uint8Array(n), rain = new Uint8Array(n), aux = new Uint8Array(2 * n);
+  const cloud = new Uint8Array(n), rain = new Uint8Array(n);
   const req = chartReq;
   let wmax = 0, wmin = 0, qcmax = 0, qrmax = 0;
   let col: Float32Array | null = null;
@@ -1000,7 +995,7 @@ async function sendFrameRaw(): Promise<void> {
   const sliceK = req?.slice ? Math.max(0, Math.min(nz - 1, req.slice.k | 0)) : -1;
   let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
   let charts: ChartData | null = null, trOut: Float32Array | null = null;
-  const transfer = new Set<ArrayBuffer>([cloud.buffer, rain.buffer, aux.buffer]);
+  const transfer = new Set<ArrayBuffer>([cloud.buffer, rain.buffer]);
   // the GPU model of this frame (the module variable can be replaced while a readback is awaited)
   const gpu = currentGpu();
   if (gpu) {
@@ -1009,7 +1004,7 @@ async function sendFrameRaw(): Promise<void> {
     const d = await gpu.readDisplay(levels, volMode, subgrid);
     cuRate = d.cu ? Float32Array.from({ length: nx * ny }, (_, c) => d.cu![4 * c + 2]!) : null;
     const tNow = gpu.time, sNow = gpu.steps;
-    for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; aux[2 * i] = (v >>> 16) & 255; aux[2 * i + 1] = v >>> 24; }
+    for (let i = 0; i < n; i++) { const v = d.packed[i]!; cloud[i] = v & 255; rain[i] = (v >> 8) & 255; }
     col = d.col;
     for (let c = 0; c < nx * ny; c++) { wmax = Math.max(wmax, col[NCOL * c]!); wmin = Math.min(wmin, col[NCOL * c + 1]!); qcmax = Math.max(qcmax, col[NCOL * c + 2]!); qrmax = Math.max(qrmax, col[NCOL * c + 3]!); }
     for (const [k, pl] of d.planes) {
@@ -1040,7 +1035,6 @@ async function sendFrameRaw(): Promise<void> {
       const qsub = subgrid && qc[q]! <= 1e-8 ? subgridCloud(qv[q]!, qsatW(T, 1e5 * Math.pow(pi, 1004.5 / 287.05)), rhc) : 0;
       const bc = cloudExtinction(rho, qc[q]!, qsub, qi[q]!, qs[q]!, T);
       cloud[o] = extByte(bc);
-      aux[2 * o] = wByte(0.5 * (m.w[q]! + m.w[q + m.plane]!)); aux[2 * o + 1] = iceByte(iceExtinction(rho, qsub, qi[q]!, qs[q]!, T), bc);
       let v2 = extByte(precipExtinction(rho, qr[q]!, qg[q]!)) / 255;
       if (vm === 1) v2 = Math.sqrt(Math.max(0.5 * (m.w[q]! + m.w[q + m.plane]!), 0) / 40);
       else if (vm === 2) {
@@ -1125,9 +1119,9 @@ async function sendFrameRaw(): Promise<void> {
   if (charts) for (const a of chartArrays(charts)) transfer.add(a.buffer as ArrayBuffer);
   if (trOut) transfer.add(trOut.buffer as ArrayBuffer);
   stormDomain = main ? { x: main.xd, y: main.yd } : stormDomain;
-  post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, aux, ground: g, groundField: ground, groundRange: [lo, hi],
+  post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
     stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, uhMin, capeMax, storm, storms: catalog.active, mainId: main?.id ?? null, vtProfile, tornado, tcRain: isTc() ? tcRain : null },
-    origin: { ...origin }, anchor: { x: origin.x - drift.x, y: origin.y - drift.y }, charts, tracers: trOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
+    origin: { ...origin }, charts, tracers: trOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
 }
 
 /** Core (< 60 km) and outer (100-300 km) mean precipitation rates around the centre (ic, jc) of the periodic domain, and the

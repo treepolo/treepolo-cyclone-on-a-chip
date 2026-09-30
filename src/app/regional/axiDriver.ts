@@ -6,7 +6,7 @@
 import { AxisymModel, HA, type AxisymConfig } from '../../regional/axisym.js';
 import { IceMicrophysics, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { tcSounding, eyewallPeaks, type TcSounding } from '../../regional/tropical.js';
-import { cloudExtinction, precipExtinction, iceExtinction, extByte, wByte, iceByte, subgridCloud, subgridRHc, albedo } from '../../regional/display.js';
+import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, albedo } from '../../regional/display.js';
 import { GALE7, GALE10 } from '../../regional/storms.js';
 import { SECTION_VARS, WV_PATH, qsatW, sectionValues, parcelAscent, pressure, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { ChartData, ChartRequest, GroundField, RegionalFrame, TcRain } from './protocol.js';
@@ -104,10 +104,10 @@ export class AxiDriver {
   /** draw sub-grid cloud (display.ts) */
   private subgrid = true;
   /** Display extinctions (1/m) of cloud and precipitation at radius index i, level k (display.ts, as the 3-D model). */
-  private ext(i: number, k: number): { c: number; p: number; ice: number; T: number } {
+  private ext(i: number, k: number): { c: number; p: number; T: number } {
     const ax = this.ax, q = ax.idx(i, 0, k), S = ax.scalars, rho = ax.rho0[k]!, pi = ax.pi0[k]! + ax.pp[q]!, T = ax.th[q]! * pi;
     const qsub = this.subgrid && S[QC]![q]! <= 1e-8 ? subgridCloud(S[0]![q]!, qsatW(T, pressure(pi)), subgridRHc(ax.a.dr)) : 0;
-    return { c: cloudExtinction(rho, S[QC]![q]!, qsub, S[QI]![q]!, S[QS]![q]!, T), p: precipExtinction(rho, S[QR]![q]!, S[QG]![q]!), ice: iceExtinction(rho, qsub, S[QI]![q]!, S[QS]![q]!, T), T };
+    return { c: cloudExtinction(rho, S[QC]![q]!, qsub, S[QI]![q]!, S[QS]![q]!, T), p: precipExtinction(rho, S[QR]![q]!, S[QG]![q]!), T };
   }
 
   /** Outermost radius (m) of lowest-level wind of at least `v` m/s (the axisymmetric gale radius; 0 where none). */
@@ -211,7 +211,7 @@ export class AxiDriver {
       this.hourRain = { t: ax.time, acc };
     }
     // per radius and level: cloud byte and channel-2 byte, revolved into the 3-D volume
-    const cb = new Uint8Array(nr * nz), pb = new Uint8Array(nr * nz), wbA = new Uint8Array(nr * nz), ibA = new Uint8Array(nr * nz);
+    const cb = new Uint8Array(nr * nz), pb = new Uint8Array(nr * nz);
     const zetaL: (Float64Array | null)[] = volMode === 2 ? Array.from({ length: nz }, (_, k) => this.zeta(k)) : [];
     let wmax = 0, qcmax = 0, qrmax = 0;
     for (let k = 0; k < nz; k++) for (let i = 0; i < nr; i++) {
@@ -219,20 +219,18 @@ export class AxiDriver {
       // extinction bytes as the 3-D experiments (display.ts): cloud with snow and sub-grid cloud, channel 2 rain + graupel
       const cl = Math.max(0, S[QC]![q]! + S[QI]![q]!), pr = Math.max(0, S[QR]![q]! + S[QS]![q]! + S[QG]![q]!), e = this.ext(i, k);
       cb[k * nr + i] = extByte(e.c);
-      wbA[k * nr + i] = wByte(0.5 * (ax.w[q]! + ax.w[q + ax.sx]!)); ibA[k * nr + i] = iceByte(e.ice, e.c);
       let v2 = extByte(e.p) / 255;
       if (volMode === 1) v2 = Math.sqrt(Math.max(0.5 * (ax.w[q]! + ax.w[q + ax.sx]!), 0) / 40);
       else if (volMode === 2) v2 = Math.sqrt(Math.max(zetaL[k]![i]!, 0) / 0.05);
       pb[k * nr + i] = Math.min(255, Math.round(v2 * 255));
       qcmax = Math.max(qcmax, cl); qrmax = Math.max(qrmax, pr); wmax = Math.max(wmax, ax.w[q]!);
     }
-    const n = N * N * nz, cloud = new Uint8Array(n), rain = new Uint8Array(n), aux = new Uint8Array(2 * n);
+    const n = N * N * nz, cloud = new Uint8Array(n), rain = new Uint8Array(n);
     for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
       const { r } = this.polar(i, j), { i0, w } = this.rw(r);
       for (let k = 0; k < nz; k++) {
         const a = k * nr + i0, o = (k * N + j) * N + i;
         cloud[o] = cb[a]! * (1 - w) + cb[a + 1]! * w; rain[o] = pb[a]! * (1 - w) + pb[a + 1]! * w;
-        aux[2 * o] = wbA[a]! * (1 - w) + wbA[a + 1]! * w; aux[2 * o + 1] = ibA[a]! * (1 - w) + ibA[a + 1]! * w;
       }
     }
     // surface profiles
@@ -251,16 +249,16 @@ export class AxiDriver {
     let zetaMax = 0, rainmax = 0, dbzMax = 0, uhMax = 0, capeMax = 0;
     for (let i = 0; i < nr; i++) { zetaMax = Math.max(zetaMax, z0[i]!); rainmax = Math.max(rainmax, this.mp.rainAcc[i]!); }
     for (let i = 0; i < nd; i++) { dbzMax = Math.max(dbzMax, col.dbz[i]!); uhMax = Math.max(uhMax, col.uh[i]!); capeMax = Math.max(capeMax, col.cape[i]!); }
-    const transfer: ArrayBuffer[] = [cloud.buffer, rain.buffer, aux.buffer, g.buffer];
+    const transfer: ArrayBuffer[] = [cloud.buffer, rain.buffer, g.buffer];
     const charts = req ? this.charts(req, col, transfer) : null;
     const msg: RegionalFrame = {
-      type: 'frame', time: ax.time, nx: N, ny: N, nz, dx: this.dxv, dz, cloud, rain, aux, ground: g, groundField: ground, groundRange: [lo, hi],
+      type: 'frame', time: ax.time, nx: N, ny: N, nz, dx: this.dxv, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
       stats: { wmax, wmin: col.wmin, qcmax, qrmax, rainmax, vmax: mt.vmax, dp: mt.dp, rmw: mt.rmw, eyewalls: eyewallPeaks(rr, vt), zetaMax, vGround: mt.vmax, dbzMax, uhMax, uhMin: 0, capeMax,
         storm: { x: origin.x + this.D, y: origin.y + this.D }, vtProfile: { dr, vt }, tornado: null, tcRain: this.tcRain,
         // the one storm of the axisymmetric model: the vortex on the axis
         storms: [{ id: 1, kind: 'vortex', name: 'TC1', x: origin.x + this.D, y: origin.y + this.D, xd: this.D, yd: this.D, u: 0, v: 0, age: ax.time,
           pmin: this.centralSlp(), dp: -mt.dp, vmax: mt.vmax, rmw: mt.rmw, r7: this.galeRadius(GALE7), r10: this.galeRadius(GALE10) }], mainId: 1 },
-      origin, anchor: { x: 0, y: 0 }, charts, tracers: null, stepsPerSecond, dt: ax.a.dt,
+      origin, charts, tracers: null, stepsPerSecond, dt: ax.a.dt,
     };
     return { msg, transfer };
   }

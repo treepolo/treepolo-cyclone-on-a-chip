@@ -99,18 +99,17 @@ a{color:#8fc1ff}
 
 <details id="secEye" class="tcOnly"><summary>眼牆與風眼細化 / Eye refinement</summary>
 <div class="muted">只把颱風眼附近切成一個較細的盒子接著算（開放邊界、跟著颱風走；邊界向細化當下的外圍狀態鬆弛）。之後按「粗化」可以貼回全區。/ Continue only a box around the eye on a finer grid (open boundaries relaxing to the state at this moment, following the storm); Coarsen puts it back into the whole domain.</div>
-<label class="f"><span>盒子大小 / Box</span><select id="eyeL"><option value="240000">240 km</option><option value="360000" selected>360 km</option><option value="480000">480 km</option><option value="600000">600 km</option></select></label>
-<label class="f"><span>水平格距 / Δx</span><select id="eyeDx"><option value="1000">1 km</option><option value="1500">1.5 km</option><option value="2000" selected>2 km</option><option value="3000">3 km</option></select></label>
-<label class="f"><span>垂直格距 / Δz</span><select id="eyeDz"><option value="250">250 m</option><option value="333.3333">333 m</option><option value="500" selected>500 m</option></select></label>
+<label class="f" title="正方形盒子的邊長；要裝得下眼牆外面一些（約 5 倍最大風半徑）/ side of the square box; room for the eyewall and some of its surroundings (about 5 times the radius of maximum wind)"><span>盒子大小 / Box (km)</span><input id="eyeL" type="number" min="40" max="600" step="10" value="120" /></label>
+<label class="f" title="要比目前的網格細 / finer than the current grid"><span>水平格距 / Δx (km)</span><input id="eyeDx" type="number" min="0.25" max="5" step="0.25" value="2" /></label>
+<label class="f"><span>垂直格距 / Δz (m)</span><input id="eyeDz" type="number" min="100" max="1000" step="50" value="500" /></label>
 <div id="eyeInfo" class="muted"></div>
-<div class="controls"><button id="eyeGo" disabled>眼區細化 / Refine the eye</button></div>
+<div class="controls"><button id="eyeFit" title="依目前偵測到的最大風半徑：盒子約 5 倍、格距約十五分之一 / from the detected radius of maximum wind: a box about 5 times as wide, a spacing about a fifteenth of it">依眼牆大小建議 / Fit the eyewall</button><button id="eyeGo" disabled>眼區細化 / Refine the eye</button></div>
 </details>
 
 <details id="secView" open><summary>顯示 / Display</summary>
 <label class="f"><span>地面 / Ground</span><select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="snow">累積雪與霰 / Snow + graupel</option><option value="wind">地面風速 / Surface wind</option><option value="theta">地面溫度擾動 / Surface θ′</option><option value="none">海陸（只看雲）/ Sea and land only</option></select></label>
 <div id="legend" class="muted"></div>
 <label class="f"><span>雲的不透明度 / Cloud opacity</span><input id="cloudK" type="range" min="2" max="80" value="65" /></label>
-<label class="f chk" title="強烈對流的雲塊與泡泡、準確的雲面與光影；手機或較慢的顯卡可以關掉 / lumps and bubbles of vigorous cloud with exact surfaces and lighting; turn off on a phone or a slower GPU"><input id="cloudDetail" type="checkbox" checked /><span>雲的細節（較耗效能）/ Cloud detail (costs more)</span></label>
 <label class="f" title="高度方向放大幾倍（1× 是真實比例：颱風其實很扁）/ how many times the heights are stretched (1× is true scale: a tropical cyclone is really flat)"><span>垂直誇大 / Vertical exaggeration <span id="exagV" class="muted">8×</span></span><input id="exag" type="range" min="1" max="15" step="0.5" value="8" /></label>
 <label class="f" title="廣角適合在颱風眼裡往上看整圈眼牆 / a wide angle suits looking up at the whole eyewall from inside the eye"><span>視野廣度 / Field of view <span id="fovV" class="muted">52°</span></span><input id="fov" type="range" min="20" max="140" value="52" /></label>
 <label class="f chk"><input id="showLabels" type="checkbox" checked /><span>顯示風暴標籤 / Storm labels</span></label>

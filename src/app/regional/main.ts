@@ -1,12 +1,12 @@
 // Regional-model page: controls, 3-D volume view, statistics.
-import { VolumeView, CloudDetail } from './volume.js';
+import { VolumeView } from './volume.js';
 import { sequential, diverging } from '../colormap.js';
 import { mountSavesPanel, storeSave, type SaveMeta } from '../saves.js';
 import { UnattendedRun } from './runner.js';
 import { RegionalCharts } from './charts.js';
 import { Missions } from './missions.js';
 import { SetupForm } from './setupForm.js';
-import type { RegionalSetup } from './setup.js';
+import { defaultDt, type RegionalSetup } from './setup.js';
 import type { StormNow } from '../../regional/storms.js';
 import { Tools3D } from './tools3d.js';
 import { ReplayStore, type ReplayFrame } from './replay.js';
@@ -34,13 +34,12 @@ let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } |
 const missions = new Missions($('missions'), (s) => log(s));
 let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
 let lastVol: ReplayFrame | null = null, refining = false;
-const detail = new CloudDetail();
 // replay of the 3-D view: frames kept by the page (memory budget from the device memory when the browser tells it)
 const replay = new ReplayStore(Math.min(400, 64 * ((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 4)) * 1e6);
 let replayIdx: number | null = null, replayPlaying = false, replayAcc = 0;
 /** Show a stored or live display volume in the 3-D view. */
 function showVolume(f: ReplayFrame): void {
-  view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, f.aux, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top, f.Lx / f.nx, f.anchor, f.rise);
+  view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top);
   view.setGround(f.nx, f.ny, f.ground);
 }
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
@@ -64,6 +63,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   if (m.type === 'ready') {
     dt = m.dt;
     land = m.land;
+    gridNow = { nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dt: m.dt };
     // vertical exaggeration so that the troposphere is visible (unless chosen)
     if (exag === null) { const e = autoExag(m.nx * m.dx); $<HTMLInputElement>('exag').value = String(e); $('exagV').textContent = `${e}×`; }
     $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${m.dx >= 1000 ? `${(m.dx / 1000).toFixed(1)} km` : `${m.dx.toFixed(0)} m`}, Δz ${m.dz.toFixed(0)} m, Δt ${m.dt} s`;
@@ -90,7 +90,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     showSurface();
     tools.setGrid({ Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, dx: m.dx, dz: m.dz, paint: m.setup ? m.setup.fluxes && !presetAxi(m.setup) : m.experiment === 'nest', interact: m.experiment !== 'tc_axi' });
     missions.reset({ e: m.experiment, tc: m.tc });
-    if (!refining) { replay.clear(); endReplay(); detail.reset(); }
+    if (!refining) { replay.clear(); endReplay(); }
     refining = false;
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
@@ -110,10 +110,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
-    // cloud detail that carries on from frame to frame (vigour with memory, rising lumps)
-    const aux = detail.update(m.time, m.nx, m.ny, m.nz, m.dx, m.cloud, m.aux, m.anchor);
-    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, aux,
-      anchor: { ...m.anchor }, rise: detail.rise, ground: rgba, storms: m.stats.storms ?? [] };
+    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [] };
     replay.push(lastVol);
     if (in3d && replayIdx === null) { showVolume(lastVol); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     replayBar();
@@ -263,7 +260,6 @@ document.querySelectorAll<HTMLDetailsElement>('details[id]').forEach((d) => {
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('subgrid').onchange = (): void => send({ type: 'subgrid', on: $<HTMLInputElement>('subgrid').checked });
-$('cloudDetail').onchange = (): void => { view.setDetail($<HTMLInputElement>('cloudDetail').checked); };
 $('exag').oninput = (): void => {
   exag = Number($<HTMLInputElement>('exag').value); $('exagV').textContent = `${exag}×`;
   const f = replayIdx !== null ? replay.frames[replayIdx] : lastVol;
@@ -350,15 +346,46 @@ function tick(): void {
 requestAnimationFrame(tick);
 $('coarsen').onclick = (): void => { $<HTMLButtonElement>('coarsen').disabled = true; refining = true; log('粗化中… / Coarsening…'); send({ type: 'coarsen' }); };
 /** cells of the eye box and its time step */
-function eyeInfo(): void {
-  const L = Number($<HTMLSelectElement>('eyeL').value), dx = Number($<HTMLSelectElement>('eyeDx').value), dz = Number($<HTMLSelectElement>('eyeDz').value), top = form.value().top;
-  const n = Math.round(L / dx) ** 2 * Math.round(top / dz);
-  $('eyeInfo').textContent = `${Math.round(L / dx)}×${Math.round(L / dx)}×${Math.round(top / dz)} = ${(n / 1e6).toFixed(1)} M 格點 / cells${n > 8e6 ? ' · ⚠ 需要較強的顯卡 / needs a strong GPU' : ''}`;
+/** the grid of the current run: the eye box's cost is shown relative to it */
+let gridNow = { nx: 0, ny: 0, nz: 0, dx: 15000, dt: 60 };
+/** Eye box from the panel (m). */
+function eyeVals(): { L: number; dx: number; dz: number } {
+  const num = (id: string, d: number): number => { const v = Number($<HTMLInputElement>(id).value); return Number.isFinite(v) && v > 0 ? v : d; };
+  return { L: num('eyeL', 120) * 1000, dx: num('eyeDx', 2) * 1000, dz: num('eyeDz', 500) };
 }
-for (const id of ['eyeL', 'eyeDx', 'eyeDz']) $(id).onchange = eyeInfo;
+/** radius of maximum wind (m) of the main vortex, if one is detected */
+function eyeRmw(): number | null {
+  const v = stormsNow.find((s) => s.id === stormMain && s.kind === 'vortex') ?? stormsNow.find((s) => s.kind === 'vortex');
+  return v && v.rmw ? v.rmw : null;
+}
+/** Cells of the eye box and its work per model second relative to the current grid (cells / time step). */
+function eyeInfo(): void {
+  const { L, dx, dz } = eyeVals(), top = form.value().top, g = gridNow;
+  const ni = Math.max(16, Math.round(L / dx)), nz = Math.max(8, Math.round(top / dz)), n = ni * ni * nz;
+  const cost = g.nx ? (n / defaultDt({ dx, dz })) / (g.nx * g.ny * g.nz / g.dt) : NaN, rmw = eyeRmw();
+  const notes: string[] = [];
+  if (dx >= g.dx) notes.push('⚠ 格距沒有比目前的細 / not finer than the current grid');
+  if (rmw && L < 4 * rmw) notes.push(`⚠ 盒子小於最大風半徑 ${(rmw / 1000).toFixed(0)} km 的 4 倍，眼牆會碰到邊界 / box under 4 times the radius of maximum wind (${(rmw / 1000).toFixed(0)} km): the eyewall reaches the boundary`);
+  if (n > 8e6) notes.push('⚠ 需要較強的顯卡 / needs a strong GPU');
+  $('eyeInfo').textContent = `${ni}×${ni}×${nz} = ${(n / 1e6).toFixed(2)} M 格點 / cells` +
+    (Number.isFinite(cost) ? ` · 每模式秒的計算量約為目前的 ${cost < 10 ? cost.toFixed(1) : cost.toFixed(0)} 倍 / about ${cost < 10 ? cost.toFixed(1) : cost.toFixed(0)}× the current work per model second` : '') +
+    (notes.length ? ` · ${notes.join(' · ')}` : '');
+}
+/** Suggest a box for the current eyewall: about 5 times the radius of maximum wind (60-400 km), spacing about a
+ *  fifteenth of it (0.5 km to half the current spacing, at most 3 km), 500 m levels. */
+function eyeFit(): void {
+  const rmw = eyeRmw() ?? 40000;
+  const L = Math.max(60, Math.min(400, Math.ceil(5 * rmw / 10000) * 10));
+  const dx = Math.max(0.5, Math.min(3, gridNow.dx / 2000, Math.round(rmw / 15000 * 4) / 4));
+  $<HTMLInputElement>('eyeL').value = String(L); $<HTMLInputElement>('eyeDx').value = String(dx); $<HTMLInputElement>('eyeDz').value = '500';
+  eyeInfo();
+}
+for (const id of ['eyeL', 'eyeDx', 'eyeDz']) $(id).oninput = eyeInfo;
+$('eyeFit').onclick = eyeFit;
+$('secEye').addEventListener('toggle', () => { if (($('secEye') as HTMLDetailsElement).open) eyeFit(); });
 $('eyeGo').onclick = (): void => {
   $<HTMLButtonElement>('eyeGo').disabled = true; refining = true; log('眼區細化中… / Refining the eye…');
-  send({ type: 'refineEye', L: Number($<HTMLSelectElement>('eyeL').value), dx: Number($<HTMLSelectElement>('eyeDx').value), dz: Number($<HTMLSelectElement>('eyeDz').value) });
+  send({ type: 'refineEye', ...eyeVals() });
 };
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
 $('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; refining = true; log('細化中… / Refining…'); send({ type: 'refine' }); };

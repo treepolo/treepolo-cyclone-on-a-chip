@@ -104,8 +104,6 @@ export interface RegionalFrame {
   dx: number; dz: number;
   cloud: Uint8Array;          // [k][j][i] cloud water, 0..255 (scaled)
   rain: Uint8Array;           // [k][j][i] rain water, 0..255 (scaled)
-  /** [k][j][i] pairs: vertical velocity byte (display.ts wByte) and ice fraction byte (iceByte), for the 3-D view's texture */
-  aux: Uint8Array;
   ground: Float32Array;       // [j][i]
   groundField: GroundField;
   groundRange: [number, number];
@@ -131,9 +129,6 @@ export interface RegionalFrame {
   };
   /** ground-relative position (m) of the domain origin (moves with the frame of storm-following experiments) */
   origin: { x: number; y: number };
-  /** origin less its travel with the frame velocity (m): changes only when the fields jump in the domain (rolls,
-   *  refinement), so the 3-D view anchors its cloud detail to it */
-  anchor: { x: number; y: number };
   charts: ChartData | null;
   /** tracer particles: x, y, z (m, domain coordinates) and age (s) per particle, or null when off */
   tracers: Float32Array | null;
