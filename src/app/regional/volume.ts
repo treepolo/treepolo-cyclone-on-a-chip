@@ -37,6 +37,9 @@ uniform sampler2D uTrC; uniform sampler2D uTrD; uniform int uTrOn;
 // the eye nest: its volume and light, box (x0, y0, width; box units), cylinder (centre, radius, taper width), cells
 uniform sampler3D uNVol; uniform sampler3D uNLight; uniform int uNOn;
 uniform vec3 uNBox; uniform vec4 uNCyl; uniform float uNCell; uniform float uNCellZ;
+// occupancy: per block of cells, 0 where the block and its neighbours hold no cloud or precipitation at all; the
+// texture coordinate scale (blocks do not divide the grid exactly) and a clear-air step shorter than one block
+uniform sampler3D uOcc; uniform vec3 uOccScale; uniform float uOccStep;
 const float EXTMAX = ${EXT_MAX.toFixed(3)};
 // weight of the nest at p: 1 inside R - Wf, cos^2 to 0 at R (the feedback's taper), 0 without one
 float nestW(vec3 p){
@@ -48,7 +51,19 @@ float nestW(vec3 p){
 }
 vec3 nestQ(vec3 p){ return vec3((p.xy - uNBox.xy)/uNBox.z, p.z/uBox.z); }
 vec2 volAt(vec3 p, float w){ vec2 s = texture(uVol, p/uBox).rg; if (w > 0.0) s = mix(s, texture(uNVol, nestQ(p)).rg, w); return s; }
-vec2 lightAt(vec3 p, float w){ vec2 L = texture(uLight, p/uBox).rg; if (w > 0.0) L = mix(L, texture(uNLight, nestQ(p)).rg, w); return L; }
+// sun light (r) and sky light (g) at p: looked up one grid cell toward the sun (the sun is 50 degrees up: that is
+// also most of a cell up, toward the sky), between the light volume's first two mipmap levels. The light of a voxel is that at its centre, so right at the surface of dense cloud
+// it would blend a lit clear voxel with a dark cloudy one by where the surface happens to sit between their centres,
+// and whether a voxel is in a cloud's shadow is yes or no, so a shadow edge would follow the grid as a staircase (both
+// patterns of the grid, not of the cloud). A cell toward the light it is the light that reaches the surface; between
+// the mipmap levels shadow edges are soft over about a cell, as light diffusing inside cloud makes them anyway.
+const float LLOD = 0.6;
+vec2 lightAt(vec3 p, float w){
+  float c = max(uCell, uCellZ);
+  vec2 L = textureLod(uLight, (p + uSun*c)/uBox, LLOD).rg;
+  if (w > 0.0) L = mix(L, textureLod(uNLight, nestQ(p + uSun*max(uNCell, uNCellZ)), LLOD).rg, w);
+  return L;
+}
 bool hitBox(vec3 ro, vec3 rd, out float t0, out float t1){
   vec3 inv = 1.0/rd; vec3 a = (vec3(0.0)-ro)*inv; vec3 b = (uBox-ro)*inv;
   vec3 mn = min(a,b), mx = max(a,b);
@@ -101,32 +116,64 @@ void main(){
   }
   t0 = max(t0, 0.0);
   if (hit && t1 > t0) {
-    // coarse steps through clear air; entering cloud, one step back and steps of half a grid cell (the field changes
-    // on the grid scale) until the ray is spent or out again (opaque cloud ends the ray within a few steps)
-    float dtC = (t1 - t0)/88.0, dtF = min(dtC, 0.5*min(uCell, uCellZ)), dtN = uNOn == 1 ? min(dtC, 0.5*min(uNCell, uNCellZ)) : dtF;
-    float t = t0 + dtC*hash(gl_FragCoord.xy);
+    // Clear air (an empty block with empty neighbours) is crossed in steps shorter than a block, so no cloud is ever
+    // stepped over. Where there is cloud the steps are half a grid cell, longer (up to two cells) only where the cloud is
+    // so thin that a step holds at most a quarter optical depth. Entering a new stretch of cloud the ray goes back to its last clear
+    // point. A step that crosses a fixed extinction (0.3 optical depths per half cell) from below holds the surface of
+    // denser cloud: it is found by bisection and the ray goes on from there in quarter steps. So the picture of a surface does not depend on where the steps happen to fall (otherwise
+    // neighbouring pixels differ: speckle with random starts, contour lines with regular ones).
+    float dtP = 0.5*min(uCell, uCellZ), dtN = uNOn == 1 ? 0.5*min(uNCell, uNCellZ) : dtP;
+    float dtO = min(uOccStep, (t1 - t0)/40.0);
+    float t = t0 + dtO*hash(gl_FragCoord.xy);
     // single scattering toward the sun (silver lining), and multiple scattering: light that has diffused through the
     // cloud (sqrt of the direct transmittance: brighter and softer than the direct beam) and the sky's light
     float phase = 0.85 + 1.8*pow(max(mu,0.0), 6.0);
-    int fine = 0, budget = uNOn == 1 ? 260 : 170;
-    for (int i = 0; i < 420; i++) {
-      if (t > t1 || trans < 0.004) break;
+    // the last sample (the ray's start counts as clear): position, optical depth per box unit, what was composited before it
+    float tP = t0, bP = 0.0, trP = trans; vec3 colP = col, cP = vec3(0.0); bool tdP = tdone;
+    bool inCloud = false; int hold = 0, sub = 0, refines = 0; float dtSub = 0.0;
+    for (int i = 0; i < 640; i++) {
+      if (t > t1 || trans < 0.01) break;
       if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
       vec3 p = ro + t*rd;
+      if (hold == 0 && sub == 0 && texture(uOcc, p/uBox*uOccScale).r == 0.0) {
+        inCloud = false; tP = t; bP = 0.0; colP = col; trP = trans; tdP = tdone;
+        t += dtO; continue;
+      }
+      if (!inCloud) {
+        // a new stretch of cloud: from the last clear point, in fine steps (at least back to here)
+        inCloud = true;
+        if (t - tP > 1e-6) { hold = int((t - tP)/min(dtP, dtN)) + 2; t = tP; col = colP; trans = trP; tdone = tdP; continue; }
+      }
+      if (hold > 0) hold--;
       float w = nestW(p);
       vec3 d = dens(p, w);
-      if (fine == 0 && d.z >= 0.004 && budget > 0 && min(dtF, dtN) < dtC*0.99) { t = max(t0, t - dtC); fine = 24; continue; }
-      float dt = fine > 0 ? (w > 0.0 ? dtN : dtF) : dtC;
-      float b = d.x + d.y;
-      if (b > 1e-9) {
+      float b = (d.x + d.y)*uMpb, dtMin = w > 0.0 ? dtN : dtP, dt;
+      if (sub > 0) { dt = dtSub; sub--; }
+      else {
+        float bThr = 0.3/dtMin;
+        if (refines < 6 && bP < bThr && b >= bThr && t - tP > 0.2*dtMin) {
+          float lo = tP, hi = t;
+          for (int k = 0; k < 8; k++) {
+            float mid = 0.5*(lo + hi); vec3 pm = ro + mid*rd; vec3 dm = dens(pm, nestW(pm));
+            if ((dm.x + dm.y)*uMpb >= bThr) hi = mid; else lo = mid;
+          }
+          // the thin stretch up to the surface with the last sample, then on from the surface
+          col = colP; trans = trP; tdone = tdP;
+          if (bP > 1e-6) { float a = 1.0 - exp(-bP*(hi - tP)); col += trans*a*cP; trans *= 1.0 - a; }
+          tP = hi; bP = 0.0; colP = col; trP = trans; tdP = tdone;
+          dtSub = 0.25*dtMin; sub = 12; refines++; t = hi; continue;
+        }
+        dt = clamp(0.25/max(b, 1e-6), dtMin, 4.0*dtMin);
+      }
+      tP = t; bP = b; colP = col; trP = trans; tdP = tdone; cP = vec3(0.0);
+      if (b > 1e-6) {
         vec2 L = lightAt(p, w);
-        float a = 1.0 - exp(-b*dt*uMpb);
+        float a = 1.0 - exp(-b*dt);
         vec3 cc = sunCol*(L.r*phase + 0.3*sqrt(L.r)) + ambCol*(0.36 + 0.5*L.g);
         vec3 cp = uMode == 0 ? vec3(0.46,0.54,0.66)*(0.35 + 0.65*L.r) + ambCol*0.1 : (uMode == 1 ? vec3(1.0,0.45,0.2) : vec3(0.35,0.55,1.0));
-        vec3 c = (cc*d.x + cp*d.y)/b;
-        col += trans*a*c; trans *= 1.0-a;
+        cP = (cc*d.x + cp*d.y)/(d.x + d.y);
+        col += trans*a*cP; trans *= 1.0-a;
       }
-      if (fine > 0) { fine--; budget--; if (d.z >= 0.004) fine = max(fine, 8); }
       t += dt;
     }
   }
@@ -177,6 +224,9 @@ export class VolumeView {
   private readonly light: WebGLTexture;
   private readonly nVol: WebGLTexture;
   private readonly nLight: WebGLTexture;
+  private readonly occ: WebGLTexture;
+  /** occupancy grid: texture coordinate scale and the clear-air step (box units) */
+  private occScale: V3 = [1, 1, 1]; private occStep = 0.01;
   /** the eye nest (box units: x0, y0, width; cylinder centre, radius, taper), or null */
   private nest: { nx: number; nz: number; cloud: Uint8Array; x0: number; y0: number; L: number; cx: number; cy: number; R: number; Wf: number } | null = null;
   /** optical depth toward the sun of every outer voxel ([k][j][i]), from the last lighting (the nest's rays leave its box into it) */
@@ -225,6 +275,7 @@ export class VolumeView {
     this.light = gl.createTexture()!;
     this.nVol = gl.createTexture()!;
     this.nLight = gl.createTexture()!;
+    this.occ = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
     // empty volumes and light until the first frame (the sampler types must be complete)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -232,6 +283,10 @@ export class VolumeView {
       gl.bindTexture(gl.TEXTURE_3D, t);
       gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, 1, 1, 1, 0, gl.RG, gl.UNSIGNED_BYTE, new Uint8Array([v, v]));
     }
+    gl.bindTexture(gl.TEXTURE_3D, this.occ);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, 1, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([255]));
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     this.controls();
   }
 
@@ -499,9 +554,53 @@ export class VolumeView {
       this.upload(this.nVol, nest.nx, nest.nx, nest.nz, nest.cloud, nest.rain);
       this.nest = { nx: nest.nx, nz: nest.nz, cloud: nest.cloud, x0: nest.x0 * u, y0: nest.y0 * u, L: nest.L * u, cx: nest.cx * u, cy: nest.cy * u, R: nest.R * u, Wf: nest.Wf * u };
     }
+    this.buildOccupancy(nx, ny, nz, cloud, rain, nest);
     this.computeLight();
     this.dirty = true;
   }
+  /**
+   * Occupancy grid for skipping clear air: blocks of B x B cells across and Bz levels (about as tall as wide in the
+   * box), 255 where the block or any of its 26 neighbours holds any cloud or second-channel value (outer grid or nest),
+   * 0 elsewhere. A ray in an empty block may step up to a block length without passing any cloud (the trilinear
+   * sampling reaches one cell into a neighbour, which is empty as well).
+   */
+  private buildOccupancy(nx: number, ny: number, nz: number, cloud: Uint8Array, rain: Uint8Array, nest: NestVolume | null): void {
+    const gl = this.gl, [bx, by, bz] = this.box, B = 8, Bz = Math.max(1, Math.min(16, Math.round(B * (bx / nx) / (bz / nz))));
+    const mx = Math.ceil(nx / B), my = Math.ceil(ny / B), mz = Math.ceil(nz / Bz), raw = new Uint8Array(mx * my * mz);
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {
+      const o = (k * ny + j) * nx, ob = (Math.floor(k / Bz) * my + Math.floor(j / B)) * mx;
+      for (let i = 0; i < nx; i++) if (cloud[o + i] || rain[o + i]) raw[ob + Math.floor(i / B)] = 1;
+    }
+    if (nest) {
+      const cn = nest.nx, cz = nest.nz, u = 1 / nest.Lx;
+      for (let k = 0; k < cz; k++) {
+        const kb = Math.min(mz - 1, Math.floor(((k + 0.5) / cz * nz) / Bz));
+        for (let j = 0; j < cn; j++) {
+          const jb = Math.max(0, Math.min(my - 1, Math.floor(((nest.y0 + (j + 0.5) / cn * nest.L) * u / by * ny) / B))), o = (k * cn + j) * cn;
+          for (let i = 0; i < cn; i++) if (nest.cloud[o + i] || nest.rain[o + i]) {
+            const ib = Math.max(0, Math.min(mx - 1, Math.floor(((nest.x0 + (i + 0.5) / cn * nest.L) * u / bx * nx) / B)));
+            raw[(kb * my + jb) * mx + ib] = 1;
+          }
+        }
+      }
+    }
+    const occ = new Uint8Array(mx * my * mz);
+    for (let k = 0; k < mz; k++) for (let j = 0; j < my; j++) for (let i = 0; i < mx; i++) {
+      let any = 0;
+      for (let c = Math.max(0, k - 1); c <= Math.min(mz - 1, k + 1) && !any; c++) for (let b = Math.max(0, j - 1); b <= Math.min(my - 1, j + 1) && !any; b++)
+        for (let a = Math.max(0, i - 1); a <= Math.min(mx - 1, i + 1); a++) if (raw[(c * my + b) * mx + a]) { any = 1; break; }
+      occ[(k * my + j) * mx + i] = any ? 255 : 0;
+    }
+    gl.bindTexture(gl.TEXTURE_3D, this.occ);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, mx, my, mz, 0, gl.RED, gl.UNSIGNED_BYTE, occ);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
+    this.occScale = [nx / (mx * B), ny / (my * B), nz / (mz * Bz)];
+    this.occStep = 0.95 * Math.min(B * bx / nx, B * by / ny, Bz * bz / nz);
+  }
+
   /** Drop the eye nest's volume (the nest stopped). */
   clearNest(): void { if (this.nest) { this.nest = null; this.dirty = true; } }
 
@@ -553,12 +652,14 @@ export class VolumeView {
     this.kLight = k;
     this.computeNestLight();
   }
+  /** Upload a light volume with its mipmaps (the shader reads it between the first two levels: soft shadow edges). */
   private uploadLight(tex: WebGLTexture, nx: number, ny: number, nz: number, out: Uint8Array): void {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_3D, tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, nx, ny, nz, 0, gl.RG, gl.UNSIGNED_BYTE, out);
-    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.generateMipmap(gl.TEXTURE_3D);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
   }
@@ -806,6 +907,9 @@ export class VolumeView {
     gl.uniform4f(u('uNCyl'), nt ? nt.cx : 0, nt ? nt.cy : 0, nt ? nt.R : 0, nt ? Math.max(nt.Wf, 1e-6) : 1);
     gl.uniform1f(u('uNCell'), nt ? nt.L / nt.nx : 0.01);
     gl.uniform1f(u('uNCellZ'), nt ? bz / nt.nz : 0.01);
+    gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_3D, this.occ); gl.uniform1i(u('uOcc'), 7);
+    gl.uniform3f(u('uOccScale'), this.occScale[0], this.occScale[1], this.occScale[2]);
+    gl.uniform1f(u('uOccStep'), this.occStep);
     gl.uniform1i(u('uTrOn'), trOn ? 1 : 0);
     if (trOn) {
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.trFbo!.c); gl.uniform1i(u('uTrC'), 2);
