@@ -9,8 +9,10 @@ export interface ReplayFrame {
   /** domain width, height and top (m) */
   Lx: number; Ly: number; top: number;
   cloud: Uint8Array; rain: Uint8Array; ground: Uint8Array; storms: StormNow[];
-  /** per cell: vertical-velocity byte and ice-fraction byte (the cloud texture of the 3-D view) */
+  /** per cell: vigour of the convection and ice fraction (bytes; CloudDetail in volume.ts) */
   aux: Uint8Array;
+  /** where the cloud detail is anchored (m) and how far its vigorous lumps have risen (m) */
+  anchor: { x: number; y: number }; rise: number;
 }
 
 /** keep frames at full resolution up to this many cells, else at half the horizontal resolution */

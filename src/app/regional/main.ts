@@ -1,5 +1,5 @@
 // Regional-model page: controls, 3-D volume view, statistics.
-import { VolumeView } from './volume.js';
+import { VolumeView, CloudDetail } from './volume.js';
 import { sequential, diverging } from '../colormap.js';
 import { mountSavesPanel, storeSave, type SaveMeta } from '../saves.js';
 import { UnattendedRun } from './runner.js';
@@ -34,12 +34,13 @@ let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } |
 const missions = new Missions($('missions'), (s) => log(s));
 let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
 let lastVol: ReplayFrame | null = null, refining = false;
+const detail = new CloudDetail();
 // replay of the 3-D view: frames kept by the page (memory budget from the device memory when the browser tells it)
 const replay = new ReplayStore(Math.min(400, 64 * ((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 4)) * 1e6);
 let replayIdx: number | null = null, replayPlaying = false, replayAcc = 0;
 /** Show a stored or live display volume in the 3-D view. */
 function showVolume(f: ReplayFrame): void {
-  view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, f.aux, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top, f.Lx / f.nx);
+  view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, f.aux, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top, f.Lx / f.nx, f.anchor, f.rise);
   view.setGround(f.nx, f.ny, f.ground);
 }
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
@@ -89,7 +90,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     showSurface();
     tools.setGrid({ Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, dx: m.dx, dz: m.dz, paint: m.setup ? m.setup.fluxes && !presetAxi(m.setup) : m.experiment === 'nest', interact: m.experiment !== 'tc_axi' });
     missions.reset({ e: m.experiment, tc: m.tc });
-    if (!refining) { replay.clear(); endReplay(); }
+    if (!refining) { replay.clear(); endReplay(); detail.reset(); }
     refining = false;
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
@@ -109,7 +110,10 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
-    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, aux: m.aux, ground: rgba, storms: m.stats.storms ?? [] };
+    // cloud detail that carries on from frame to frame (vigour with memory, rising lumps)
+    const aux = detail.update(m.time, m.nx, m.ny, m.nz, m.dx, m.cloud, m.aux, m.anchor);
+    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, aux,
+      anchor: { ...m.anchor }, rise: detail.rise, ground: rgba, storms: m.stats.storms ?? [] };
     replay.push(lastVol);
     if (in3d && replayIdx === null) { showVolume(lastVol); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     replayBar();

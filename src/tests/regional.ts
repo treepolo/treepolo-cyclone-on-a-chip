@@ -500,4 +500,32 @@ void DRY_AIR;
     side === 255 && top === 255 && layer > 200 && thin === 0 && clear === 0, `side ${side}, top ${top}, layer ${layer}, thin sinking ${thin}, clear ${clear}`);
 }
 
+// 3-D view: cloud detail carries on from frame to frame (vigour remembered and moved with the fields, lumps rising)
+{
+  const { CloudDetail } = await import('../app/regional/volume.js');
+  const { wByte, extByte } = await import('../regional/display.js');
+  const nx = 20, ny = 20, nz = 10, n = nx * ny * nz, at = (i: number, j: number, k: number): number => (k * ny + j) * nx + i;
+  // a thin cloud block at i0..i0+2 with an updraft w in its middle column
+  const mk = (i0: number, w: number): { cloud: Uint8Array; aux: Uint8Array } => {
+    const cloud = new Uint8Array(n), aux = new Uint8Array(2 * n);
+    for (let q = 0; q < n; q++) aux[2 * q] = wByte(0);
+    for (let k = 2; k <= 8; k++) for (let j = 5; j <= 7; j++) for (let i = i0; i <= i0 + 2; i++) cloud[at(i, j, k)] = extByte(0.01);
+    for (let k = 2; k <= 8; k++) aux[2 * at(i0 + 1, 6, k)] = wByte(w);
+    return { cloud, aux };
+  };
+  const cd = new CloudDetail();
+  const a = mk(6, 10), v1 = cd.update(0, nx, ny, nz, 2000, a.cloud, a.aux, { x: 0, y: 0 });
+  // 5 min later the updraft has stopped and the fields have jumped 2 cells west in the domain (anchor 2 cells east)
+  const b = mk(4, 0), v2 = cd.update(300, nx, ny, nz, 2000, b.cloud, b.aux, { x: 4000, y: 0 });
+  const kept = v2[2 * at(5, 6, 5)]!, want = Math.round(255 * Math.exp(-300 / 900)), rise2 = cd.rise;
+  // another 5 min: an updraft again, the lumps rise
+  const c = mk(4, 6);
+  cd.update(600, nx, ny, nz, 2000, c.cloud, c.aux, { x: 4000, y: 0 });
+  const rise3 = cd.rise;
+  cd.update(100, nx, ny, nz, 2000, c.cloud, c.aux, { x: 0, y: 0 });
+  check('3-D view: a tower that stops rising stays vigorous for a while (fading, e-folding 15 min) at the place its fields moved to; lumps rise with the updraft (at most 8 m/s); an earlier time starts afresh',
+    v1[2 * at(7, 6, 5)] === 255 && Math.abs(kept - want) <= 1 && rise2 === 0 && rise3 > 0 && rise3 <= 8 * 300 && cd.rise === 0,
+    `frame 1 ${v1[2 * at(7, 6, 5)]}, remembered ${kept} (expected ${want}), rise ${rise2} then ${rise3.toFixed(0)} m, after reset ${cd.rise}`);
+}
+
 summary('regional');
