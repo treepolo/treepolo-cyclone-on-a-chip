@@ -4,10 +4,16 @@
 // no light marching per pixel), with forward scattering toward the sun (silver lining), cloud shadows on the ground,
 // a coloured ground plane (surface field) and a map-style camera. The vertical scale is exaggerated; optical depths use
 // the vertical metres per box unit in every direction, so what is drawn is what the displayed geometry would show.
+// An eye nest (a finer grid in a cylinder, twoway.ts) has its own volume and light: inside the cylinder it replaces the
+// outer volume, blended out toward the rim as its feedback into the outer grid is (cos^2 over Wf), with finer steps there.
 // Tracer particles (with short trails) are drawn first into an offscreen buffer that keeps, per pixel, the
 // nearest particle colour and its distance from the eye; the ray march composites that colour where the
 // ray passes that distance, so clouds in front hide the particles behind them.
 import { EXT_MAX } from '../../regional/display.js';
+import type { NestFrame } from './protocol.js';
+
+/** The eye nest's volume for the view, with the outer domain's width and height (m). */
+export type NestVolume = NestFrame & { Lx: number; Ly: number };
 
 const VS = `#version 300 es
 in vec2 aPos; out vec2 vUv;
@@ -28,7 +34,21 @@ uniform vec3 uOut;    // surface colour beyond the domain (sea or land)
 uniform int uMode;    // channel 2: 0 precipitation, 1 updraft, 2 cyclonic vorticity
 uniform vec4 uCut; uniform int uCutOn;  // cutaway: nothing where dot(uCut.xyz, p) > uCut.w
 uniform sampler2D uTrC; uniform sampler2D uTrD; uniform int uTrOn;
+// the eye nest: its volume and light, box (x0, y0, width; box units), cylinder (centre, radius, taper width), cells
+uniform sampler3D uNVol; uniform sampler3D uNLight; uniform int uNOn;
+uniform vec3 uNBox; uniform vec4 uNCyl; uniform float uNCell; uniform float uNCellZ;
 const float EXTMAX = ${EXT_MAX.toFixed(3)};
+// weight of the nest at p: 1 inside R - Wf, cos^2 to 0 at R (the feedback's taper), 0 without one
+float nestW(vec3 p){
+  if (uNOn == 0) return 0.0;
+  float d = length(p.xy - uNCyl.xy), a = uNCyl.z - uNCyl.w;
+  if (d >= uNCyl.z) return 0.0;
+  if (d <= a) return 1.0;
+  float c = cos(1.5707963*(d - a)/uNCyl.w); return c*c;
+}
+vec3 nestQ(vec3 p){ return vec3((p.xy - uNBox.xy)/uNBox.z, p.z/uBox.z); }
+vec2 volAt(vec3 p, float w){ vec2 s = texture(uVol, p/uBox).rg; if (w > 0.0) s = mix(s, texture(uNVol, nestQ(p)).rg, w); return s; }
+vec2 lightAt(vec3 p, float w){ vec2 L = texture(uLight, p/uBox).rg; if (w > 0.0) L = mix(L, texture(uNLight, nestQ(p)).rg, w); return L; }
 bool hitBox(vec3 ro, vec3 rd, out float t0, out float t1){
   vec3 inv = 1.0/rd; vec3 a = (vec3(0.0)-ro)*inv; vec3 b = (uBox-ro)*inv;
   vec3 mn = min(a,b), mx = max(a,b);
@@ -40,9 +60,9 @@ float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); 
 // Cloud and precipitation extinction (1/m) at p (box units) and the grid's cloud value: exactly the model's field (its
 // grid-box means, interpolated between box centres), nothing added. Detail the grid does not resolve is not drawn:
 // a partly cloudy box (sub-grid cloud) is a thin, translucent cloud, as its mean is.
-vec3 dens(vec3 p){
+vec3 dens(vec3 p, float w){
   if (uCutOn == 1 && dot(uCut.xyz, p) > uCut.w) return vec3(0.0);
-  vec2 s = texture(uVol, p/uBox).rg;
+  vec2 s = volAt(p, w);
   return vec3(ext(s.r)*uK, uMode == 0 ? ext(s.g)*uK : s.g*s.g*4e-4, s.r);
 }
 void main(){
@@ -61,7 +81,8 @@ void main(){
     float tg = -ro.z/rd.z; vec3 pg = ro + tg*rd;
     vec3 g;
     if (pg.x >= 0.0 && pg.y >= 0.0 && pg.x <= uBox.x && pg.y <= uBox.y) {
-      vec2 L = texture(uLight, vec3(pg.xy/uBox.xy, 0.0)).rg;
+      vec3 p0 = vec3(pg.xy, 0.0);
+      vec2 L = lightAt(p0, nestW(p0));
       g = texture(uGround, pg.xy/uBox.xy).rgb * (0.40*(0.35+0.65*L.g) + 0.95*L.r*max(uSun.z,0.0));
     } else g = uOut * (0.40 + 0.95*max(uSun.z,0.0));
     bg = mix(g, horizon, smoothstep(6.0, 30.0, tg));
@@ -82,22 +103,23 @@ void main(){
   if (hit && t1 > t0) {
     // coarse steps through clear air; entering cloud, one step back and steps of half a grid cell (the field changes
     // on the grid scale) until the ray is spent or out again (opaque cloud ends the ray within a few steps)
-    float dtC = (t1 - t0)/88.0, dtF = min(dtC, 0.5*min(uCell, uCellZ));
+    float dtC = (t1 - t0)/88.0, dtF = min(dtC, 0.5*min(uCell, uCellZ)), dtN = uNOn == 1 ? min(dtC, 0.5*min(uNCell, uNCellZ)) : dtF;
     float t = t0 + dtC*hash(gl_FragCoord.xy);
     // single scattering toward the sun (silver lining), and multiple scattering: light that has diffused through the
     // cloud (sqrt of the direct transmittance: brighter and softer than the direct beam) and the sky's light
     float phase = 0.85 + 1.8*pow(max(mu,0.0), 6.0);
-    int fine = 0, budget = 170;
-    for (int i = 0; i < 320; i++) {
+    int fine = 0, budget = uNOn == 1 ? 260 : 170;
+    for (int i = 0; i < 420; i++) {
       if (t > t1 || trans < 0.004) break;
       if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
       vec3 p = ro + t*rd;
-      vec3 d = dens(p);
-      if (fine == 0 && d.z >= 0.004 && budget > 0 && dtF < dtC*0.99) { t = max(t0, t - dtC); fine = 24; continue; }
-      float dt = fine > 0 ? dtF : dtC;
+      float w = nestW(p);
+      vec3 d = dens(p, w);
+      if (fine == 0 && d.z >= 0.004 && budget > 0 && min(dtF, dtN) < dtC*0.99) { t = max(t0, t - dtC); fine = 24; continue; }
+      float dt = fine > 0 ? (w > 0.0 ? dtN : dtF) : dtC;
       float b = d.x + d.y;
       if (b > 1e-9) {
-        vec2 L = texture(uLight, p/uBox).rg;
+        vec2 L = lightAt(p, w);
         float a = 1.0 - exp(-b*dt*uMpb);
         vec3 cc = sunCol*(L.r*phase + 0.3*sqrt(L.r)) + ambCol*(0.36 + 0.5*L.g);
         vec3 cp = uMode == 0 ? vec3(0.46,0.54,0.66)*(0.35 + 0.65*L.r) + ambCol*0.1 : (uMode == 1 ? vec3(1.0,0.45,0.2) : vec3(0.35,0.55,1.0));
@@ -153,6 +175,12 @@ export class VolumeView {
   private readonly prog: WebGLProgram;
   private readonly vol: WebGLTexture;
   private readonly light: WebGLTexture;
+  private readonly nVol: WebGLTexture;
+  private readonly nLight: WebGLTexture;
+  /** the eye nest (box units: x0, y0, width; cylinder centre, radius, taper), or null */
+  private nest: { nx: number; nz: number; cloud: Uint8Array; x0: number; y0: number; L: number; cx: number; cy: number; R: number; Wf: number } | null = null;
+  /** optical depth toward the sun of every outer voxel ([k][j][i]), from the last lighting (the nest's rays leave its box into it) */
+  private odAll: Float32Array | null = null;
   private readonly groundTex: WebGLTexture;
   private box: [number, number, number] = [1, 1, 0.3];
   // tracer particles
@@ -195,13 +223,15 @@ export class VolumeView {
     gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
     this.vol = gl.createTexture()!;
     this.light = gl.createTexture()!;
+    this.nVol = gl.createTexture()!;
+    this.nLight = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
-    // empty volume and light until the first frame (the sampler types must be complete)
-    gl.bindTexture(gl.TEXTURE_3D, this.vol);
+    // empty volumes and light until the first frame (the sampler types must be complete)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, 1, 1, 1, 0, gl.RG, gl.UNSIGNED_BYTE, new Uint8Array([0, 0]));
-    gl.bindTexture(gl.TEXTURE_3D, this.light);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, 1, 1, 1, 0, gl.RG, gl.UNSIGNED_BYTE, new Uint8Array([255, 255]));
+    for (const [t, v] of [[this.vol, 0], [this.light, 255], [this.nVol, 0], [this.nLight, 255]] as const) {
+      gl.bindTexture(gl.TEXTURE_3D, t);
+      gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, 1, 1, 1, 0, gl.RG, gl.UNSIGNED_BYTE, new Uint8Array([v, v]));
+    }
     this.controls();
   }
 
@@ -442,25 +472,38 @@ export class VolumeView {
   /** The second volume channel's meaning (0 precipitation, 1 updraft, 2 vorticity). */
   setMode(mode: number): void { this.mode = mode | 0; this.dirty = true; }
 
-  /** Upload the display volume [k][j][i] (cloud and precipitation bytes, display.ts) of a domain `top` metres high, set
-   *  the box aspect (x, y normalised to 1) and light it. */
-  setVolume(nx: number, ny: number, nz: number, cloud: Uint8Array, rain: Uint8Array, aspectZ: number, top: number): void {
+  /** Upload a volume ([k][j][i] cloud and second-channel bytes) into a 3-D texture (RG, linear, clamped). */
+  private upload(tex: WebGLTexture, nx: number, ny: number, nz: number, a: Uint8Array, b: Uint8Array): void {
     const gl = this.gl, rg = new Uint8Array(nx * ny * nz * 2);
-    for (let i = 0; i < cloud.length; i++) { rg[2 * i] = cloud[i]!; rg[2 * i + 1] = rain[i]!; }
-    gl.bindTexture(gl.TEXTURE_3D, this.vol);
+    for (let i = 0; i < a.length; i++) { rg[2 * i] = a[i]!; rg[2 * i + 1] = b[i]!; }
+    gl.bindTexture(gl.TEXTURE_3D, tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, nx, ny, nz, 0, gl.RG, gl.UNSIGNED_BYTE, rg);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
+  }
+
+  /** Upload the display volume [k][j][i] (cloud and precipitation bytes, display.ts) of a domain `top` metres high, set
+   *  the box aspect (x, y normalised to 1) and light it; with the eye nest's volume, or none. */
+  setVolume(nx: number, ny: number, nz: number, cloud: Uint8Array, rain: Uint8Array, aspectZ: number, top: number, nest: NestVolume | null = null): void {
+    this.upload(this.vol, nx, ny, nz, cloud, rain);
     const ax = 1, ay = ny / nx;
     // a new domain shape: back to the domain centre (a new vertical exaggeration keeps the view)
     if (ax !== this.box[0] || ay !== this.box[1]) this.tgt = null;
     this.box = [ax, ay, aspectZ];
     this.data = { nx, ny, nz, cloud, top };
+    this.nest = null;
+    if (nest) {
+      const u = 1 / nest.Lx;
+      this.upload(this.nVol, nest.nx, nest.nx, nest.nz, nest.cloud, nest.rain);
+      this.nest = { nx: nest.nx, nz: nest.nz, cloud: nest.cloud, x0: nest.x0 * u, y0: nest.y0 * u, L: nest.L * u, cx: nest.cx * u, cy: nest.cy * u, R: nest.R * u, Wf: nest.Wf * u };
+    }
     this.computeLight();
     this.dirty = true;
   }
+  /** Drop the eye nest's volume (the nest stopped). */
+  clearNest(): void { if (this.nest) { this.nest = null; this.dirty = true; } }
 
   /**
    * Sun and sky light of every voxel (bytes: transmittance to the sun, transmittance straight up) from the cloud
@@ -484,8 +527,12 @@ export class VolumeView {
     // horizontal shift toward the sun per level (cells) and the slant path per level (m)
     const di = (bz / nz) * s[0] / s[2] / (bx / nx), dj = (bz / nz) * s[1] / s[2] / (by / ny), slant = dzm / s[2];
     let od = new Float32Array(np), prev = new Float32Array(np);
-    const sky = new Float32Array(np), out = new Uint8Array(2 * nz * np);
-    const put = (kk: number): void => { const o = kk * np; for (let c = 0; c < np; c++) { out[2 * (o + c)] = Math.round(255 * Math.exp(-od[c]!)); out[2 * (o + c) + 1] = Math.round(255 * Math.exp(-sky[c]!)); } };
+    const sky = new Float32Array(np), out = new Uint8Array(2 * nz * np), all = this.nest ? new Float32Array(nz * np) : null;
+    const put = (kk: number): void => {
+      const o = kk * np;
+      for (let c = 0; c < np; c++) { out[2 * (o + c)] = Math.round(255 * Math.exp(-od[c]!)); out[2 * (o + c) + 1] = Math.round(255 * Math.exp(-sky[c]!)); }
+      all?.set(od, o);
+    };
     { const o = (nz - 1) * np; for (let c = 0; c < np; c++) { const b = lut[cloud[o + c]!]!; od[c] = 0.5 * b * slant; sky[c] = 0.5 * b * dzm; } put(nz - 1); }
     for (let kk = nz - 2; kk >= 0; kk--) {
       [od, prev] = [prev, od];
@@ -501,13 +548,74 @@ export class VolumeView {
       }
       put(kk);
     }
-    gl.bindTexture(gl.TEXTURE_3D, this.light);
+    this.uploadLight(this.light, nx, ny, nz, out);
+    this.odAll = all;
+    this.kLight = k;
+    this.computeNestLight();
+  }
+  private uploadLight(tex: WebGLTexture, nx: number, ny: number, nz: number, out: Uint8Array): void {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_3D, tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.RG8, nx, ny, nz, 0, gl.RG, gl.UNSIGNED_BYTE, out);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
-    this.kLight = k;
+  }
+
+  /**
+   * The eye nest's sun and sky light, as computeLight on its finer grid: the sweep toward the sun runs through the nest's
+   * own cloud while the path stays in its box and takes the outer grid's optical depth where it leaves the box; the
+   * sky light is its own column (same top).
+   */
+  private computeNestLight(): void {
+    const n = this.nest, d = this.data, all = this.odAll; if (!n || !d || !all) return;
+    const { nx: cn, nz: cz } = n, np = cn * cn, [bx, by, bz] = this.box, k = this.kExt, s = SUN;
+    let cloud = n.cloud;
+    const cp = this.cutPlane();
+    if (cp) {
+      cloud = Uint8Array.from(cloud);
+      for (let kk = 0; kk < cz; kk++) for (let j = 0; j < cn; j++) for (let i = 0; i < cn; i++) {
+        if (cp.n[0] * (n.x0 + (i + 0.5) / cn * n.L) + cp.n[1] * (n.y0 + (j + 0.5) / cn * n.L) + cp.n[2] * (kk + 0.5) / cz * bz > cp.d) cloud[(kk * cn + j) * cn + i] = 0;
+      }
+    }
+    const lut = new Float32Array(256); for (let v = 0; v < 256; v++) lut[v] = EXT_MAX * (v / 255) ** 3 * k;
+    const dzm = d.top / cz, cell = n.L / cn, di = (bz / cz) * s[0] / s[2] / cell, dj = (bz / cz) * s[1] / s[2] / cell, slant = dzm / s[2];
+    // the outer grid's optical depth at box point (x, y) and height fraction zf (bilinear across, linear between levels)
+    const onx = d.nx, ony = d.ny, onz = d.nz, onp = onx * ony;
+    const outer = (x: number, y: number, zf: number): number => {
+      const fx = Math.max(0, Math.min(onx - 1, x / bx * onx - 0.5)), fy = Math.max(0, Math.min(ony - 1, y / by * ony - 0.5)), fz = Math.max(0, Math.min(onz - 1, zf * onz - 0.5));
+      const i0 = Math.min(onx - 2, Math.floor(fx)), j0 = Math.min(ony - 2, Math.floor(fy)), k0 = Math.min(onz - 2, Math.floor(fz));
+      const wx = onx > 1 ? fx - i0 : 0, wy = ony > 1 ? fy - j0 : 0, wz = onz > 1 ? fz - k0 : 0;
+      const at = (kk: number): number => {
+        const o = Math.max(0, kk) * onp + Math.max(0, j0) * onx + Math.max(0, i0);
+        return (all[o]! * (1 - wx) + all[o + (onx > 1 ? 1 : 0)]! * wx) * (1 - wy) + (all[o + (ony > 1 ? onx : 0)]! * (1 - wx) + all[o + (ony > 1 ? onx : 0) + (onx > 1 ? 1 : 0)]! * wx) * wy;
+      };
+      return onz > 1 ? at(k0) * (1 - wz) + at(k0 + 1) * wz : at(0);
+    };
+    let od = new Float32Array(np), prev = new Float32Array(np);
+    const sky = new Float32Array(np), out = new Uint8Array(2 * cz * np);
+    const put = (kk: number): void => { const o = kk * np; for (let c = 0; c < np; c++) { out[2 * (o + c)] = Math.round(255 * Math.exp(-od[c]!)); out[2 * (o + c) + 1] = Math.round(255 * Math.exp(-sky[c]!)); } };
+    { const o = (cz - 1) * np; for (let c = 0; c < np; c++) { const b = lut[cloud[o + c]!]!; od[c] = 0.5 * b * slant; sky[c] = 0.5 * b * dzm; } put(cz - 1); }
+    for (let kk = cz - 2; kk >= 0; kk--) {
+      [od, prev] = [prev, od];
+      const o = kk * np, oa = (kk + 1) * np, zfa = (kk + 1.5) / cz;
+      for (let j = 0; j < cn; j++) {
+        const y = j + dj, inY = y >= 0 && y <= cn - 1, j0 = Math.min(cn - 2, Math.max(0, Math.floor(y))), fy = y - j0;
+        for (let i = 0; i < cn; i++) {
+          const x = i + di;
+          let above: number;
+          if (inY && x >= 0 && x <= cn - 1) {
+            const i0 = Math.min(cn - 2, Math.max(0, Math.floor(x))), fx = x - i0, a = j0 * cn + i0;
+            above = (prev[a]! * (1 - fx) + prev[a + 1]! * fx) * (1 - fy) + (prev[a + cn]! * (1 - fx) + prev[a + cn + 1]! * fx) * fy;
+          } else above = outer(n.x0 + (x + 0.5) * cell, n.y0 + (y + 0.5) * cell, zfa);
+          const c = j * cn + i, b = 0.5 * (lut[cloud[o + c]!]! + lut[cloud[oa + c]!]!);
+          od[c] = above + b * slant; sky[c] = sky[c]! + b * dzm;
+        }
+      }
+      put(kk);
+    }
+    this.uploadLight(this.nLight, cn, cn, cz, out);
   }
 
   /** Tracer particles (x, y, z in m and age per particle; null: none) in a domain of Lx x Ly x top. */
@@ -690,6 +798,14 @@ export class VolumeView {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, this.vol); gl.uniform1i(u('uVol'), 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.groundTex); gl.uniform1i(u('uGround'), 1);
     gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_3D, this.light); gl.uniform1i(u('uLight'), 4);
+    const nt = this.nest;
+    gl.uniform1i(u('uNOn'), nt ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_3D, this.nVol); gl.uniform1i(u('uNVol'), 5);
+    gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_3D, this.nLight); gl.uniform1i(u('uNLight'), 6);
+    gl.uniform3f(u('uNBox'), nt ? nt.x0 : 0, nt ? nt.y0 : 0, nt ? nt.L : 1);
+    gl.uniform4f(u('uNCyl'), nt ? nt.cx : 0, nt ? nt.cy : 0, nt ? nt.R : 0, nt ? Math.max(nt.Wf, 1e-6) : 1);
+    gl.uniform1f(u('uNCell'), nt ? nt.L / nt.nx : 0.01);
+    gl.uniform1f(u('uNCellZ'), nt ? bz / nt.nz : 0.01);
     gl.uniform1i(u('uTrOn'), trOn ? 1 : 0);
     if (trOn) {
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.trFbo!.c); gl.uniform1i(u('uTrC'), 2);

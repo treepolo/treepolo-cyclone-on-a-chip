@@ -101,6 +101,8 @@ export class StormTracker {
   }
   /** Forget the last position (a different storm is followed from now on). */
   forget(): void { this.last = null; }
+  /** The fields were moved by (ddx, ddy) m (a roll the tracker did not ask for): move the last position with them. */
+  shift(ddx: number, ddy: number): void { if (this.last) { this.last.x += ddx; this.last.y += ddy; } }
   /** last located storm position (m from the domain origin), or null before the storm is found */
   get position(): { x: number; y: number } | null { return this.last ? { x: this.last.x, y: this.last.y } : null; }
 

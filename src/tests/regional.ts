@@ -240,6 +240,27 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
     e = Math.max(e, Math.abs(mf.scalars[0]![mf.idx(i, j, k)]! - lin(x0 + (i + 0.5) * 1000, y0 + (j + 0.5) * 1000, (k + 0.5) * 500)));
   }
   check('refine: linear fields reproduced exactly at staggered sub-box points', e < 1e-12, e);
+  // a sharp-edged rain shaft (coarse cells 8-11 x 8-11, levels 0-5): the fine field keeps the mass (each wet level's
+  // within 40 %: the smooth start spreads the shaft's top by a level), stays non-negative and falls off toward the shaft's edge (cube-root interpolation) instead of filling
+  // whole coarse cells beside it
+  const m2 = new RegionalModel({ ...open, lateral: 'periodic' }, (z) => ({ theta: 300 + 0.004 * z, qv: 0 }), 3);
+  for (let k = 0; k < 6; k++) for (let j = 8; j < 12; j++) for (let i = 8; i < 12; i++) m2.scalars[2]![m2.idx(i, j, k)] = 1e-3 * (1 + 0.1 * k);
+  const f2 = new RegionalModel({ ...open, lateral: 'periodic', nx: 60, ny: 60, nz: 20, dx: 1000, dy: 1000, dz: 500 }, (z) => ({ theta: 300 + 0.004 * z, qv: 0 }), 3);
+  refineInto(m2, f2);
+  let eLevel = 0, neg = 0, tc = 0, tf = 0;
+  for (let K = 0; K < 10; K++) {
+    let sc = 0, sf = 0;
+    for (let j = 0; j < 20; j++) for (let i = 0; i < 20; i++) sc += m2.scalars[2]![m2.idx(i, j, K)]! * m2.rho0[K]! * 9;
+    for (let k = 2 * K; k < 2 * K + 2; k++) for (let j = 0; j < 60; j++) for (let i = 0; i < 60; i++) { const v = f2.scalars[2]![f2.idx(i, j, k)]!; sf += v * f2.rho0[k]! * 0.5; if (v < 0) neg++; }
+    if (K < 6) eLevel = Math.max(eLevel, Math.abs(sf / sc - 1));
+    tc += sc; tf += sf;
+  }
+  const eMass = Math.abs(tf / tc - 1);
+  // along a row through the shaft at mid-height: inside, at the last wet coarse centre, halfway to the dry one
+  const row = (i: number): number => f2.scalars[2]![f2.idx(i, 30, 4)]!;
+  const inside = row(30), rim = row(34) /* x = 34.5 km: coarse centre 11 at 34.5 km */, half = row(36) /* 36.5 km */;
+  check('refine: rain shaft keeps its mass (1e-12; each wet level within 40 %), stays >= 0, falls off to under a quarter of its rim value two thirds of the way to the dry neighbour',
+    eMass < 1e-12 && eLevel < 0.4 && neg === 0 && half < 0.25 * rim && rim > 0 && inside > rim * 0.9, `mass ${eMass.toExponential(1)}, levels ${(100 * eLevel).toFixed(0)} %, negative ${neg}, inside ${inside.toExponential(2)} rim ${rim.toExponential(2)} at 2/3 ${half.toExponential(2)}`);
 }
 {
   const f = 5e-5, sst = 301.15;

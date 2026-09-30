@@ -55,9 +55,15 @@ fn ax(p: f32, n: u32) -> vec2<f32> {
   let i0 = min(floor(q), f32(max(n, 2u) - 2u));
   return vec2<f32>(i0, q - i0);
 }
+// vertical, cell centres: continued linearly over the half level below the lowest centre and above the highest
+fn axz(p: f32, n: u32) -> vec2<f32> {
+  let q = clamp(p, -0.5, f32(n) - 0.5);
+  let i0 = clamp(floor(q), 0.0, f32(max(n, 2u) - 2u));
+  return vec2<f32>(i0, q - i0);
+}
 // the parent field f, departure from base profile bf (4: none), at (x, y, z) m with staggering sx, sy, mixed in time
 fn samp(f: u32, bf: u32, x: f32, y: f32, z: f32, sx: f32, sy: f32) -> f32 {
-  let a = ax(x / PDX - sx, PNX); let b = ax(y / PDY - sy, PNY); let c = ax(z / PDZ - 0.5, PNZ);
+  let a = ax(x / PDX - sx, PNX); let b = ax(y / PDY - sy, PNY); let c = axz(z / PDZ - 0.5, PNZ);
   let i0 = u32(a.x); let j0 = u32(b.x); let k0 = u32(c.x);
   var v = 0.0;
   for (var dk = 0u; dk < 2u; dk++) {

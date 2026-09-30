@@ -44,6 +44,8 @@ export function nestGeometry(pc: RegionalConfig, R: number, dx: number, dz: numb
   const np = 2 * Math.ceil((R + W) / pc.dx) + 2;
   const margin = pc.lateral === 'open' ? (pc.relaxCells ?? 5) + 2 : 0;
   if (np > pc.nx - 2 * margin || np > pc.ny - 2 * margin) return '圓柱太大，外圍區域放不下 / the cylinder does not fit in the outer domain';
+  if (pc.nz * rz > 200) return `垂直層太多（${pc.nz * rz} 層，上限 200），請加大 Δz / too many levels (${pc.nz * rz}, at most 200): use a larger Δz`;
+  if (np * r > 1024) return `細化區太寬（${np * r} 格，上限 1024），請縮小半徑或加大 Δx / too many columns across (${np * r}, at most 1024)`;
   const i0 = Math.floor((pc.nx - np) / 2), j0 = Math.floor((pc.ny - np) / 2);
   return { r, rz, i0, j0, np, nx: np * r, nz: pc.nz * rz, dx: dxc, dz: dzc, cx: (i0 + np / 2) * pc.dx, cy: (j0 + np / 2) * pc.dy, R, W, Wf };
 }

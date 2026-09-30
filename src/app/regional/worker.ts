@@ -1,7 +1,7 @@
 // Regional-model worker: builds an experiment, steps it, and streams 3-D cloud / rain volumes.
 
 import { RegionalModel } from '../../regional/core.js';
-import { IceMicrophysics, QV, QC, QR, QI, QS, QG } from '../../regional/ice.js';
+import { IceMicrophysics, QV } from '../../regional/ice.js';
 import { RegionalPhysics } from '../../regional/physics.js';
 import { tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
@@ -11,14 +11,15 @@ import { refineInto, coarsenInto } from '../../regional/refine.js';
 import { Tracers, type TracerParams } from '../../regional/tracers.js';
 import { AxiDriver, AXI_DEFAULTS, LEGACY_TC, type AxiParams } from './axiDriver.js';
 import { buildModel, setupFromLegacy, axiFromSetup, refinedSetup, coarsenedSetup } from './build.js';
-import { presetById, sanitize, setupCells, setupOf, tcLike, type RegionalSetup } from './setup.js';
+import { presetById, setupOf, tcLike, type RegionalSetup } from './setup.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { StormTracker, type TornadoEnv } from '../../regional/supercell.js';
 import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.js';
 import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcing.js';
-import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
-import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
+import { volumeBytes } from '../../regional/display.js';
+import { EyeNest, syncModel } from './eyeNest.js';
+import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
 let m: RegionalModel | null = null;
@@ -48,6 +49,7 @@ let forcings: { info: ForcingInfo; f: WindForcing }[] = [], forcingId = 1;
 /** Hand the lasting forcings to the models (the CPU hook reads the list; the GPU keeps a table) and to the page. */
 function syncForcings(): void {
   gpu?.setForcings(forcings.map((x) => x.f));
+  eye?.setForcings(forcings.map((x) => x.f));
   post({ type: 'forcings', list: forcings.map((x) => x.info) });
 }
 /** Drop forcings that have ended; returns true when the list changed. */
@@ -83,11 +85,36 @@ function keepParent(box: boolean): void {
     bnd: b ? { u: Float64Array.from(b.u), v: Float64Array.from(b.v), th: Float64Array.from(b.th), qv: b.qv ? Float64Array.from(b.qv) : null, pp: b.pp ? Float64Array.from(b.pp) : null } : null, box });
   if (parents.length > 3) parents.shift();
 }
-/** Grid changes available now: refine to (dx), coarsen to (dx; `back`: a kept coarser state), eye refinement. */
-function gridOptions(): { refineTo: number | null; coarsenTo: number | null; coarsenBack: boolean; eyeOk: boolean } {
-  if (!setup || axi || experiment === 'nest' || !m) return { refineTo: null, coarsenTo: null, coarsenBack: false, eyeOk: false };
+/** Grid changes available now: refine to (dx), coarsen to (dx; `back`: a kept coarser state), the eye nest. */
+function gridOptions(): { refineTo: number | null; coarsenTo: number | null; coarsenBack: boolean; nestOk: boolean } {
+  if (!setup || axi || experiment === 'nest' || !m) return { refineTo: null, coarsenTo: null, coarsenBack: false, nestOk: false };
   const p = parents[parents.length - 1];
-  return { refineTo: refinedSetup(setup)?.dx ?? null, coarsenTo: p ? p.setup.dx : coarsenedSetup(setup)?.dx ?? null, coarsenBack: !!p, eyeOk: isTc() };
+  return { refineTo: refinedSetup(setup)?.dx ?? null, coarsenTo: p ? p.setup.dx : coarsenedSetup(setup)?.dx ?? null, coarsenBack: !!p, nestOk: true };
+}
+
+/** the eye nest: a finer grid in a cylinder at the domain centre, coupled both ways (eyeNest.ts), or null */
+let eye: EyeNest | null = null;
+function nestInfo(): NestInfo | null {
+  if (!eye) return null;
+  const g = eye.g;
+  return { R: g.R, dx: g.dx, dz: g.dz, r: g.r, rz: g.rz, nx: g.nx, nz: g.nz, cells: eye.cells, nsub: eye.nsub, x0: eye.x0, y0: eye.y0, L: g.nx * g.dx, cx: g.cx, cy: g.cy, Wf: g.Wf };
+}
+/** Drop the eye nest (the outer grid keeps what it was fed back). */
+function stopNest(): void {
+  if (!eye) return;
+  eye.destroy(); eye = null;
+  post({ type: 'nest', info: null });
+}
+/** Advance the models by n outer steps on the GPU (with the eye nest: its sub-steps and feedback in each). */
+function stepGpu(n: number): void {
+  const e = eye, link = e?.link;
+  if (e && link) for (let s = 0; s < n; s++) link.step(e.nsub);
+  else gpu!.step(n);
+}
+/** One outer step on the CPU (with the eye nest's sub-steps and feedback). */
+function stepCpu(): void {
+  if (eye) eye.cpuStep(m!, mp!);
+  else { m!.step(); mp!.apply(m!.c.dt); }
 }
 
 /** One storm analysis of the current CPU model state (level-0 fields; column composites for cells). */
@@ -200,6 +227,12 @@ function cpuAdaptDt(): void {
   next = Math.max(lo, next);
   if (Math.abs(next - cur) > 0.02 * cur) m.c.dt = next;
 }
+/** The eye nest's sub-steps for the outer step now (CPU: its Courant number computed here; GPU: read back). */
+async function nestFit(): Promise<void> {
+  const e = eye; if (!e || !m) return;
+  const dt = gpu ? gpu.dt : m.c.dt;
+  e.fit(dt, adaptive ? await e.courantRate() : null);
+}
 /** Keep the state before an interaction (see undo). */
 function takeUndo(): void {
   if (!m || !mp || m.size * (5 + m.scalars.length) > 4e6 * 11) { undo = null; return; }
@@ -225,6 +258,12 @@ async function restoreUndo(): Promise<boolean> {
     gpu.setDt(dt0);
     if (tp) gpu.initTracers(tp);
   }
+  // the eye nest starts again from the restored outer state
+  if (eye) {
+    const g = eye.g;
+    stopNest();
+    try { await startNest(g.R, g.dx, g.dz, false); } catch (e) { post({ type: 'log', text: `眼區細化無法重建，已停止 / the eye nest could not be rebuilt: ${String((e as Error).message ?? e)}` }); }
+  }
   gpuBatch = 1;
   return true;
 }
@@ -243,7 +282,8 @@ function dtLimits(): { lo: number; hi: number } {
   return { lo: 0.25 * dt0, hi: Math.max(dt0, Math.min(3 * dt0, ac)) };
 }
 async function adaptDt(): Promise<void> {
-  if (!gpu || !adaptive || !m) return;
+  if (!gpu || !m) return;
+  if (!adaptive) { await nestFit(); return; }
   const rate = await gpu.maxCourantRate();
   if (!Number.isFinite(rate)) return;
   const { lo, hi } = dtLimits(), cur = gpu.dt;
@@ -252,6 +292,7 @@ async function adaptDt(): Promise<void> {
   else if (next > cur) next = Math.min(next, 1.1 * cur);
   next = Math.max(lo, next);
   if (Math.abs(next - cur) > 0.02 * cur) gpu.setDt(next);
+  await nestFit();
 }
 
 async function getGpu(): Promise<GPUDevice | null> {
@@ -356,7 +397,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       while (busy) await new Promise((r) => setTimeout(r, 5));
       busy = true;
       try {
-        gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
+        stopNest(); gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
         experiment = 'tc_axi'; frameVel = { u: 0, v: 0 }; setup = { ...msg.setup };
         axi = new AxiDriver(axiFromSetup(msg.setup));
         resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings(); parents = [];
@@ -372,7 +413,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try {
       axi = null;
       const device = msg.backend === 'cpu' ? null : await getGpu();
-      gpu?.destroy(); gpu = null;
+      stopNest(); gpu?.destroy(); gpu = null;
       let info = build(msg.setup, !!device);
       builtGpu = !!device; nestSource = null;
       let note = '';
@@ -395,7 +436,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try {
       axi = null;
       const device = msg.backend === 'cpu' ? null : await getGpu();
-      gpu?.destroy(); gpu = null;
+      stopNest(); gpu?.destroy(); gpu = null;
       let info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, !!device);
       builtGpu = !!device; nestSource = { payload: msg.payload, lat0: msg.lat0, lon0: msg.lon0, size: msg.size };
       let note = '';
@@ -425,8 +466,8 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       while (busy) await new Promise((r) => setTimeout(r, 5));
       busy = true;
       try {
-        if (gpu) { const d1 = gpu.dt; gpu.step(1); advectTracers(d1, 1); await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); }
-        else { m.step(); mp.apply(m.c.dt); advectTracers(m.c.dt, 1); }
+        if (gpu) { const d1 = gpu.dt; stepGpu(1); advectTracers(d1, 1); await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); }
+        else { stepCpu(); advectTracers(m.c.dt, 1); cpuAdaptDt(); await nestFit(); }
         await sendFrame();
       } catch (e) { post({ type: 'error', message: String(e) }); }
       busy = false;
@@ -476,6 +517,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest, origin, setup };
         const buffer = packSave(meta, arrays);
         post({ type: 'saveData', meta, buffer }, [buffer]);
+        if (eye) post({ type: 'log', text: '存檔只含外圍網格（細化區以其平均存在外圍網格裡），載入後可再開始眼區細化 / the save holds the outer grid (with the nest averaged into it); start the eye nest again after loading' });
       } catch (e) { post({ type: 'error', message: `存檔失敗 / save failed: ${String(e)}` }); }
       busy = false; running = wasRunning;
     }
@@ -489,7 +531,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           setup?: RegionalSetup | null; tcEnv?: Partial<AxiParams> | null; tornadoEnv?: TornadoEnv | null };
         if (meta.kind !== 'regional') throw new Error('不是區域模式存檔 / not a regional save');
         if (M.experiment === 'tc_axi') {
-          gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null; experiment = 'tc_axi'; frameVel = { u: 0, v: 0 };
+          stopNest(); gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null; experiment = 'tc_axi'; frameVel = { u: 0, v: 0 };
           axi = new AxiDriver({ ...AXI_DEFAULTS, ...LEGACY_TC, ...((meta as unknown as { axi?: AxiParams }).axi ?? {}) });
           axi.restore(arrays as Record<string, Float32Array>, M.time, M.steps);
           setup = M.setup ?? setupOf('tc_axi');
@@ -501,7 +543,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         }
         axi = null;
         const device = msg.backend === 'cpu' ? null : await getGpu();
-        gpu?.destroy(); gpu = null;
+        stopNest(); gpu?.destroy(); gpu = null;
         let info: { dt: number; description: string; land?: Uint8Array | null };
         if (M.nest) {
           const n = M.nest as { lat0: number; lon0: number; size: NestSize; preset: string; day: number; nlat: number; nlon: number; K: number };
@@ -543,32 +585,37 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       } catch (e) { post({ type: 'error', message: `載入失敗 / load failed: ${String((e as Error).message ?? e)}` }); }
       busy = false;
     }
-    else if (msg.type === 'refine' || msg.type === 'refineEye') {
+    else if (msg.type === 'nestStart' || msg.type === 'nestStop') {
       if (!setup || experiment === 'nest' || axi || !m || !mp) return;
-      if (msg.type === 'refine' && !refinedSetup(setup)) return;
+      if (msg.type === 'nestStop' && !eye) return;
       const wasRunning = running; running = false;
       while (busy) await new Promise((r) => setTimeout(r, 5));
       busy = true;
       try {
         await syncFromGpu();
         advanceOrigin();
-        let target: RegionalSetup | null = null, eye: StormNow | null = null;
-        if (msg.type === 'refine') target = refinedSetup(setup);
-        else {
-          // the eye and eyewall in a box of the chosen size and spacing: open boundaries relaxing to the state at this
-          // moment, the box following the storm
-          eye = mainStorm(); if (eye?.kind !== 'vortex') eye = catalog.main();
-          // a vortex not yet confirmed by two analyses (a save just loaded): one more analysis of this state
-          if (!eye || eye.kind !== 'vortex') { analyseStorms(null); eye = catalog.main(); }
-          if (!eye || eye.kind !== 'vortex') { post({ type: 'log', text: '還找不到颱風眼（需要一個已偵測到的渦旋）/ no vortex found yet' }); return; }
-          const Lc = Math.min(m.c.nx * m.c.dx, m.c.ny * m.c.dy);
-          target = sanitize({ ...setup, preset: 'custom', L: Math.min(Lc, msg.L), dx: msg.dx, dz: msg.dz, dt: 0, boundary: 'open', follow: true });
-          if (setupCells(target) > 30e6) { post({ type: 'log', text: '眼區網格太大（上限 3000 萬格）/ eye box too large (30 M cells)' }); return; }
-        }
+        stopNest();
+        if (msg.type === 'nestStart') post({ type: 'log', text: await startNest(msg.R, msg.dx, msg.dz, true) });
+        else post({ type: 'log', text: '已停止眼區細化；外圍網格保留細化區回饋的平均 / eye nest stopped; the outer grid keeps what the nest fed back' });
+        await sendFrame();
+      } catch (e) { post({ type: 'error', message: `眼區細化失敗 / eye nest failed: ${String((e as Error).message ?? e)}` }); }
+      finally { busy = false; running = wasRunning; }
+    }
+    else if (msg.type === 'refine') {
+      if (!setup || experiment === 'nest' || axi || !m || !mp) return;
+      if (!refinedSetup(setup)) return;
+      const wasRunning = running; running = false;
+      while (busy) await new Promise((r) => setTimeout(r, 5));
+      busy = true;
+      try {
+        await syncFromGpu();
+        advanceOrigin();
+        stopNest();
+        const target = refinedSetup(setup);
         if (!target) return;
         const mc = m, mpc = mp, fromDx = mc.c.dx, frameC = { ...frameVel }, trackC = tracker?.position ?? null, originC = { ...origin };
         const Lc = mc.c.nx * mc.c.dx, Lcy = mc.c.ny * mc.c.dy, Lf = target.L;
-        keepParent(Lf < Lc - 1 || !!eye);
+        keepParent(Lf < Lc - 1);
         const device = gpu ? gpu.device : null;
         gpu?.destroy(); gpu = null;
         const info = build(target, !!device);
@@ -579,9 +626,9 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           mf.shiftFrame(frameC.u - frameVel.u, frameC.v - frameVel.v);
           frameVel = frameC; if (physCfg) physCfg.frameVel = frameVel;
         }
-        // sub-box around the storm (the eye, or the tracked storm) when the fine domain is smaller
+        // sub-box around the tracked storm when the fine domain is smaller
         const Lfx = mf.c.nx * mf.c.dx, Lfy = mf.c.ny * mf.c.dy;
-        const cx = eye ? eye.xd : trackC?.x ?? Lc / 2, cy = eye ? eye.yd : trackC?.y ?? Lcy / 2;
+        const cx = trackC?.x ?? Lc / 2, cy = trackC?.y ?? Lcy / 2;
         const open = mc.c.lateral === 'open';
         const x0 = Lfx >= Lc - 1 ? 0 : open ? Math.max(0, Math.min(Lc - Lfx, cx - Lfx / 2)) : cx - Lfx / 2;
         const y0 = Lfy >= Lcy - 1 ? 0 : open ? Math.max(0, Math.min(Lcy - Lfy, cy - Lfy / 2)) : cy - Lfy / 2;
@@ -589,8 +636,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         // an open box relaxes to its state at this moment
         if (mf.c.lateral === 'open') mf.boundary = { u: Float64Array.from(mf.u), v: Float64Array.from(mf.v), th: Float64Array.from(mf.th), qv: Float64Array.from(mf.scalars[QV]!), pp: Float64Array.from(mf.pp) };
         const km = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${d} m`);
-        let note = eye ? `眼區細化：${km(Lfx)} 見方、Δx ${km(mf.c.dx)}，以颱風眼為中心、跟著颱風走；邊界向細化當下的外圍狀態鬆弛 / eye refinement: ${km(Lfx)} box at Δx ${km(mf.c.dx)} centred on the eye`
-          : `已從 Δx ${km(fromDx)} 細化 / refined from Δx ${km(fromDx)} at t = ${(mc.time / 60).toFixed(0)} min`;
+        let note = `已從 Δx ${km(fromDx)} 細化 / refined from Δx ${km(fromDx)} at t = ${(mc.time / 60).toFixed(0)} min`;
         if (device) {
           const reason = await tryGpu(device);
           if (reason) note += ' · ' + gpuFailNote(reason);
@@ -615,6 +661,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try {
         await syncFromGpu();
         advanceOrigin();
+        stopNest();
         if (parent) parents.pop();
         const mf = m, mpf = mp, physF = phys, frameF = { ...frameVel }, originF = { ...origin }, fromDx = mf.c.dx, tNow = mf.time, sfF = physF?.surface ?? null;
         const device = gpu ? gpu.device : null;
@@ -667,7 +714,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     }
     else if (msg.type === 'adaptive') {
       adaptive = msg.on;
-      if (!adaptive && gpu) { while (busy) await new Promise((r) => setTimeout(r, 5)); gpu.setDt(dt0); }
+      if (!adaptive && gpu) { while (busy) await new Promise((r) => setTimeout(r, 5)); gpu.setDt(dt0); await nestFit(); }
     }
     else if (msg.type === 'profile') {
       if (!gpu || !m) { post({ type: 'profile', text: '效能分析需要 WebGPU 後端 / profiling needs the WebGPU backend' }); return; }
@@ -736,7 +783,7 @@ async function loop(): Promise<void> {
           const nb = pacer.allow(gpu.time, gpu.dt, nb0);
           if (nb === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
           const dtb = gpu.dt;
-          gpu.step(nb); rateSteps += nb;
+          stepGpu(nb); rateSteps += nb;
           advectTracers(nb * dtb, nb);
           await gpu.device.queue.onSubmittedWorkDone();
           await adaptDt();
@@ -748,9 +795,11 @@ async function loop(): Promise<void> {
         else {
           const ns = pacer.allow(m.time, m.c.dt, stepsPerTick);
           if (ns === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
-          for (let s = 0; s < ns; s++) { m.step(); mp.apply(m.c.dt); rateSteps++; }
-          advectTracers(ns * m.c.dt, ns);
+          const dtb = m.c.dt;
+          for (let s = 0; s < ns; s++) { stepCpu(); rateSteps++; }
+          advectTracers(ns * dtb, ns);
           cpuAdaptDt();
+          await nestFit();
         }
         advanceOrigin();
         if (pacer.reached(modelNow())) {
@@ -809,19 +858,35 @@ async function followStorm(): Promise<void> {
   const st = mainStorm();
   if (!st) return;
   if (st.id !== followId) { followId = st.id; tracker.forget(); }
-  const a = tracker.follow(m, st.xd, st.yd, st.kind);
+  let a = tracker.follow(m, st.xd, st.yd, st.kind);
+  if (eye) {
+    // the eye nest is fixed at the domain centre: whole-cell re-centring as soon as the storm is more than a cell (or
+    // 15 % of the cylinder's radius) off it
+    const thr = Math.max(m.c.dx, 0.15 * eye.g.R), ox = st.xd - m.c.nx * m.c.dx / 2, oy = st.yd - m.c.ny * m.c.dy / 2;
+    const di = Math.abs(ox) > thr ? -Math.round(ox / m.c.dx) : 0, dj = Math.abs(oy) > thr ? -Math.round(oy / m.c.dy) : 0;
+    if (di !== a.di || dj !== a.dj) { tracker.shift((di - a.di) * m.c.dx, (dj - a.dj) * m.c.dy); a = { ...a, di, dj }; }
+  }
+  await moveDomain(a);
+}
+
+/** Move the domain with the storm: Galilean frame change (du, dv) and whole-cell roll (di, dj) of the fields (and the
+ *  eye nest with them); the GPU models are rebuilt. The CPU state must be current (syncFromGpu). */
+async function moveDomain(a: { du: number; dv: number; di: number; dj: number }): Promise<void> {
+  if (!m || !mp) return;
   if (!a.du && !a.dv && !a.di && !a.dj) return;
-  if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; if (physCfg) physCfg.frameVel = frameVel; }
+  if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); eye?.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; if (physCfg) physCfg.frameVel = frameVel; }
   if (a.di || a.dj) {
     m.roll(a.di, a.dj, [mp.rainAcc, mp.snowAcc]); origin.x -= a.di * m.c.dx; origin.y -= a.dj * m.c.dy; prevAcc = null;
     // the ground stays put: painted sea and land move through the domain with the fields
     const sf = phys?.surface;
     if (sf && physCfg) { rollPlane(sf.tsk, a.di, a.dj); rollPlane(sf.wet, a.di, a.dj); physCfg.surface = { tsk: sf.tsk, wet: sf.wet }; }
     if (m.c.lateral === 'open') enterEnvironment(a.di, a.dj);
+    eye?.roll(m, { rain: mp.rainAcc, snow: mp.snowAcc }, a.di, a.dj, sf ?? null);
     if (sf) post({ type: 'land', land: landMask() });
     if (forcings.length) {
       const Lx = m.c.nx * m.c.dx, Ly = m.c.ny * m.c.dy;
       for (const x of forcings) { x.f.x = ((x.f.x + a.di * m.c.dx) % Lx + Lx) % Lx; x.f.y = ((x.f.y + a.dj * m.c.dy) % Ly + Ly) % Ly; x.info.x = x.f.x; x.info.y = x.f.y; }
+      eye?.setForcings(forcings.map((x) => x.f));
       post({ type: 'forcings', list: forcings.map((x) => x.info) });
     }
   }
@@ -838,9 +903,52 @@ async function followStorm(): Promise<void> {
     gpu.setForcings(forcings.map((x) => x.f));
     gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
     gpu.setDt(dtNow);
+    await nestGpuUp();
   }
   if (tp && tracers) { tracers.pos.set(tp); gpu?.initTracers(tp); }
   else if (tp) setupTracers(tp);
+}
+
+/** Rebuild the eye nest's GPU model and coupling for a newly built outer GPU model (stops the nest if that fails). */
+async function nestGpuUp(): Promise<void> {
+  if (!eye || !gpu) return;
+  const reason = await eye.gpuUp(gpu);
+  if (reason) { stopNest(); post({ type: 'log', text: `眼區細化的 GPU 模式建立失敗，已停止 / the eye nest's GPU model failed, stopped: ${reason.slice(0, 200)}` }); }
+  else eye.fit(gpu.dt);
+}
+
+/**
+ * Start the eye nest: radius R, spacings near dx, dz (m). `recentre`: first roll the domain (whole cells) so the main storm
+ * is at its centre, where the cylinder is. Returns a note for the page; throws with the reason when it cannot start.
+ */
+async function startNest(R: number, dx: number, dz: number, recentre: boolean): Promise<string> {
+  const mm = m!, mpp = mp!, c = mm.c;
+  let where = '';
+  if (recentre) {
+    // the cylinder is fixed at the domain centre, so the domain follows the storm from now on
+    if (!tracker) { tracker = new StormTracker(setup?.init === 'vortex' ? 'vortex' : 'updraft'); lastTrack = mm.time; where = '區域從現在起跟著風暴走 / the domain follows the storm from now on；'; }
+    analyseStorms(null);
+    const st = mainStorm();
+    if (!st) where += '還沒偵測到風暴，圓柱在區域中央 / no storm yet: the cylinder is at the domain centre';
+    else {
+      const di = -Math.round((st.xd - c.nx * c.dx / 2) / c.dx), dj = -Math.round((st.yd - c.ny * c.dy / 2) / c.dy);
+      if (di || dj) { await moveDomain({ du: 0, dv: 0, di, dj }); tracker.shift(di * c.dx, dj * c.dy); }
+      where += '以風暴為中心 / centred on the storm';
+    }
+  }
+  const n = EyeNest.build(mm, { rain: mpp.rainAcc, snow: mpp.snowAcc }, setup!, frameVel, phys?.surface ?? null, R, dx, dz, !!gpu);
+  if (typeof n === 'string') throw new Error(n);
+  n.setForcings(forcings.map((x) => x.f));
+  n.fit(gpu ? gpu.dt : c.dt);
+  if (gpu) {
+    const reason = await n.gpuUp(gpu);
+    if (reason) { n.destroy(); throw new Error(`GPU: ${reason.slice(0, 300)}`); }
+  }
+  eye = n;
+  post({ type: 'nest', info: nestInfo() });
+  const g = n.g, km = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${Math.round(d)} m`);
+  return `眼區細化：半徑 ${km(g.R)} 的圓柱，Δx ${km(g.dx)}（外圍的 1/${g.r}）、Δz ${km(g.dz)}（1/${g.rz}），${(n.cells / 1e6).toFixed(2)} M 格，每個外圍步 ${n.nsub} 個內部步；雙向耦合${where ? '；' + where : ''}` +
+    ` / eye nest: cylinder of radius ${km(g.R)}, Δx ${km(g.dx)}, Δz ${km(g.dz)}, ${(n.cells / 1e6).toFixed(2)} M cells, ${n.nsub} inner steps per outer step, two-way`;
 }
 
 /** Interaction: change the conditions (never the outcome). Returns a log line. */
@@ -862,6 +970,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     // keep the painting when the GPU model is rebuilt (storm following) and in the configuration
     physCfg.surface = { tsk: sf.tsk, wet: sf.wet };
     gpu?.setSurface(sf.tsk, sf.wet);
+    eye?.surfaceFrom(mm, sf);
     return '';
   }
   await syncFromGpu();
@@ -881,6 +990,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (msg.minutes === 0) {
       applyWind(mm, [f], 'once');
       if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+      if (eye) { applyWind(eye.m, [{ ...f, x: f.x - eye.x0, y: f.y - eye.y0 }], 'once'); eye.upload(); }
       return `一次風 / wind once: ${what} at (${(f.x / 1000).toFixed(0)}, ${(f.y / 1000).toFixed(0)}) km, ${(f.z / 1000).toFixed(1)} km high`;
     }
     if (forcings.length >= MAX_FORCINGS) forcings.shift();
@@ -892,17 +1002,23 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
   if (msg.type === 'moisture') {
     // multiply the vapour in the region (cos^2 envelope), capped at saturation
     const R = clampR(msg.radius, 20 * dx), H = Math.max(mm.c.dz, Math.min(top / 2, 0.5 * (Number.isFinite(msg.depth) ? msg.depth : 3000)));
-    const fac = Math.max(0.3, Math.min(2, msg.factor || 1)), qv = mm.scalars[QV]!, open = mm.c.lateral === 'open';
-    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-      let ex = (i + 0.5) * dx - msg.x, ey = (j + 0.5) * dy - msg.y;
-      if (!open) { ex -= Math.round(ex / (nx * dx)) * nx * dx; ey -= Math.round(ey / (ny * dy)) * ny * dy; }
-      const rh = Math.hypot(ex, ey) / R, rz = Math.abs(mm.zc[k]! - msg.z) / H;
-      if (rh >= 1 || rz >= 1) continue;
-      const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = mm.idx(i, j, k);
-      const pi = mm.pi0[k]! + mm.pp[q]!, T = mm.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
-      qv[q] = Math.max(0, Math.min(qv[q]! * (1 + (fac - 1) * e), Math.max(qv[q]!, 0.622 * es / Math.max(p - es, 1))));
-    }
+    const fac = Math.max(0.3, Math.min(2, msg.factor || 1));
+    // the outer grid and the eye nest (its origin at ox, oy in the outer coordinates)
+    const moisten = (md: RegionalModel, ox: number, oy: number): void => {
+      const { nx, ny, nz, dx, dy } = md.c, qv = md.scalars[QV]!, open = md.c.lateral === 'open';
+      for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        let ex = ox + (i + 0.5) * dx - msg.x, ey = oy + (j + 0.5) * dy - msg.y;
+        if (!open) { ex -= Math.round(ex / (nx * dx)) * nx * dx; ey -= Math.round(ey / (ny * dy)) * ny * dy; }
+        const rh = Math.hypot(ex, ey) / R, rz = Math.abs(md.zc[k]! - msg.z) / H;
+        if (rh >= 1 || rz >= 1) continue;
+        const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = md.idx(i, j, k);
+        const pi = md.pi0[k]! + md.pp[q]!, T = md.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
+        qv[q] = Math.max(0, Math.min(qv[q]! * (1 + (fac - 1) * e), Math.max(qv[q]!, 0.622 * es / Math.max(p - es, 1))));
+      }
+    };
+    moisten(mm, 0, 0);
     if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+    if (eye) { moisten(eye.m, eye.x0, eye.y0); eye.upload(); }
     return `${fac >= 1 ? '增濕 / moistened' : '變乾 / dried'} ×${fac} at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km, ${(msg.z / 1000).toFixed(1)} km high`;
   }
   if (msg.type === 'perturb') {
@@ -915,13 +1031,18 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const rz = msg.depth && Number.isFinite(msg.depth) ? Math.max(mm.c.dz, Math.min(top / 2, msg.depth / 2)) : 1500;
     const a0 = msg.amp !== undefined && Number.isFinite(msg.amp) ? Math.min(15, Math.abs(msg.amp)) : warm ? 3 : 6;
     const amp = warm ? a0 : -a0, cap = warm ? Math.min(20, Math.max(6, 2 * a0)) : -Math.min(20, Math.max(10, 2 * a0));
-    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-      const r = Math.sqrt((((i + 0.5) * dx - msg.x) / rh) ** 2 + (((j + 0.5) * dy - msg.y) / rh) ** 2 + ((mm.zc[k]! - zc) / rz) ** 2);
-      if (r >= 1) continue;
-      const q = mm.idx(i, j, k), d = amp * Math.cos(0.5 * Math.PI * r) ** 2, room = mm.th0[k]! + cap - mm.th[q]!;
-      mm.th[q] = mm.th[q]! + (warm ? Math.max(0, Math.min(d, room)) : Math.min(0, Math.max(d, room)));
-    }
+    const bubble = (md: RegionalModel, ox: number, oy: number): void => {
+      const { nx, ny, nz, dx, dy } = md.c;
+      for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const r = Math.sqrt(((ox + (i + 0.5) * dx - msg.x) / rh) ** 2 + ((oy + (j + 0.5) * dy - msg.y) / rh) ** 2 + ((md.zc[k]! - zc) / rz) ** 2);
+        if (r >= 1) continue;
+        const q = md.idx(i, j, k), d = amp * Math.cos(0.5 * Math.PI * r) ** 2, room = md.th0[k]! + cap - md.th[q]!;
+        md.th[q] = md.th[q]! + (warm ? Math.max(0, Math.min(d, room)) : Math.min(0, Math.max(d, room)));
+      }
+    };
+    bubble(mm, 0, 0);
     if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+    if (eye) { bubble(eye.m, eye.x0, eye.y0); eye.upload(); }
     return `${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} ${amp >= 0 ? '+' : ''}${amp.toFixed(1)} K at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km, ${(zc / 1000).toFixed(1)} km high`;
   }
   // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km;
@@ -930,21 +1051,26 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
   envDu += du6;
   const du = (z: number): number => du6 * Math.min(1, z / 6000);
   const hf = (z: number): number => 1 + (msg.humidity - 1) * Math.max(0, Math.min(1, (z - 500) / 500, (8500 - z) / 500));
-  const qv = mm.scalars[QV]!;
-  for (let k = 0; k < nz; k++) {
-    const d = du(mm.zc[k]!), f = hf(mm.zc[k]!);
-    mm.ub[k] = mm.ub[k]! + d;
-    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-      const q = mm.idx(i, j, k);
-      mm.u[q] = mm.u[q]! + d;
-      if (f !== 1) {
-        const pi = mm.pi0[k]! + mm.pp[q]!, T = mm.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
-        qv[q] = Math.min(qv[q]! * f, 0.622 * es / Math.max(p - es, 1));
+  // the outer grid (and its boundary targets) and the eye nest (its targets come from the outer grid)
+  const change = (md: RegionalModel, targets: boolean): void => {
+    const qv = md.scalars[QV]!, { nx, ny, nz } = md.c;
+    for (let k = 0; k < nz; k++) {
+      const d = du(md.zc[k]!), f = hf(md.zc[k]!);
+      md.ub[k] = md.ub[k]! + d;
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const q = md.idx(i, j, k);
+        md.u[q] = md.u[q]! + d;
+        if (f !== 1) {
+          const pi = md.pi0[k]! + md.pp[q]!, T = md.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
+          qv[q] = Math.min(qv[q]! * f, 0.622 * es / Math.max(p - es, 1));
+        }
+        const b = md.boundary;
+        if (targets && b) { b.u[q] = b.u[q]! + d; if (b.qv) b.qv[q] = b.qv[q]! * f; }
       }
-      const b = mm.boundary;
-      if (b) { b.u[q] = b.u[q]! + d; if (b.qv) b.qv[q] = b.qv[q]! * f; }
     }
-  }
+  };
+  change(mm, true);
+  if (eye) change(eye.m, false);
   if (gpu) {
     // the damping-layer wind and the boundary targets live in the GPU model's tables: rebuild it
     const device = gpu.device, dtNow = gpu.dt, tp = gpu.tracerCount ? await gpu.readTracers() : null;
@@ -954,19 +1080,16 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
     gpu.setDt(dtNow);
     if (tp) gpu.initTracers(tp);
+    await nestGpuUp();
   }
   return `改變環境 / environment changed: ${du6 >= 0 ? '+' : ''}${du6.toFixed(0)} m/s westerly at 6 km (total ${envDu >= 0 ? '+' : ''}${envDu.toFixed(0)}, limit ±${ENV_DU_MAX}), 1-8 km humidity x${msg.humidity}`;
 }
 
-/** Copy the GPU state into the CPU model arrays (display and diagnostics reuse the CPU code). */
+/** Copy the GPU state into the CPU model arrays (display and diagnostics reuse the CPU code), the eye nest's too. */
 async function syncFromGpu(): Promise<void> {
   if (!gpu || !m || !mp) return;
-  const st = await gpu.readState(), size = m.size;
-  const arrs = [m.u, m.v, m.w, m.th, m.pp, ...m.scalars];
-  arrs.forEach((a, f) => { for (let i = 0; i < size; i++) a[i] = st[f * size + i]!; });
-  const rain = await gpu.readRain(), snow = await gpu.readSnow();
-  for (let j = 0; j < m.c.ny; j++) for (let i = 0; i < m.c.nx; i++) { mp.rainAcc[j * m.c.nx + i] = rain[m.idx(i, j, 0)]!; mp.snowAcc[j * m.c.nx + i] = snow[m.idx(i, j, 0)]!; }
-  m.time = gpu.time; m.steps = gpu.steps;
+  await syncModel(gpu, m, mp);
+  await eye?.sync();
 }
 
 /** set by sendFrameRaw when the state is numerically unstable */
@@ -994,8 +1117,18 @@ async function sendFrameRaw(): Promise<void> {
   const planeAt = new Map<number, LevelPlanes>();
   const sliceK = req?.slice ? Math.max(0, Math.min(nz - 1, req.slice.k | 0)) : -1;
   let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
-  let charts: ChartData | null = null, trOut: Float32Array | null = null;
+  let charts: ChartData | null = null, trOut: Float32Array | null = null, nestOut: NestFrame | null = null;
   const transfer = new Set<ArrayBuffer>([cloud.buffer, rain.buffer]);
+  /** the eye nest's volume at this moment (before the GPU steps on); false when it is numerically unstable */
+  const nestVolume = async (): Promise<boolean> => {
+    const e = eye, info = nestInfo();
+    if (!e || !info) return true;
+    const v = await e.volume(volMode, subgrid);
+    if (!Number.isFinite(v.wmax) || !Number.isFinite(v.wmin) || Math.max(v.wmax, -v.wmin) > W_BLOWUP) return false;
+    nestOut = { ...info, cloud: v.cloud, rain: v.rain };
+    transfer.add(v.cloud.buffer as ArrayBuffer); transfer.add(v.rain.buffer as ArrayBuffer);
+    return true;
+  };
   // the GPU model of this frame (the module variable can be replaced while a readback is awaited)
   const gpu = currentGpu();
   if (gpu) {
@@ -1014,37 +1147,22 @@ async function sendFrameRaw(): Promise<void> {
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = m.idx(i, j, 0); mp.rainAcc[j * nx + i] = d.rain[q]!; mp.snowAcc[j * nx + i] = d.snow[q]!; }
     m.time = tNow; m.steps = sNow;
     if (!Number.isFinite(wmax) || !Number.isFinite(wmin) || Math.max(wmax, -wmin) > W_BLOWUP) { blowPending = true; return; }
+    if (!await nestVolume()) { blowPending = true; return; }
     if (req) charts = await buildCharts(req, col, planeAt, sliceK, gpu);
     advanceOrigin();
     // keep the GPU busy while this frame is unpacked on the CPU
-    if (running) { const dtb = gpu.dt; gpu.step(gpuBatch); rateSteps += gpuBatch; advectTracers(gpuBatch * dtb, gpuBatch); }
+    if (running && gpu === currentGpu()) { const dtb = gpu.dt; stepGpu(gpuBatch); rateSteps += gpuBatch; advectTracers(gpuBatch * dtb, gpuBatch); }
     trOut = d.tracers ? d.tracers.slice() : null;
   } else {
     let bad = false;
     for (let q = 0; q < m.size && !bad; q += 97) if (!Number.isFinite(m.w[q]!) || Math.abs(m.w[q]!) > W_BLOWUP || !Number.isFinite(m.th[q]!)) bad = true;
     if (bad) { blowPending = true; return; }
-    const qc = m.scalars[QC]!, qr = m.scalars[QR]!, qi = m.scalars[QI]!, qs = m.scalars[QS]!, qg = m.scalars[QG]!;
-    const vm = volMode, cu = phys?.cu ?? null, qv = m.scalars[QV]!, rhc = subgridRHc(dx);
+    const cu = phys?.cu ?? null;
     cuRate = cu ? Float32Array.from(cu.rate) : null;
-    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-      const q = m.idx(i, j, k), o = (k * ny + j) * nx + i;
-      // cloud: extinction of cloud water, sub-grid cloud, ice and snow (anvils are mostly snow); channel 2: extinction of
-      // precipitation (rain + graupel), updraft or vorticity (display.ts; the GPU display kernel packs the same bytes)
-      const cl = Math.max(0, qc[q]! + qi[q]!), pr = Math.max(0, qr[q]! + qs[q]! + qg[q]!), rho = m.rho0[k]!;
-      const pi = m.pi0[k]! + m.pp[q]!, T = m.th[q]! * pi;
-      const qsub = subgrid && qc[q]! <= 1e-8 ? subgridCloud(qv[q]!, qsatW(T, 1e5 * Math.pow(pi, 1004.5 / 287.05)), rhc) : 0;
-      const bc = cloudExtinction(rho, qc[q]!, qsub, qi[q]!, qs[q]!, T);
-      cloud[o] = extByte(bc);
-      let v2 = extByte(precipExtinction(rho, qr[q]!, qg[q]!)) / 255;
-      if (vm === 1) v2 = Math.sqrt(Math.max(0.5 * (m.w[q]! + m.w[q + m.plane]!), 0) / 40);
-      else if (vm === 2) {
-        const zeta = 0.25 * ((m.v[q + 1]! + m.v[q + 1 + m.sx]!) - (m.v[q - 1]! + m.v[q - 1 + m.sx]!)) / dx - 0.25 * ((m.u[q + m.sx]! + m.u[q + m.sx + 1]!) - (m.u[q - m.sx]! + m.u[q - m.sx + 1]!)) / m.c.dy;
-        v2 = Math.sqrt(Math.max(zeta, 0) / 0.05);
-      }
-      rain[o] = Math.min(255, Math.round(v2 * 255));
-      qcmax = Math.max(qcmax, cl); qrmax = Math.max(qrmax, pr);
-      const w = m.w[q]!; wmax = Math.max(wmax, w); wmin = Math.min(wmin, w);
-    }
+    // cloud: extinction of cloud water, sub-grid cloud, ice and snow (anvils are mostly snow); channel 2: extinction of
+    // precipitation (rain + graupel), updraft or vorticity (display.ts; the GPU display kernel packs the same bytes)
+    ({ wmax, wmin, qcmax, qrmax } = volumeBytes(m, cloud, rain, volMode, subgrid));
+    if (!await nestVolume()) { blowPending = true; return; }
     if (req) {
       col = columnDiagnostics(m, subgrid);
       planeAt.set(0, modelPlanes(m, 0));
@@ -1121,7 +1239,7 @@ async function sendFrameRaw(): Promise<void> {
   stormDomain = main ? { x: main.xd, y: main.yd } : stormDomain;
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
     stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, uhMin, capeMax, storm, storms: catalog.active, mainId: main?.id ?? null, vtProfile, tornado, tcRain: isTc() ? tcRain : null },
-    origin: { ...origin }, charts, tracers: trOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
+    origin: { ...origin }, charts, tracers: trOut, nest: nestOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
 }
 
 /** Core (< 60 km) and outer (100-300 km) mean precipitation rates around the centre (ic, jc) of the periodic domain, and the

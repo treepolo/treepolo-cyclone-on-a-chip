@@ -10,7 +10,9 @@ import { defaultDt, type RegionalSetup } from './setup.js';
 import type { StormNow } from '../../regional/storms.js';
 import { Tools3D } from './tools3d.js';
 import { ReplayStore, type ReplayFrame } from './replay.js';
-import type { FromRegionalWorker, GroundField, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import type { FromRegionalWorker, GroundField, NestInfo, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import { nestGeometry, nestCells } from '../../regional/twoway.js';
+import type { RegionalConfig } from '../../regional/core.js';
 
 const presetAxi = (s: RegionalSetup): boolean => s.preset === 'tc_axi';
 const km = (m: number): string => (m >= 1000 ? `${+(m / 1000).toFixed(2)} km` : `${+m.toFixed(0)} m`);
@@ -39,7 +41,7 @@ const replay = new ReplayStore(Math.min(400, 64 * ((navigator as unknown as { de
 let replayIdx: number | null = null, replayPlaying = false, replayAcc = 0;
 /** Show a stored or live display volume in the 3-D view. */
 function showVolume(f: ReplayFrame): void {
-  view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top);
+  view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top, f.nest ? { ...f.nest, Lx: f.Lx, Ly: f.Ly } : null);
   view.setGround(f.nx, f.ny, f.ground);
 }
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
@@ -63,7 +65,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   if (m.type === 'ready') {
     dt = m.dt;
     land = m.land;
-    gridNow = { nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dt: m.dt };
+    gridNow = { nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dz: m.dz, dt: m.dt, open: m.setup?.boundary === 'open' };
     // vertical exaggeration so that the troposphere is visible (unless chosen)
     if (exag === null) { const e = autoExag(m.nx * m.dx); $<HTMLInputElement>('exag').value = String(e); $('exagV').textContent = `${e}×`; }
     $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${m.dx >= 1000 ? `${(m.dx / 1000).toFixed(1)} km` : `${m.dx.toFixed(0)} m`}, Δz ${m.dz.toFixed(0)} m, Δt ${m.dt} s`;
@@ -77,7 +79,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     cb.disabled = !m.coarsenTo;
     cb.textContent = m.coarsenTo ? `粗化到 ${km(m.coarsenTo)} / Coarsen` : '粗化 / Coarsen';
     cb.title = m.coarsenBack ? '回到細化前的網格（細化的部分平均回去）/ back to the grid before the refinement (the refined run averaged into it)' : '平均到較粗的網格接著算 / continue on a coarser grid (averaged)';
-    $<HTMLButtonElement>('eyeGo').disabled = !m.eyeOk;
+    nestOk = !!m.nestOk;
+    $<HTMLButtonElement>('eyeGo').disabled = !nestOk;
     eyeInfo();
     if (m.setup) form.set(m.setup);
     curExp = m.experiment; curTc = m.tc;
@@ -110,7 +113,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
-    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [] };
+    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [], nest: m.nest };
+    if (m.nest) showNest(m.nest);
     replay.push(lastVol);
     if (in3d && replayIdx === null) { showVolume(lastVol); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     replayBar();
@@ -132,10 +136,11 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     tornadoWatch(m.time, s.tornado, m.dx);
     showStorms(s.storms ?? [], s.mainId ?? null, m);
     $('legend').textContent = m.groundField === 'none' ? '深藍 = 海、深綠 = 陸地 / dark blue = sea, dark green = land' : `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
-  } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); if (runner.running) void runner.abort(`error: ${m.message}`); }
+  } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); $<HTMLButtonElement>('eyeGo').disabled = !nestOk; if (runner.running) void runner.abort(`error: ${m.message}`); }
+  else if (m.type === 'nest') { showNest(m.info); $<HTMLButtonElement>('eyeGo').disabled = !nestOk; if (!m.info) view.clearNest(); }
   else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
   else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; $('ovRun').textContent = '▶'; if (runner.running) void runner.end('done'); }
-  else if (m.type === 'log') { log(m.text); if (/no vortex|eye box too large/.test(m.text)) { refining = false; $<HTMLButtonElement>('eyeGo').disabled = false; } }
+  else if (m.type === 'log') log(m.text);
   else if (m.type === 'land') { land = m.land; charts.setLand(m.land); showSurface(); }
   else if (m.type === 'forcings') tools.setForcings(m.list);
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
@@ -345,48 +350,60 @@ function tick(): void {
 }
 requestAnimationFrame(tick);
 $('coarsen').onclick = (): void => { $<HTMLButtonElement>('coarsen').disabled = true; refining = true; log('粗化中… / Coarsening…'); send({ type: 'coarsen' }); };
-/** cells of the eye box and its time step */
-/** the grid of the current run: the eye box's cost is shown relative to it */
-let gridNow = { nx: 0, ny: 0, nz: 0, dx: 15000, dt: 60 };
-/** Eye box from the panel (m). */
-function eyeVals(): { L: number; dx: number; dz: number } {
+/** the grid of the current run (the nest is built on it) and whether the eye nest applies */
+let gridNow = { nx: 0, ny: 0, nz: 0, dx: 15000, dz: 500, dt: 60, open: false }, nestOk = false;
+/** Eye nest from the panel (m). */
+function eyeVals(): { R: number; dx: number; dz: number } {
   const num = (id: string, d: number): number => { const v = Number($<HTMLInputElement>(id).value); return Number.isFinite(v) && v > 0 ? v : d; };
-  return { L: num('eyeL', 120) * 1000, dx: num('eyeDx', 2) * 1000, dz: num('eyeDz', 500) };
+  return { R: num('eyeR', 75) * 1000, dx: num('eyeDx', 1) * 1000, dz: num('eyeDz', 250) };
 }
 /** radius of maximum wind (m) of the main vortex, if one is detected */
 function eyeRmw(): number | null {
   const v = stormsNow.find((s) => s.id === stormMain && s.kind === 'vortex') ?? stormsNow.find((s) => s.kind === 'vortex');
   return v && v.rmw ? v.rmw : null;
 }
-/** Cells of the eye box and its work per model second relative to the current grid (cells / time step). */
+const kmTxt = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${Math.round(d)} m`);
+/** The nest the panel asks for on the current grid (exact spacings, cells, inner steps) and its work per model second
+ *  relative to the current grid. */
 function eyeInfo(): void {
-  const { L, dx, dz } = eyeVals(), top = form.value().top, g = gridNow;
-  const ni = Math.max(16, Math.round(L / dx)), nz = Math.max(8, Math.round(top / dz)), n = ni * ni * nz;
-  const cost = g.nx ? (n / defaultDt({ dx, dz })) / (g.nx * g.ny * g.nz / g.dt) : NaN, rmw = eyeRmw();
-  const notes: string[] = [];
-  if (dx >= g.dx) notes.push('⚠ 格距沒有比目前的細 / not finer than the current grid');
-  if (rmw && L < 4 * rmw) notes.push(`⚠ 盒子小於最大風半徑 ${(rmw / 1000).toFixed(0)} km 的 4 倍，眼牆會碰到邊界 / box under 4 times the radius of maximum wind (${(rmw / 1000).toFixed(0)} km): the eyewall reaches the boundary`);
-  if (n > 8e6) notes.push('⚠ 需要較強的顯卡 / needs a strong GPU');
-  $('eyeInfo').textContent = `${ni}×${ni}×${nz} = ${(n / 1e6).toFixed(2)} M 格點 / cells` +
-    (Number.isFinite(cost) ? ` · 每模式秒的計算量約為目前的 ${cost < 10 ? cost.toFixed(1) : cost.toFixed(0)} 倍 / about ${cost < 10 ? cost.toFixed(1) : cost.toFixed(0)}× the current work per model second` : '') +
+  const { R, dx, dz } = eyeVals(), g = gridNow;
+  if (!g.nx) { $('eyeInfo').textContent = ''; return; }
+  const pc = { nx: g.nx, ny: g.ny, nz: g.nz, dx: g.dx, dy: g.dx, dz: g.dz, lateral: g.open ? 'open' : 'periodic', relaxCells: Math.max(6, Math.round(2500 / g.dx)) } as unknown as RegionalConfig;
+  const geo = nestGeometry(pc, R, dx, dz);
+  if (typeof geo === 'string') { $('eyeInfo').textContent = `⚠ ${geo}`; return; }
+  const cells = nestCells(geo), outer = g.nx * g.ny * g.nz, nsub = Math.max(1, Math.ceil(g.dt / defaultDt({ dx: geo.dx, dz: geo.dz }) - 1e-6));
+  const cost = 1 + cells * nsub / outer, rmw = eyeRmw(), notes: string[] = [];
+  if (rmw && R < 2 * rmw) notes.push(`⚠ 半徑小於最大風半徑 ${(rmw / 1000).toFixed(0)} km 的 2 倍，眼牆會碰到圓柱邊緣 / radius under twice the radius of maximum wind (${(rmw / 1000).toFixed(0)} km)`);
+  if (cells > 8e6) notes.push('⚠ 需要較強的顯卡 / needs a strong GPU');
+  const c = cost < 10 ? cost.toFixed(1) : cost.toFixed(0);
+  $('eyeInfo').textContent = `實際 / actual: Δx ${kmTxt(geo.dx)}（外圍 ${kmTxt(g.dx)} 的 1/${geo.r}）、Δz ${kmTxt(geo.dz)}（1/${geo.rz}），` +
+    `細網格 ${kmTxt(geo.nx * geo.dx)} 見方，${geo.nx}×${geo.nx}×${geo.nz} = ${(cells / 1e6).toFixed(2)} M 格，每個外圍步約 ${nsub} 個內部步；每模式秒的計算量約為目前的 ${c} 倍` +
+    ` / fine box ${kmTxt(geo.nx * geo.dx)} across, ${(cells / 1e6).toFixed(2)} M cells, about ${nsub} inner steps per outer step: about ${c}× the work per model second` +
     (notes.length ? ` · ${notes.join(' · ')}` : '');
 }
-/** Suggest a box for the current eyewall: about 5 times the radius of maximum wind (60-400 km), spacing about a
- *  fifteenth of it (0.5 km to half the current spacing, at most 3 km), 500 m levels. */
+/** Suggest a nest for the current eyewall: radius about 2.5 times the radius of maximum wind (20-300 km), spacing about
+ *  a twentieth of it (0.5 km to half the outer spacing), half the outer level spacing. */
 function eyeFit(): void {
-  const rmw = eyeRmw() ?? 40000;
-  const L = Math.max(60, Math.min(400, Math.ceil(5 * rmw / 10000) * 10));
-  const dx = Math.max(0.5, Math.min(3, gridNow.dx / 2000, Math.round(rmw / 15000 * 4) / 4));
-  $<HTMLInputElement>('eyeL').value = String(L); $<HTMLInputElement>('eyeDx').value = String(dx); $<HTMLInputElement>('eyeDz').value = '500';
+  const rmw = eyeRmw() ?? 30000;
+  const R = Math.max(20, Math.min(300, Math.ceil(2.5 * rmw / 5000) * 5));
+  const dx = Math.max(0.5, Math.min(gridNow.dx / 2000, Math.round(rmw / 20000 * 4) / 4));
+  $<HTMLInputElement>('eyeR').value = String(R); $<HTMLInputElement>('eyeDx').value = String(dx); $<HTMLInputElement>('eyeDz').value = String(Math.max(50, gridNow.dz / 2));
   eyeInfo();
 }
-for (const id of ['eyeL', 'eyeDx', 'eyeDz']) $(id).oninput = eyeInfo;
+/** The running nest (from the worker; null: none). */
+function showNest(n: NestInfo | null): void {
+  $<HTMLButtonElement>('eyeStop').disabled = !n;
+  $('eyeNow').textContent = n ? `細化中 / running: 半徑 ${kmTxt(n.R)}，Δx ${kmTxt(n.dx)}、Δz ${kmTxt(n.dz)}，${(n.cells / 1e6).toFixed(2)} M 格，每個外圍步 ${n.nsub} 個內部步 / inner steps per outer step`
+    : '未細化 / not running';
+}
+for (const id of ['eyeR', 'eyeDx', 'eyeDz']) $(id).oninput = eyeInfo;
 $('eyeFit').onclick = eyeFit;
 $('secEye').addEventListener('toggle', () => { if (($('secEye') as HTMLDetailsElement).open) eyeFit(); });
 $('eyeGo').onclick = (): void => {
-  $<HTMLButtonElement>('eyeGo').disabled = true; refining = true; log('眼區細化中… / Refining the eye…');
-  send({ type: 'refineEye', ...eyeVals() });
+  $<HTMLButtonElement>('eyeGo').disabled = true; log('眼區細化建立中… / Starting the eye nest…');
+  send({ type: 'nestStart', ...eyeVals() });
 };
+$('eyeStop').onclick = (): void => { $<HTMLButtonElement>('eyeStop').disabled = true; send({ type: 'nestStop' }); };
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
 $('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; refining = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
 // ---------------- saved simulations

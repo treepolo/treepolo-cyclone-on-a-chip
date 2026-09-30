@@ -258,7 +258,7 @@ export class AxiDriver {
         // the one storm of the axisymmetric model: the vortex on the axis
         storms: [{ id: 1, kind: 'vortex', name: 'TC1', x: origin.x + this.D, y: origin.y + this.D, xd: this.D, yd: this.D, u: 0, v: 0, age: ax.time,
           pmin: this.centralSlp(), dp: -mt.dp, vmax: mt.vmax, rmw: mt.rmw, r7: this.galeRadius(GALE7), r10: this.galeRadius(GALE10) }], mainId: 1 },
-      origin, charts, tracers: null, stepsPerSecond, dt: ax.a.dt,
+      origin, charts, tracers: null, nest: null, stepsPerSecond, dt: ax.a.dt,
     };
     return { msg, transfer };
   }

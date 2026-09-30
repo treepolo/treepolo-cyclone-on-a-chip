@@ -36,8 +36,10 @@ export type ToRegionalWorker =
   | { type: 'adaptive'; on: boolean }
   /** continue the running simulation on the finer grid of its set-up (build.ts refinedSetup) */
   | { type: 'refine' }
-  /** refine only a box around the eye (width L, spacing dx, dz; m), open boundaries, following the storm */
-  | { type: 'refineEye'; L: number; dx: number; dz: number }
+  /** refine the eye and eyewall: a finer grid (spacings near dx, dz; m) in a cylinder of radius R (m) at the centre of the
+   *  running domain, coupled both ways (twoway.ts); replaces a running one */
+  | { type: 'nestStart'; R: number; dx: number; dz: number }
+  | { type: 'nestStop' }
   /** back to the coarser grid (the kept one, with the fine run averaged into it) */
   | { type: 'coarsen' }
   | { type: 'save' }
@@ -97,6 +99,19 @@ export interface ChartData {
   rz: { xc: number; yc: number; dr: number; nr: number; vars: Record<RzVar, Float32Array> } | null;
 }
 
+/** The running eye nest: its grid and where it lies (m, domain coordinates of the outer grid). */
+export interface NestInfo {
+  R: number; dx: number; dz: number; r: number; rz: number; nx: number; nz: number; cells: number;
+  /** inner steps per outer step now */
+  nsub: number;
+  /** the inner box: lower-left corner and width; the cylinder's centre */
+  x0: number; y0: number; L: number; cx: number; cy: number;
+  /** feedback taper width inside R (m) */
+  Wf: number;
+}
+/** The eye nest's 3-D view bytes ([k][j][i], nx x nx x nz) with its geometry. */
+export interface NestFrame extends NestInfo { cloud: Uint8Array; rain: Uint8Array }
+
 export interface RegionalFrame {
   type: 'frame';
   time: number;               // s
@@ -132,6 +147,8 @@ export interface RegionalFrame {
   charts: ChartData | null;
   /** tracer particles: x, y, z (m, domain coordinates) and age (s) per particle, or null when off */
   tracers: Float32Array | null;
+  /** the eye nest's volume (null: none) */
+  nest: NestFrame | null;
   stepsPerSecond: number;
   /** current time step (s): varies with adaptive stepping on the GPU */
   dt: number;
@@ -142,12 +159,14 @@ export type FromRegionalWorker =
   | { type: 'ready'; experiment: RegionalExperiment; nx: number; ny: number; nz: number; dx: number; dz: number; dt: number; description: string; backend: 'cpu' | 'gpu'; note: string; land: Uint8Array | null;
       /** grid spacing (m) the run continues on after 'refine', or null */
       refineTo: number | null;
-      /** grid spacing (m) after 'coarsen' (coarsenBack: a kept coarser state), whether the eye box refinement applies */
-      coarsenTo?: number | null; coarsenBack?: boolean; eyeOk?: boolean;
+      /** grid spacing (m) after 'coarsen' (coarsenBack: a kept coarser state), whether the eye nest applies */
+      coarsenTo?: number | null; coarsenBack?: boolean; nestOk?: boolean;
       /** tropical-cyclone diagnostics apply (a vortex run) */
       tc: boolean;
       /** the set-up of this run (null: nest in the global model) */
       setup: import('./setup.js').RegionalSetup | null }
+  /** the eye nest started, changed or stopped (null) */
+  | { type: 'nest'; info: NestInfo | null }
   /** surface changed (painting): land mask per column (1 land) */
   | { type: 'land'; land: Uint8Array | null }
   /** the lasting wind forcings now (domain positions, m; until: model time they end, null: until cleared) */

@@ -98,12 +98,13 @@ a{color:#8fc1ff}
 </details>
 
 <details id="secEye" class="tcOnly"><summary>眼牆與風眼細化 / Eye refinement</summary>
-<div class="muted">只把颱風眼附近切成一個較細的盒子接著算（開放邊界、跟著颱風走；邊界向細化當下的外圍狀態鬆弛）。之後按「粗化」可以貼回全區。/ Continue only a box around the eye on a finer grid (open boundaries relaxing to the state at this moment, following the storm); Coarsen puts it back into the whole domain.</div>
-<label class="f" title="正方形盒子的邊長；要裝得下眼牆外面一些（約 5 倍最大風半徑）/ side of the square box; room for the eyewall and some of its surroundings (about 5 times the radius of maximum wind)"><span>盒子大小 / Box (km)</span><input id="eyeL" type="number" min="40" max="600" step="10" value="120" /></label>
-<label class="f" title="要比目前的網格細 / finer than the current grid"><span>水平格距 / Δx (km)</span><input id="eyeDx" type="number" min="0.25" max="5" step="0.25" value="2" /></label>
-<label class="f"><span>垂直格距 / Δz (m)</span><input id="eyeDz" type="number" min="100" max="1000" step="50" value="500" /></label>
+<div class="muted">在原本的區域裡，以區域中心的圓柱（區域跟著颱風走，圓柱就一直在颱風眼上）用較細的網格計算，水平與垂直都細化。細網格和外圍網格雙向耦合：圓柱外圍向外圍網格鬆弛，細網格每一步把平均回饋給外圍網格。/ A finer grid (across and up) in a cylinder at the centre of the running domain, which follows the storm, so the cylinder stays on the eye. Coupled both ways: around the cylinder the fine grid relaxes to the outer grid, and every step its means feed back into the outer grid.</div>
+<label class="f" title="要裝得下眼牆和它外面一些（約 2.5 倍最大風半徑）/ room for the eyewall and some of its surroundings (about 2.5 times the radius of maximum wind)"><span>圓柱半徑 / Radius (km)</span><input id="eyeR" type="number" min="10" max="400" step="5" value="75" /></label>
+<label class="f" title="會取成外圍格距除以整數（2–32）/ rounded to the outer spacing divided by a whole number (2-32)"><span>水平格距 / Δx (km)</span><input id="eyeDx" type="number" min="0.1" max="10" step="0.05" value="1" /></label>
+<label class="f" title="會取成外圍層距除以整數（1 = 垂直不細化，最多 8）/ rounded to the outer level spacing divided by a whole number (1: no vertical refinement, at most 8)"><span>垂直格距 / Δz (m)</span><input id="eyeDz" type="number" min="50" max="2000" step="25" value="250" /></label>
 <div id="eyeInfo" class="muted"></div>
-<div class="controls"><button id="eyeFit" title="依目前偵測到的最大風半徑：盒子約 5 倍、格距約十五分之一 / from the detected radius of maximum wind: a box about 5 times as wide, a spacing about a fifteenth of it">依眼牆大小建議 / Fit the eyewall</button><button id="eyeGo" disabled>眼區細化 / Refine the eye</button></div>
+<div class="controls"><button id="eyeFit" title="依目前偵測到的最大風半徑：半徑約 2.5 倍、格距約二十分之一 / from the detected radius of maximum wind: a radius about 2.5 times it, a spacing about a twentieth of it">依眼牆大小建議 / Fit the eyewall</button><button id="eyeGo" disabled>開始細化 / Start</button><button id="eyeStop" disabled>停止細化 / Stop</button></div>
+<div id="eyeNow" class="muted">未細化 / not running</div>
 </details>
 
 <details id="secView" open><summary>顯示 / Display</summary>
