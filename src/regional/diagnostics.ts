@@ -36,9 +36,10 @@ const zFactor = (rho: number, qr: number, qs: number, qg: number): number =>
 // ---------------------------------------------------------------- variables
 
 /** Values per column in the display composites (GPU readDisplay and columnDiagnostics). */
-export const COL = 14;
+export const COL = 21;
 /** Offsets in a column record. */
-export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 6, uh: 7, cape: 8, cin: 9, vis: 10, pw: 11, wvT: 12, visZ: 13 } as const;
+export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 6, uh: 7, cape: 8, cin: 9, vis: 10, pw: 11, wvT: 12, visZ: 13,
+  shear: 14, srh1: 15, srh3: 16, lcl: 17, li: 18, etop: 19, vil: 20 } as const;
 /** Satellite-like column values: cloud albedo of the column optical depth (display.ts extinctions, sub-grid cloud
  *  included) and the height where the optical depth from the top reaches 1 (the visible image's cloud top, for its
  *  shading; the optical-depth-weighted mean height of thinner columns); the water-vapour channel as the temperature
@@ -47,11 +48,12 @@ export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 
 export const WV_PATH = 0.3;
 
 /** Fields of a horizontal slice. */
-export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh', 'zeta', 'div', 'pp', 'qv', 'cloud', 'precip'] as const;
+export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh', 'zeta', 'div', 'pp', 'qv', 'cloud', 'precip', 'T'] as const;
 /** Fields of a cross-section or sounding (per level). */
 export const SECTION_VARS = ['dbz', 'w', 'u', 'v', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'T', 'Td', 'p', 'qv', 'pp'] as const;
 /** Composite (column / surface) maps. */
-export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'visZ', 'wvT', 'pw', 'cuRain'] as const;
+export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'visZ', 'wvT', 'pw', 'cuRain', 'sfcT', 'sfcTd',
+  'shear06', 'srh01', 'srh03', 'lcl', 'li', 'stp', 'scp', 'etop', 'vil', 'uhSwath', 'windSwath'] as const;
 /** Azimuthal-mean (radius-height) fields. */
 export const RZ_VARS = ['vt', 'vr', 'w', 'thp', 'cond'] as const;
 export type SliceVar = (typeof SLICE_VARS)[number];
@@ -98,6 +100,55 @@ export function parcelAscent(T: ArrayLike<number>, p: ArrayLike<number>, qv: Arr
   return { cape, cin, lcl, lfc, el };
 }
 
+// ---------------------------------------------------------------- severe-weather indices of a column
+
+/** Echo-top reflectivity (dBZ) and the largest reflectivity factor counted in the vertically integrated liquid (56 dBZ,
+ *  the usual hail cap). */
+export const ETOP_DBZ = 18, VIL_ZMAX = Math.pow(10, 5.6);
+/** Heights (m) of the wind samples: the Bunkers storm motion from 0-6 km every 500 m, helicity every 250 m. */
+const BUNKERS_DZ = 500, SRH_DZ = 250;
+/**
+ * Wind indices of a column from its cell-centred wind at height h (uv(h): linear between level centres, the lowest
+ * level below it): 0-6 km bulk shear (m/s), and the storm-relative helicity of 0-1 km and 0-3 km (m^2/s^2) for the
+ * right-moving supercell of Bunkers et al. (2000): the 0-6 km mean wind plus 7.5 m/s to the right of the shear between
+ * the 0-500 m and 5.5-6 km means (cx, cy). SRH = sum of (u[n+1] - cx)(v[n] - cy) - (u[n] - cx)(v[n+1] - cy) over the samples.
+ * The GPU display kernel (src/gpu/regionalGpu.ts) takes the same samples.
+ */
+export function windIndices(uv: (h: number) => [number, number]): { shear: number; srh1: number; srh3: number; cx: number; cy: number } {
+  let mu = 0, mv = 0;
+  const nb = Math.round(6000 / BUNKERS_DZ);
+  for (let n = 0; n <= nb; n++) { const w = uv(n * BUNKERS_DZ); mu += w[0]; mv += w[1]; }
+  mu /= nb + 1; mv /= nb + 1;
+  const a0 = uv(0), a1 = uv(500), b0 = uv(5500), b1 = uv(6000);
+  const sx = 0.5 * (b0[0] + b1[0] - a0[0] - a1[0]), sy = 0.5 * (b0[1] + b1[1] - a0[1] - a1[1]), sl = Math.hypot(sx, sy);
+  const cx = sl > 0.1 ? mu + 7.5 * sy / sl : mu, cy = sl > 0.1 ? mv - 7.5 * sx / sl : mv;
+  let srh1 = 0, srh3 = 0, prev = a0;
+  for (let n = 1; n <= Math.round(3000 / SRH_DZ); n++) {
+    const w = uv(n * SRH_DZ), d = (w[0] - cx) * (prev[1] - cy) - (prev[0] - cx) * (w[1] - cy);
+    srh3 += d; if (n * SRH_DZ <= 1000) srh1 = srh3;
+    prev = w;
+  }
+  return { shear: Math.hypot(b1[0] - a0[0], b1[1] - a0[1]), srh1, srh3, cx, cy };
+}
+/** Level whose base-state pressure is nearest 500 hPa (the lifted index). */
+export function level500(pi0: ArrayLike<number>): number {
+  let k5 = 0; for (let k = 0; k < pi0.length; k++) if (Math.abs(pressure(pi0[k]!) - 5e4) < Math.abs(pressure(pi0[k5]!) - 5e4)) k5 = k;
+  return k5;
+}
+/** Significant tornado parameter (fixed layer, surface-based parcel; Thompson et al. 2003): CAPE / 1500 x LCL term
+ *  ((2000 - LCL) / 1000, 1 below 1 km, 0 above 2 km) x SRH(0-1 km) / 150 x shear term (0-6 km / 20 m/s, 0 below 12.5,
+ *  1.5 above 30); not negative. */
+export function stpIndex(cape: number, lcl: number, srh1: number, shear: number): number {
+  const lt = lcl < 0 ? 0 : Math.max(0, Math.min(1, (2000 - lcl) / 1000)), st = shear < 12.5 ? 0 : Math.min(1.5, shear / 20);
+  return Math.max(0, cape / 1500 * lt * (srh1 / 150) * st);
+}
+/** Supercell composite parameter (fixed layer, surface-based parcel; Thompson et al. 2004): CAPE / 1000 x SRH(0-3 km) /
+ *  50 x shear term (0-6 km / 20 m/s, 0 below 10, 1 above 20). */
+export function scpIndex(cape: number, srh3: number, shear: number): number {
+  const st = shear < 10 ? 0 : Math.min(1, shear / 20);
+  return cape / 1000 * (srh3 / 50) * st;
+}
+
 // ---------------------------------------------------------------- per-cell values
 
 export interface CellState { u: number; v: number; w: number; th: number; pp: number; q: ArrayLike<number> }
@@ -122,15 +173,19 @@ export function sectionValues(c: CellState, b: LevelBase, out: Float32Array, o: 
 export function columnDiagnostics(m: RegionalModel, subgrid = true): Float32Array {
   const { nx, ny, nz, dx, dy, dz } = m.c, sc = m.scalars, ns = sc.length, sx = m.sx, pl = m.plane;
   const out = new Float32Array(nx * ny * COL);
-  const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz), bet = new Float64Array(nz), rhc = subgridRHc(dx);
+  const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz), bet = new Float64Array(nz), rhc = subgridRHc(dx), Tp = new Float64Array(nz);
+  const k500 = level500(m.pi0), zc0 = m.zc[0]!;
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    let wmax = 0, wmin = 0, cmax = 0, pmax = 0, zmax = 0, ctz = 0, ctt = 0, uh = 0, pw = 0, tau = 0;
+    let wmax = 0, wmin = 0, cmax = 0, pmax = 0, zmax = 0, ctz = 0, ctt = 0, uh = 0, pw = 0, tau = 0, etop = 0, vil = 0;
     for (let k = 0; k < nz; k++) {
       const q = m.idx(i, j, k), rdz = m.rho0[k]! * dz;
       pw += rdz * Math.max(0, ns > 0 ? sc[0]![q]! : 0);
       const qr = ns > 2 ? Math.max(sc[2]![q]!, 0) : 0, qs = ns > 5 ? Math.max(sc[4]![q]!, 0) : 0, qg = ns > 5 ? Math.max(sc[5]![q]!, 0) : 0;
       const cl = Math.max(0, (ns > 1 ? sc[1]![q]! : 0) + (ns > 5 ? sc[3]![q]! : 0)), pr = Math.max(0, (ns > 2 ? sc[2]![q]! : 0) + (ns > 5 ? qs + qg : 0));
-      zmax = Math.max(zmax, zFactor(m.rho0[k]!, qr, qs, qg));
+      const zr = zFactor(m.rho0[k]!, qr, qs, qg);
+      zmax = Math.max(zmax, zr);
+      if (zr >= Math.pow(10, ETOP_DBZ / 10)) etop = m.zc[k]!;
+      if (zr > 0) vil += 3.44e-6 * Math.pow(Math.min(zr, VIL_ZMAX), 4 / 7) * dz;
       const wc = 0.5 * (m.w[q]! + m.w[q + pl]!);
       const zeta = 0.25 * ((m.v[q + 1]! + m.v[q + 1 + sx]!) - (m.v[q - 1]! + m.v[q - 1 + sx]!)) / dx
         - 0.25 * ((m.u[q + sx]! + m.u[q + sx + 1]!) - (m.u[q - sx]! + m.u[q - sx + 1]!)) / dy;
@@ -145,7 +200,14 @@ export function columnDiagnostics(m: RegionalModel, subgrid = true): Float32Arra
       wmax = Math.max(wmax, w); wmin = Math.min(wmin, w); cmax = Math.max(cmax, cl); pmax = Math.max(pmax, pr);
     }
     if (ctz === 0) ctt = T[0]!;
-    const pc = ns > 0 ? parcelAscent(T, p, qv, dz) : { cape: 0, cin: 0 };
+    const pc = ns > 0 ? parcelAscent(T, p, qv, dz, Tp) : { cape: 0, cin: 0, lcl: -1 };
+    // winds at height h: cell centres, linear between level centres (windIndices)
+    const wi = windIndices((h) => {
+      const fk = (h - zc0) / dz, k0 = Math.max(0, Math.min(nz - 2, Math.floor(fk))), f = Math.max(0, Math.min(1, fk - k0));
+      const qa = m.idx(i, j, k0), qb = qa + pl;
+      const ua = 0.5 * (m.u[qa]! + m.u[qa + 1]!), va = 0.5 * (m.v[qa]! + m.v[qa + sx]!), ub = 0.5 * (m.u[qb]! + m.u[qb + 1]!), vb = 0.5 * (m.v[qb]! + m.v[qb + sx]!);
+      return [ua + (ub - ua) * f, va + (vb - va) * f];
+    });
     // water-vapour channel: emission where the vapour path above drops below WV_PATH, unless a cloud top is higher
     let above = pw, wvT = T[nz - 1]!, zEmit = m.zc[nz - 1]!;
     for (let k = 0; k < nz; k++) { above -= m.rho0[k]! * dz * Math.max(0, qv[k]!); if (above < WV_PATH) { wvT = T[k]!; zEmit = m.zc[k]!; break; } }
@@ -158,6 +220,8 @@ export function columnDiagnostics(m: RegionalModel, subgrid = true): Float32Arra
     out[o + 10] = albedo(tau); out[o + 11] = pw; out[o + 12] = wvT; out[o + 13] = zvis;
     out[o] = wmax; out[o + 1] = wmin; out[o + 2] = cmax; out[o + 3] = pmax; out[o + 4] = 10 * Math.log10(Math.max(zmax, 1e-3));
     out[o + 5] = ctz; out[o + 6] = ctt; out[o + 7] = uh; out[o + 8] = pc.cape; out[o + 9] = pc.cin;
+    out[o + 14] = wi.shear; out[o + 15] = wi.srh1; out[o + 16] = wi.srh3; out[o + 17] = pc.lcl >= 0 ? m.zc[pc.lcl]! : -1;
+    out[o + 18] = ns > 0 ? T[k500]! - Tp[k500]! : 0; out[o + 19] = etop; out[o + 20] = vil;
   }
   return out;
 }
@@ -233,6 +297,7 @@ export function sliceFields(m: RegionalModel, pl: LevelPlanes, k: number, vars: 
         case 'qv': x = 1e3 * Math.max(0, qv); break;
         case 'cloud': x = 1e3 * Math.max(0, g(sc[1], q) + (ns > 5 ? g(sc[3], q) : 0)); break;
         case 'precip': x = 1e3 * Math.max(0, g(sc[2], q) + (ns > 5 ? g(sc[4], q) + g(sc[5], q) : 0)); break;
+        case 'T': x = T - 273.15; break;
       }
       out[v]![c] = x;
     }
@@ -244,7 +309,8 @@ export function sliceFields(m: RegionalModel, pl: LevelPlanes, k: number, vars: 
 
 /** Composite and surface maps ([j][i]) from the column records, the lowest-level planes and the
  *  precipitation accumulations (mm) and rates (mm/h). */
-export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPlanes, acc: { rain: ArrayLike<number>; snow: ArrayLike<number>; rate: ArrayLike<number> | null; cu?: ArrayLike<number> | null },
+export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPlanes,
+  acc: { rain: ArrayLike<number>; snow: ArrayLike<number>; rate: ArrayLike<number> | null; cu?: ArrayLike<number> | null; uhMax?: ArrayLike<number> | null; windMax?: ArrayLike<number> | null },
   vars: readonly MapVar[], frame: { u: number; v: number }): Partial<Record<MapVar, Float32Array>> {
   const { nx, ny } = m.c, sx = m.sx, n = nx * ny, out: Partial<Record<MapVar, Float32Array>> = {};
   const th0 = m.th0[0]!, pi0 = m.pi0[0]!, z0 = m.zc[0]!;
@@ -278,6 +344,19 @@ export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPla
           x = pressure(pi) * Math.exp(G * z0 / (RD * tv)) / 100; break;
         }
         case 'sfcThetaE': { const pi = pi0 + pl0.pp[q]!; x = thetaE(pl0.th[q]! * pi, pressure(pi), pl0.sc[0] ? pl0.sc[0][q]! : 0); break; }
+        case 'sfcT': x = pl0.th[q]! * (pi0 + pl0.pp[q]!) - 273.15; break;
+        case 'shear06': x = col[o + C.shear]!; break;
+        case 'srh01': x = col[o + C.srh1]!; break;
+        case 'srh03': x = col[o + C.srh3]!; break;
+        case 'lcl': x = col[o + C.lcl]! < 0 ? NaN : col[o + C.lcl]! / 1000; break;
+        case 'li': x = col[o + C.li]!; break;
+        case 'stp': x = stpIndex(col[o + C.cape]!, col[o + C.lcl]!, col[o + C.srh1]!, col[o + C.shear]!); break;
+        case 'scp': x = scpIndex(col[o + C.cape]!, col[o + C.srh3]!, col[o + C.shear]!); break;
+        case 'etop': x = col[o + C.etop]! / 1000; break;
+        case 'vil': x = col[o + C.vil]!; break;
+        case 'uhSwath': x = acc.uhMax ? acc.uhMax[c]! : 0; break;
+        case 'windSwath': x = acc.windMax ? acc.windMax[c]! : 0; break;
+        case 'sfcTd': x = dewPoint(pl0.sc[0] ? pl0.sc[0][q]! : 0, pressure(pi0 + pl0.pp[q]!)); break;
       }
       a[c] = x;
     }

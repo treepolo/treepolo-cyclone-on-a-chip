@@ -97,9 +97,10 @@ export const fmt = (v: number, digits: number): string => {
 
 // ---------------------------------------------------------------- raster fields
 
-/** Draw a gridded field (ni x nj, row j = 0 at the bottom) into rect, one cell per rectangle
- *  (no smoothing, the grid cells stay visible). underlay: colour behind transparent values. */
-export function drawField(ctx: CanvasRenderingContext2D, r: Rect, ni: number, nj: number, value: (i: number, j: number) => number, s: Scale, underlay: (i: number, j: number) => [number, number, number]): void {
+/** Draw a gridded field (ni x nj, row j = 0 at the bottom) into rect, one cell per rectangle (the grid cells stay
+ *  visible), or interpolated between the cell centres with `smooth` (satellite channels, which a real imager sees as
+ *  a continuous picture). underlay: colour behind transparent values. */
+export function drawField(ctx: CanvasRenderingContext2D, r: Rect, ni: number, nj: number, value: (i: number, j: number) => number, s: Scale, underlay: (i: number, j: number) => [number, number, number], smooth = false): void {
   const img = new ImageData(ni, nj), d = img.data;
   for (let j = 0; j < nj; j++) for (let i = 0; i < ni; i++) {
     const c = colorOf(s, value(i, j)), o = 4 * ((nj - 1 - j) * ni + i);
@@ -109,7 +110,7 @@ export function drawField(ctx: CanvasRenderingContext2D, r: Rect, ni: number, nj
   }
   const off = document.createElement('canvas'); off.width = ni; off.height = nj;
   off.getContext('2d')!.putImageData(img, 0, 0);
-  ctx.save(); ctx.imageSmoothingEnabled = false; ctx.drawImage(off, r.x, r.y, r.w, r.h); ctx.restore();
+  ctx.save(); ctx.imageSmoothingEnabled = smooth; if (smooth) ctx.imageSmoothingQuality = 'high'; ctx.drawImage(off, r.x, r.y, r.w, r.h); ctx.restore();
 }
 
 /** Vertical colour bar with tick labels. */

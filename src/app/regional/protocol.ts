@@ -93,6 +93,10 @@ export interface ChartRequest {
 /** Chart data of a frame. 2-D maps are [j][i]; section fields [k][point]; r-z fields [k][ring]. */
 export interface ChartData {
   maps: Partial<Record<MapVar, Float32Array>>;
+  /** base-state temperature (K) at the level centres (the infrared picture's temperature of height) */
+  tz?: Float32Array;
+  /** base-state pressure (hPa) at the level centres (the slices on pressure levels pick the nearest level) */
+  p0?: Float32Array;
   slice: { k: number; z: number; vars: Partial<Record<SliceVar, Float32Array>> } | null;
   section: { x0: number; y0: number; x1: number; y1: number; np: number; vars: Record<SectionVar, Float32Array> } | null;
   sounding: { x: number; y: number; vars: Record<SectionVar, Float32Array> } | null;

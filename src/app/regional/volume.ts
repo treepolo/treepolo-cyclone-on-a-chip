@@ -11,6 +11,7 @@
 // ray passes that distance, so clouds in front hide the particles behind them.
 import { EXT_MAX } from '../../regional/display.js';
 import type { NestFrame } from './protocol.js';
+import { nestSunSkyLight, occupancyGrid, sunSkyLight, type V3 } from './light.js';
 
 /** The eye nest's volume for the view, with the outer domain's width and height (m). */
 export type NestVolume = NestFrame & { Lx: number; Ly: number };
@@ -38,8 +39,9 @@ uniform sampler2D uTrC; uniform sampler2D uTrD; uniform int uTrOn;
 uniform sampler3D uNVol; uniform sampler3D uNLight; uniform int uNOn;
 uniform vec3 uNBox; uniform vec4 uNCyl; uniform float uNCell; uniform float uNCellZ;
 // occupancy: per block of cells, 0 where the block and its neighbours hold no cloud or precipitation at all; the
-// texture coordinate scale (blocks do not divide the grid exactly) and a clear-air step shorter than one block
-uniform sampler3D uOcc; uniform vec3 uOccScale; uniform float uOccStep;
+// texture coordinate scale (blocks do not divide the grid exactly) and the block size (box units)
+uniform sampler3D uOcc; uniform vec3 uOccScale; uniform vec3 uOccBlock;
+uniform int uDbg;   // 1: show the ray's step count (red, of the cap) and refinements (green) instead of the picture; 2: no random start
 const float EXTMAX = ${EXT_MAX.toFixed(3)};
 // weight of the nest at p: 1 inside R - Wf, cos^2 to 0 at R (the feedback's taper), 0 without one
 float nestW(vec3 p){
@@ -72,20 +74,32 @@ bool hitBox(vec3 ro, vec3 rd, out float t0, out float t1){
 }
 float ext(float v){ return EXTMAX*v*v*v; }
 float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); }
-// Cloud and precipitation extinction (1/m) at p (box units) and the grid's cloud value: exactly the model's field (its
-// grid-box means, interpolated between box centres), nothing added. Detail the grid does not resolve is not drawn:
-// a partly cloudy box (sub-grid cloud) is a thin, translucent cloud, as its mean is.
-vec3 dens(vec3 p, float w){
-  if (uCutOn == 1 && dot(uCut.xyz, p) > uCut.w) return vec3(0.0);
-  vec2 s = volAt(p, w);
-  return vec3(ext(s.r)*uK, uMode == 0 ? ext(s.g)*uK : s.g*s.g*4e-4, s.r);
+// Only the model's field is drawn (its grid-box means, interpolated between box centres), nothing added: detail the grid
+// does not resolve is not drawn, and a partly cloudy box (sub-grid cloud) is a thin, translucent cloud, as its mean is.
+// display bytes (0-1) at p, zero on the removed side of a cutaway; extinction per box unit at a point and its mean over
+// a stretch from its bytes at the start, middle and end (Simpson's rule): the extinction is the cube of the byte (the
+// square for updraft / vorticity), which the ends alone integrate less well (the picture depends more on where the
+// steps fall)
+vec2 bytesAt(vec3 p, float w){ if (uCutOn == 1 && dot(uCut.xyz, p) > uCut.w) return vec2(0.0); return volAt(p, w); }
+vec2 extAt(vec2 v){ return vec2(ext(v.x)*uK, uMode == 0 ? ext(v.y)*uK : v.y*v.y*4e-4)*uMpb; }
+vec2 extSeg(vec2 a, vec2 m, vec2 b){
+  vec2 m3 = (a*a*a + 4.0*m*m*m + b*b*b)/6.0;
+  return vec2(EXTMAX*m3.x*uK, uMode == 0 ? EXTMAX*m3.y*uK : (a.y*a.y + 4.0*m.y*m.y + b.y*b.y)/6.0*4e-4)*uMpb;
+}
+const vec3 SUNC = vec3(1.0, 0.96, 0.90)*1.65;
+const vec3 AMBC = vec3(0.46, 0.56, 0.72);
+// light scattered toward the eye at p (d: cloud and second-channel extinction): sun and sky light for cloud, a grey-blue
+// for precipitation (or the colours of updraft / vorticity), mixed by their extinction
+vec3 shade(vec3 p, float w, vec2 d, float phase){
+  vec2 L = lightAt(p, w);
+  vec3 cc = SUNC*(L.r*phase + 0.3*sqrt(L.r)) + AMBC*(0.36 + 0.5*L.g);
+  vec3 cp = uMode == 0 ? vec3(0.46,0.54,0.66)*(0.35 + 0.65*L.r) + AMBC*0.1 : (uMode == 1 ? vec3(1.0,0.45,0.2) : vec3(0.35,0.55,1.0));
+  return (cc*d.x + cp*d.y)/max(d.x + d.y, 1e-12);
 }
 void main(){
   vec4 ndc = vec4(vUv*2.0-1.0, 1.0, 1.0);
   vec4 wp = uInvVP*ndc; vec3 rd = normalize(wp.xyz/wp.w - uEye); vec3 ro = uEye;
   float mu = dot(rd, uSun);
-  vec3 sunCol = vec3(1.0, 0.96, 0.90)*1.65;
-  vec3 ambCol = vec3(0.46, 0.56, 0.72);
   vec3 horizon = vec3(0.70, 0.79, 0.90);
   vec3 sky = mix(horizon, vec3(0.20,0.40,0.72), clamp(rd.z*1.6,0.0,1.0))
            + vec3(1.0,0.9,0.72)*(0.18*pow(max(mu,0.0),16.0) + 2.0*pow(max(mu,0.0),900.0));
@@ -102,7 +116,7 @@ void main(){
     } else g = uOut * (0.40 + 0.95*max(uSun.z,0.0));
     bg = mix(g, horizon, smoothstep(6.0, 30.0, tg));
   }
-  vec3 col = vec3(0.0); float trans = 1.0;
+  vec3 col = vec3(0.0); float trans = 1.0; int iters = 0, nref = 0;
   vec4 tc = vec4(0.0); float tdist = 1e9;
   if (uTrOn == 1) { tc = texture(uTrC, vUv); if (tc.a > 0.0) { vec4 d4 = texture(uTrD, vUv); tdist = (d4.r * 65280.0 + d4.g * 255.0) / 65535.0 * 16.0; } }
   bool tdone = tc.a <= 0.0;
@@ -116,65 +130,70 @@ void main(){
   }
   t0 = max(t0, 0.0);
   if (hit && t1 > t0) {
-    // Clear air (an empty block with empty neighbours) is crossed in steps shorter than a block, so no cloud is ever
-    // stepped over. Where there is cloud the steps are half a grid cell, longer (up to two cells) only where the cloud is
-    // so thin that a step holds at most a quarter optical depth. Entering a new stretch of cloud the ray goes back to its last clear
-    // point. A step that crosses a fixed extinction (0.3 optical depths per half cell) from below holds the surface of
-    // denser cloud: it is found by bisection and the ray goes on from there in quarter steps. So the picture of a surface does not depend on where the steps happen to fall (otherwise
-    // neighbouring pixels differ: speckle with random starts, contour lines with regular ones).
-    float dtP = 0.5*min(uCell, uCellZ), dtN = uNOn == 1 ? 0.5*min(uNCell, uNCellZ) : dtP;
-    float dtO = min(uOccStep, (t1 - t0)/40.0);
-    float t = t0 + dtO*hash(gl_FragCoord.xy);
+    // Clear air (an empty block with empty neighbours) is crossed in steps that move less than a block along every axis,
+    // so no cloud is ever stepped over. Where there is cloud the steps move half a grid cell along the axis the ray
+    // crosses fastest (a thin layer, one level deep, is never stepped over either), and each stretch between two
+    // samples takes the mean of its ends (trapezoid): the picture does not depend on where the steps happen to fall
+    // (a picture that does shows bands or contour lines with regular steps, speckle with random ones). A new stretch of
+    // cloud is marched from the ray's last clear point. A step that crosses a fixed extinction (0.3 optical depths per
+    // half cell) from below holds the surface of denser cloud: it is found by bisection and the ray goes on from there
+    // in quarter steps.
+    vec3 ard = abs(rd) + 1e-6;
+    float dtP = 0.5/max(max(ard.x, ard.y)/uCell, ard.z/uCellZ);
+    float dtN = uNOn == 1 ? 0.5/max(max(ard.x, ard.y)/uNCell, ard.z/uNCellZ) : dtP;
+    float dtO = 0.95/max(max(ard.x/uOccBlock.x, ard.y/uOccBlock.y), ard.z/uOccBlock.z);
+    float t = t0 + dtO*(uDbg >= 2 ? 0.5 : hash(gl_FragCoord.xy));
     // single scattering toward the sun (silver lining), and multiple scattering: light that has diffused through the
     // cloud (sqrt of the direct transmittance: brighter and softer than the direct beam) and the sky's light
     float phase = 0.85 + 1.8*pow(max(mu,0.0), 6.0);
-    // the last sample (the ray's start counts as clear): position, optical depth per box unit, what was composited before it
-    float tP = t0, bP = 0.0, trP = trans; vec3 colP = col, cP = vec3(0.0); bool tdP = tdone;
-    bool inCloud = false; int hold = 0, sub = 0, refines = 0; float dtSub = 0.0;
+    // the last sample (the ray's start counts as clear): position, bytes, extinction per box unit, colour
+    float tP = t0, bP = 0.0; vec2 vP = vec2(0.0); vec3 cP = vec3(0.0);
+    bool inCloud = false; int hold = 0, sub = 0, refines = 0;
     for (int i = 0; i < 640; i++) {
-      if (t > t1 || trans < 0.01) break;
-      if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
+      iters = i;
+      if (trans < 0.01) break;
+      // leaving the volume (the ground, the lid, a cutaway): the last step ends exactly there (in cloud, or before any
+      // sample: a short path through a corner; clear air within a block of a clear point holds nothing)
+      if (t > t1) { if ((inCloud || tP == t0) && tP < t1 - 1e-7) t = t1; else break; }
       vec3 p = ro + t*rd;
-      if (hold == 0 && sub == 0 && texture(uOcc, p/uBox*uOccScale).r == 0.0) {
-        inCloud = false; tP = t; bP = 0.0; colP = col; trP = trans; tdP = tdone;
+      if (hold == 0 && sub == 0 && uDbg < 3 && texture(uOcc, p/uBox*uOccScale).r == 0.0) {
+        // nothing up to here
+        if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
+        inCloud = false; tP = t; bP = 0.0; vP = vec2(0.0); cP = vec3(0.0);
         t += dtO; continue;
       }
       if (!inCloud) {
         // a new stretch of cloud: from the last clear point, in fine steps (at least back to here)
         inCloud = true;
-        if (t - tP > 1e-6) { hold = int((t - tP)/min(dtP, dtN)) + 2; t = tP; col = colP; trans = trP; tdone = tdP; continue; }
+        if (t - tP > 1e-6) { hold = int((t - tP)/min(dtP, dtN)) + 2; t = tP; continue; }
       }
       if (hold > 0) hold--;
-      float w = nestW(p);
-      vec3 d = dens(p, w);
-      float b = (d.x + d.y)*uMpb, dtMin = w > 0.0 ? dtN : dtP, dt;
-      if (sub > 0) { dt = dtSub; sub--; }
-      else {
-        float bThr = 0.3/dtMin;
-        if (refines < 6 && bP < bThr && b >= bThr && t - tP > 0.2*dtMin) {
-          float lo = tP, hi = t;
-          for (int k = 0; k < 8; k++) {
-            float mid = 0.5*(lo + hi); vec3 pm = ro + mid*rd; vec3 dm = dens(pm, nestW(pm));
-            if ((dm.x + dm.y)*uMpb >= bThr) hi = mid; else lo = mid;
-          }
-          // the thin stretch up to the surface with the last sample, then on from the surface
-          col = colP; trans = trP; tdone = tdP;
-          if (bP > 1e-6) { float a = 1.0 - exp(-bP*(hi - tP)); col += trans*a*cP; trans *= 1.0 - a; }
-          tP = hi; bP = 0.0; colP = col; trP = trans; tdP = tdone;
-          dtSub = 0.25*dtMin; sub = 12; refines++; t = hi; continue;
+      float w = nestW(p), dtB = w > 0.0 ? dtN : dtP, bThr = 0.3/dtB;
+      vec2 v = bytesAt(p, w), e = extAt(v);
+      float b = e.x + e.y;
+      if (uDbg != 4 && sub == 0 && refines < 6 && bP < bThr && b >= bThr && t - tP > 0.2*dtB) {
+        float lo = tP, hi = t;
+        for (int k = 0; k < 8; k++) {
+          float mid = 0.5*(lo + hi); vec3 pm = ro + mid*rd; vec2 em = extAt(bytesAt(pm, nestW(pm)));
+          if (em.x + em.y >= bThr) hi = mid; else lo = mid;
         }
-        dt = clamp(0.25/max(b, 1e-6), dtMin, 4.0*dtMin);
+        t = hi; p = ro + t*rd; w = nestW(p); v = bytesAt(p, w); e = extAt(v); b = e.x + e.y;
+        sub = 12; refines++; nref = refines;
       }
-      tP = t; bP = b; colP = col; trP = trans; tdP = tdone; cP = vec3(0.0);
-      if (b > 1e-6) {
-        vec2 L = lightAt(p, w);
-        float a = 1.0 - exp(-b*dt);
-        vec3 cc = sunCol*(L.r*phase + 0.3*sqrt(L.r)) + ambCol*(0.36 + 0.5*L.g);
-        vec3 cp = uMode == 0 ? vec3(0.46,0.54,0.66)*(0.35 + 0.65*L.r) + ambCol*0.1 : (uMode == 1 ? vec3(1.0,0.45,0.2) : vec3(0.35,0.55,1.0));
-        cP = (cc*d.x + cp*d.y)/(d.x + d.y);
-        col += trans*a*cP; trans *= 1.0-a;
+      vec3 c = b > 1e-6 ? shade(p, w, e, phase) : vec3(0.0);
+      if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
+      float len = t - tP;
+      vec2 vM = vec2(0.0);
+      if (len > 0.0 && (vP.x + vP.y + v.x + v.y) > 0.0) { vec3 pm = ro + (t - 0.5*len)*rd; vM = bytesAt(pm, nestW(pm)); }
+      vec2 es = extSeg(vP, vM, v);
+      float bm = es.x + es.y;
+      if (bm > 1e-9 && len > 0.0) {
+        float a = 1.0 - exp(-bm*len);
+        col += trans*a*(bP*cP + b*c)/max(bP + b, 1e-9); trans *= 1.0 - a;
       }
-      t += dt;
+      tP = t; bP = b; vP = v; cP = c;
+      // very long rays (grazing through wide thin cloud) lengthen their steps gradually toward the loop's end
+      if (sub > 0) { sub--; t += 0.25*dtB; } else t += dtB*(1.0 + max(0.0, float(i - 320))/160.0);
     }
   }
   if (!tdone) { col += trans*tc.rgb; trans *= 1.0 - tc.a; }
@@ -182,6 +201,7 @@ void main(){
   // soft shoulder for the bright sunlit tops
   col = vec3(1.0) - exp(-col*1.3);
   o = vec4(col, 1.0);
+  if (uDbg == 1) o = vec4(float(iters)/640.0, float(nref)/6.0, 0.0, 1.0);
 }`;
 
 // tracer lines / points: colour by height (orange near the ground, pale yellow aloft), alpha fades along the trail
@@ -200,6 +220,9 @@ void main(){
   oD = vec4(h / 255.0, (v - h * 256.0) / 255.0, 0.0, 1.0);
 }`;
 const TRAIL = 8;
+/** page address with ?vdebug=1: the 3-D view shows each ray's step count instead of the picture; 2: every ray starts its
+ *  clear-air steps at the same offset (tests: the picture must not depend on where the steps fall) */
+const DEBUG_MODE = typeof location !== 'undefined' ? Number(/[?&]vdebug=(\d)/.exec(location.search)?.[1] ?? 0) : 0;
 
 /** Cutaway of the 3-D view: the plane and which side stays (positions as fractions of the domain; x east, y north). */
 export interface Cut {
@@ -226,7 +249,7 @@ export class VolumeView {
   private readonly nLight: WebGLTexture;
   private readonly occ: WebGLTexture;
   /** occupancy grid: texture coordinate scale and the clear-air step (box units) */
-  private occScale: V3 = [1, 1, 1]; private occStep = 0.01;
+  private occScale: V3 = [1, 1, 1]; private occBlock: V3 = [0.01, 0.01, 0.01];
   /** the eye nest (box units: x0, y0, width; cylinder centre, radius, taper), or null */
   private nest: { nx: number; nz: number; cloud: Uint8Array; x0: number; y0: number; L: number; cx: number; cy: number; R: number; Wf: number } | null = null;
   /** optical depth toward the sun of every outer voxel ([k][j][i]), from the last lighting (the nest's rays leave its box into it) */
@@ -560,37 +583,13 @@ export class VolumeView {
   }
   /**
    * Occupancy grid for skipping clear air: blocks of B x B cells across and Bz levels (about as tall as wide in the
-   * box), 255 where the block or any of its 26 neighbours holds any cloud or second-channel value (outer grid or nest),
+   * box, at most 4 levels: a thin layer near the ground leaves the air above it clear), 255 where the block or any of its 26 neighbours holds any cloud or second-channel value (outer grid or nest),
    * 0 elsewhere. A ray in an empty block may step up to a block length without passing any cloud (the trilinear
    * sampling reaches one cell into a neighbour, which is empty as well).
    */
   private buildOccupancy(nx: number, ny: number, nz: number, cloud: Uint8Array, rain: Uint8Array, nest: NestVolume | null): void {
-    const gl = this.gl, [bx, by, bz] = this.box, B = 8, Bz = Math.max(1, Math.min(16, Math.round(B * (bx / nx) / (bz / nz))));
-    const mx = Math.ceil(nx / B), my = Math.ceil(ny / B), mz = Math.ceil(nz / Bz), raw = new Uint8Array(mx * my * mz);
-    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {
-      const o = (k * ny + j) * nx, ob = (Math.floor(k / Bz) * my + Math.floor(j / B)) * mx;
-      for (let i = 0; i < nx; i++) if (cloud[o + i] || rain[o + i]) raw[ob + Math.floor(i / B)] = 1;
-    }
-    if (nest) {
-      const cn = nest.nx, cz = nest.nz, u = 1 / nest.Lx;
-      for (let k = 0; k < cz; k++) {
-        const kb = Math.min(mz - 1, Math.floor(((k + 0.5) / cz * nz) / Bz));
-        for (let j = 0; j < cn; j++) {
-          const jb = Math.max(0, Math.min(my - 1, Math.floor(((nest.y0 + (j + 0.5) / cn * nest.L) * u / by * ny) / B))), o = (k * cn + j) * cn;
-          for (let i = 0; i < cn; i++) if (nest.cloud[o + i] || nest.rain[o + i]) {
-            const ib = Math.max(0, Math.min(mx - 1, Math.floor(((nest.x0 + (i + 0.5) / cn * nest.L) * u / bx * nx) / B)));
-            raw[(kb * my + jb) * mx + ib] = 1;
-          }
-        }
-      }
-    }
-    const occ = new Uint8Array(mx * my * mz);
-    for (let k = 0; k < mz; k++) for (let j = 0; j < my; j++) for (let i = 0; i < mx; i++) {
-      let any = 0;
-      for (let c = Math.max(0, k - 1); c <= Math.min(mz - 1, k + 1) && !any; c++) for (let b = Math.max(0, j - 1); b <= Math.min(my - 1, j + 1) && !any; b++)
-        for (let a = Math.max(0, i - 1); a <= Math.min(mx - 1, i + 1); a++) if (raw[(c * my + b) * mx + a]) { any = 1; break; }
-      occ[(k * my + j) * mx + i] = any ? 255 : 0;
-    }
+    const gl = this.gl, [bx, by, bz] = this.box, B = 8, Bz = Math.max(1, Math.min(4, Math.round(B * (bx / nx) / (bz / nz))));
+    const { occ, mx, my, mz } = occupancyGrid(nx, ny, nz, cloud, rain, B, Bz, nest);
     gl.bindTexture(gl.TEXTURE_3D, this.occ);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, mx, my, mz, 0, gl.RED, gl.UNSIGNED_BYTE, occ);
@@ -598,7 +597,7 @@ export class VolumeView {
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
     this.occScale = [nx / (mx * B), ny / (my * B), nz / (mz * Bz)];
-    this.occStep = 0.95 * Math.min(B * bx / nx, B * by / ny, Bz * bz / nz);
+    this.occBlock = [B * bx / nx, B * by / ny, Bz * bz / nz];
   }
 
   /** Drop the eye nest's volume (the nest stopped). */
@@ -610,46 +609,11 @@ export class VolumeView {
    * this layer's transmittance) and one straight down. Optical depths in physical vertical metres.
    */
   private computeLight(): void {
-    const d = this.data, gl = this.gl; if (!d) return;
-    const { nx, ny, nz, top } = d, np = nx * ny, k = this.kExt, [bx, by, bz] = this.box;
-    // a cutaway: the removed part casts no shadow
-    let cloud = d.cloud;
-    const cp = this.cutPlane();
-    if (cp) {
-      cloud = Uint8Array.from(cloud);
-      for (let kk = 0; kk < nz; kk++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-        if (cp.n[0] * (i + 0.5) / nx * bx + cp.n[1] * (j + 0.5) / ny * by + cp.n[2] * (kk + 0.5) / nz * bz > cp.d) cloud[(kk * ny + j) * nx + i] = 0;
-      }
-    }
-    const lut = new Float32Array(256); for (let v = 0; v < 256; v++) lut[v] = EXT_MAX * (v / 255) ** 3 * k;
-    const dzm = top / nz, s = SUN;
-    // horizontal shift toward the sun per level (cells) and the slant path per level (m)
-    const di = (bz / nz) * s[0] / s[2] / (bx / nx), dj = (bz / nz) * s[1] / s[2] / (by / ny), slant = dzm / s[2];
-    let od = new Float32Array(np), prev = new Float32Array(np);
-    const sky = new Float32Array(np), out = new Uint8Array(2 * nz * np), all = this.nest ? new Float32Array(nz * np) : null;
-    const put = (kk: number): void => {
-      const o = kk * np;
-      for (let c = 0; c < np; c++) { out[2 * (o + c)] = Math.round(255 * Math.exp(-od[c]!)); out[2 * (o + c) + 1] = Math.round(255 * Math.exp(-sky[c]!)); }
-      all?.set(od, o);
-    };
-    { const o = (nz - 1) * np; for (let c = 0; c < np; c++) { const b = lut[cloud[o + c]!]!; od[c] = 0.5 * b * slant; sky[c] = 0.5 * b * dzm; } put(nz - 1); }
-    for (let kk = nz - 2; kk >= 0; kk--) {
-      [od, prev] = [prev, od];
-      const o = kk * np, oa = (kk + 1) * np;
-      for (let j = 0; j < ny; j++) {
-        const y = Math.max(0, Math.min(ny - 1, j + dj)), j0 = Math.min(ny - 2, Math.floor(y)), fy = ny > 1 ? y - j0 : 0;
-        for (let i = 0; i < nx; i++) {
-          const x = Math.max(0, Math.min(nx - 1, i + di)), i0 = Math.min(nx - 2, Math.floor(x)), fx = nx > 1 ? x - i0 : 0;
-          const a = j0 * nx + i0, above = (prev[a]! * (1 - fx) + prev[a + 1]! * fx) * (1 - fy) + (prev[a + nx]! * (1 - fx) + prev[a + nx + 1]! * fx) * fy;
-          const c = j * nx + i, b = 0.5 * (lut[cloud[o + c]!]! + lut[cloud[oa + c]!]!);
-          od[c] = above + b * slant; sky[c] = sky[c]! + b * dzm;
-        }
-      }
-      put(kk);
-    }
-    this.uploadLight(this.light, nx, ny, nz, out);
-    this.odAll = all;
-    this.kLight = k;
+    const d = this.data; if (!d) return;
+    const { out, od } = sunSkyLight(d.nx, d.ny, d.nz, d.cloud, this.box, d.top, SUN, this.kExt, this.cutPlane(), !!this.nest);
+    this.uploadLight(this.light, d.nx, d.ny, d.nz, out);
+    this.odAll = od;
+    this.kLight = this.kExt;
     this.computeNestLight();
   }
   /** Upload a light volume with its mipmaps (the shader reads it between the first two levels: soft shadow edges). */
@@ -671,52 +635,8 @@ export class VolumeView {
    */
   private computeNestLight(): void {
     const n = this.nest, d = this.data, all = this.odAll; if (!n || !d || !all) return;
-    const { nx: cn, nz: cz } = n, np = cn * cn, [bx, by, bz] = this.box, k = this.kExt, s = SUN;
-    let cloud = n.cloud;
-    const cp = this.cutPlane();
-    if (cp) {
-      cloud = Uint8Array.from(cloud);
-      for (let kk = 0; kk < cz; kk++) for (let j = 0; j < cn; j++) for (let i = 0; i < cn; i++) {
-        if (cp.n[0] * (n.x0 + (i + 0.5) / cn * n.L) + cp.n[1] * (n.y0 + (j + 0.5) / cn * n.L) + cp.n[2] * (kk + 0.5) / cz * bz > cp.d) cloud[(kk * cn + j) * cn + i] = 0;
-      }
-    }
-    const lut = new Float32Array(256); for (let v = 0; v < 256; v++) lut[v] = EXT_MAX * (v / 255) ** 3 * k;
-    const dzm = d.top / cz, cell = n.L / cn, di = (bz / cz) * s[0] / s[2] / cell, dj = (bz / cz) * s[1] / s[2] / cell, slant = dzm / s[2];
-    // the outer grid's optical depth at box point (x, y) and height fraction zf (bilinear across, linear between levels)
-    const onx = d.nx, ony = d.ny, onz = d.nz, onp = onx * ony;
-    const outer = (x: number, y: number, zf: number): number => {
-      const fx = Math.max(0, Math.min(onx - 1, x / bx * onx - 0.5)), fy = Math.max(0, Math.min(ony - 1, y / by * ony - 0.5)), fz = Math.max(0, Math.min(onz - 1, zf * onz - 0.5));
-      const i0 = Math.min(onx - 2, Math.floor(fx)), j0 = Math.min(ony - 2, Math.floor(fy)), k0 = Math.min(onz - 2, Math.floor(fz));
-      const wx = onx > 1 ? fx - i0 : 0, wy = ony > 1 ? fy - j0 : 0, wz = onz > 1 ? fz - k0 : 0;
-      const at = (kk: number): number => {
-        const o = Math.max(0, kk) * onp + Math.max(0, j0) * onx + Math.max(0, i0);
-        return (all[o]! * (1 - wx) + all[o + (onx > 1 ? 1 : 0)]! * wx) * (1 - wy) + (all[o + (ony > 1 ? onx : 0)]! * (1 - wx) + all[o + (ony > 1 ? onx : 0) + (onx > 1 ? 1 : 0)]! * wx) * wy;
-      };
-      return onz > 1 ? at(k0) * (1 - wz) + at(k0 + 1) * wz : at(0);
-    };
-    let od = new Float32Array(np), prev = new Float32Array(np);
-    const sky = new Float32Array(np), out = new Uint8Array(2 * cz * np);
-    const put = (kk: number): void => { const o = kk * np; for (let c = 0; c < np; c++) { out[2 * (o + c)] = Math.round(255 * Math.exp(-od[c]!)); out[2 * (o + c) + 1] = Math.round(255 * Math.exp(-sky[c]!)); } };
-    { const o = (cz - 1) * np; for (let c = 0; c < np; c++) { const b = lut[cloud[o + c]!]!; od[c] = 0.5 * b * slant; sky[c] = 0.5 * b * dzm; } put(cz - 1); }
-    for (let kk = cz - 2; kk >= 0; kk--) {
-      [od, prev] = [prev, od];
-      const o = kk * np, oa = (kk + 1) * np, zfa = (kk + 1.5) / cz;
-      for (let j = 0; j < cn; j++) {
-        const y = j + dj, inY = y >= 0 && y <= cn - 1, j0 = Math.min(cn - 2, Math.max(0, Math.floor(y))), fy = y - j0;
-        for (let i = 0; i < cn; i++) {
-          const x = i + di;
-          let above: number;
-          if (inY && x >= 0 && x <= cn - 1) {
-            const i0 = Math.min(cn - 2, Math.max(0, Math.floor(x))), fx = x - i0, a = j0 * cn + i0;
-            above = (prev[a]! * (1 - fx) + prev[a + 1]! * fx) * (1 - fy) + (prev[a + cn]! * (1 - fx) + prev[a + cn + 1]! * fx) * fy;
-          } else above = outer(n.x0 + (x + 0.5) * cell, n.y0 + (y + 0.5) * cell, zfa);
-          const c = j * cn + i, b = 0.5 * (lut[cloud[o + c]!]! + lut[cloud[oa + c]!]!);
-          od[c] = above + b * slant; sky[c] = sky[c]! + b * dzm;
-        }
-      }
-      put(kk);
-    }
-    this.uploadLight(this.nLight, cn, cn, cz, out);
+    const out = nestSunSkyLight(n, { nx: d.nx, ny: d.ny, nz: d.nz, top: d.top, od: all }, this.box, SUN, this.kExt, this.cutPlane());
+    this.uploadLight(this.nLight, n.nx, n.nx, n.nz, out);
   }
 
   /** Tracer particles (x, y, z in m and age per particle; null: none) in a domain of Lx x Ly x top. */
@@ -870,17 +790,39 @@ export class VolumeView {
     const scale = Math.min(Math.min(1.5, window.devicePixelRatio || 1), Math.sqrt(9e5 / (cssW * cssH)));
     const w = Math.max(1, Math.round(cssW * scale)), h = Math.max(1, Math.round(cssH * scale));
     if (c.width !== w || c.height !== h) { c.width = w; c.height = h; this.dirty = true; }
-    if (!this.dirty) return;
+    // while the camera moves, a quarter of the pixels (half across and up, scaled up): turning and zooming stay fluid;
+    // the full picture once it has stood still for a moment
+    const { eye, f, r, u: up } = this.basis();
+    const sig = `${eye.map((x) => x.toFixed(5)).join()},${f.map((x) => x.toFixed(5)).join()},${this.fov}`;
+    if (sig !== this.camSig) { this.camSig = sig; this.movedAt = now; }
+    const moving = now - this.movedAt < 200;
+    if (!this.dirty && !(this.lowShown && !moving)) return;
     this.dirty = false;
-    gl.viewport(0, 0, w, h);
+    const low = moving && w * h > 2e5, lw = low ? Math.max(1, Math.round(w / 2)) : w, lh = low ? Math.max(1, Math.round(h / 2)) : h;
+    this.lowShown = low;
     gl.useProgram(this.prog);
     const [bx, by, bz] = this.box;
-    const { eye, f, r, u: up } = this.basis();
     const vp = viewProj(eye, f, r, up, w / h, this.fov);
     const inv = invert4(vp);
     this.lastInv = inv; this.lastEye = eye; this.lastVP = vp;
     const trOn = this.tracerPass(vp, eye, w, h);
-    gl.viewport(0, 0, w, h);
+    if (low) {
+      let l = this.lowFbo;
+      if (!l || l.w !== lw || l.h !== lh) {
+        if (l) { gl.deleteFramebuffer(l.fb); gl.deleteTexture(l.t); }
+        const t = gl.createTexture()!;
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lw, lh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        const fb = gl.createFramebuffer()!;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+        l = this.lowFbo = { fb, t, w: lw, h: lh };
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, l.fb);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    } else gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, lw, lh);
     gl.useProgram(this.prog);
     const u = (n: string): WebGLUniformLocation => gl.getUniformLocation(this.prog, n)!;
     gl.uniformMatrix4fv(u('uInvVP'), false, inv);
@@ -909,7 +851,8 @@ export class VolumeView {
     gl.uniform1f(u('uNCellZ'), nt ? bz / nt.nz : 0.01);
     gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_3D, this.occ); gl.uniform1i(u('uOcc'), 7);
     gl.uniform3f(u('uOccScale'), this.occScale[0], this.occScale[1], this.occScale[2]);
-    gl.uniform1f(u('uOccStep'), this.occStep);
+    gl.uniform3f(u('uOccBlock'), this.occBlock[0], this.occBlock[1], this.occBlock[2]);
+    gl.uniform1i(u('uDbg'), DEBUG_MODE);
     gl.uniform1i(u('uTrOn'), trOn ? 1 : 0);
     if (trOn) {
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.trFbo!.c); gl.uniform1i(u('uTrC'), 2);
@@ -919,10 +862,18 @@ export class VolumeView {
       gl.uniform1i(u('uTrC'), 1); gl.uniform1i(u('uTrD'), 1);
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (low) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.lowFbo!.fb);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.blitFramebuffer(0, 0, lw, lh, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
   }
+  /** camera of the last drawn picture, when it last changed (ms), whether a reduced picture is on screen, its buffer */
+  private camSig = ''; private movedAt = 0; private lowShown = false;
+  private lowFbo: { fb: WebGLFramebuffer; t: WebGLTexture; w: number; h: number } | null = null;
 }
 
-type V3 = [number, number, number];
 /** View-projection matrix (column-major) of an eye with forward f, right s and up u axes. */
 function viewProj(eye: V3, f: V3, s: V3, u: V3, aspect: number, fov: number): Float32Array {
   const view = [s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0, -dot(s, eye), -dot(u, eye), dot(f, eye), 1];

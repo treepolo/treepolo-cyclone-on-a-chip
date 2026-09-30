@@ -511,6 +511,21 @@ export async function regionalChartsTest(): Promise<void> {
   gcheck('charts: column-max reflectivity within 0.05 dBZ, cloud-top height identical in 99 % of columns', dz2 < 0.05 && ctzMis <= 0.01 * nx * nx, `${dz2.toExponential(2)} dB, ${ctzMis} columns differ`);
   const uh = rel(C.uh), cape = rel(C.cape), cin = rel(C.cin);
   gcheck('charts: updraft helicity rel L2 < 1e-3, CAPE < 1e-2, CIN < 5e-2', uh < 1e-3 && cape < 1e-2 && cin < 5e-2, `${uh.toExponential(1)} ${cape.toExponential(1)} ${cin.toExponential(1)}`);
+  {
+    // severe-weather indices: wind indices from the same interpolated samples, echo top, VIL, LCL and lifted index
+    const wind = [C.shear, C.srh1, C.srh3].map(rel), vil = rel(C.vil);
+    let lclMis = 0, etMis = 0, liErr = 0, srhMax = 0, shMax = 0, vilMax = 0, etMax = 0;
+    for (let q = 0; q < nx * nx; q++) {
+      const o = COL * q;
+      if (d.col[o + C.lcl] !== cpu[o + C.lcl]) lclMis++;
+      if (d.col[o + C.etop] !== cpu[o + C.etop]) etMis++;
+      liErr = Math.max(liErr, Math.abs(d.col[o + C.li]! - cpu[o + C.li]!));
+      srhMax = Math.max(srhMax, Math.abs(cpu[o + C.srh3]!)); shMax = Math.max(shMax, cpu[o + C.shear]!); vilMax = Math.max(vilMax, cpu[o + C.vil]!); etMax = Math.max(etMax, cpu[o + C.etop]!);
+    }
+    gcheck('charts: GPU 0-6 km shear, 0-1 / 0-3 km helicity (rel L2 < 1e-4) and VIL (< 1e-3) match the CPU; LCL and echo top identical in 98 % of columns, lifted index within 0.02 K; all present',
+      wind.every((x) => x < 1e-4) && vil < 1e-3 && lclMis <= 0.02 * nx * nx && etMis <= 0.02 * nx * nx && liErr < 0.02 && srhMax > 10 && shMax > 10 && vilMax > 1 && etMax > 5000,
+      `${wind.map((x) => x.toExponential(1)).join(' ')} ${vil.toExponential(1)}; LCL ${lclMis}, echo top ${etMis} columns differ, LI ${liErr.toExponential(1)} K; SRH ${srhMax.toFixed(0)} m2/s2, shear ${shMax.toFixed(1)} m/s, VIL ${vilMax.toFixed(1)} kg/m2, echo top ${(etMax / 1000).toFixed(1)} km`);
+  }
   let capeMax = 0, uhMax = 0, dbzMax = 0;
   for (let q = 0; q < nx * nx; q++) { capeMax = Math.max(capeMax, cpu[COL * q + C.cape]!); uhMax = Math.max(uhMax, Math.abs(cpu[COL * q + C.uh]!)); dbzMax = Math.max(dbzMax, cpu[COL * q + C.dbz]!); }
   gcheck('charts: test storm exercises the paths (CAPE > 1000 J/kg, |UH| > 1 m2/s2, > 40 dBZ)', capeMax > 1000 && uhMax > 1 && dbzMax > 40, `CAPE ${capeMax.toFixed(0)} J/kg, UH ${uhMax.toFixed(1)}, ${dbzMax.toFixed(1)} dBZ`);
@@ -550,5 +565,68 @@ export async function regionalChartsTest(): Promise<void> {
   }
   // WGSL sin / cos are only accurate to about 2^-11 (absolute): metres over a 15 km seeding radius
   gcheck('tracers: re-seeding matches the CPU (positions < 10 m, all re-seeded in the lowest 2 km)', dmax < 10 && inLayer, `${dmax.toExponential(2)} m ${worst}`);
+  g.destroy();
+}
+
+// Interactions made on the GPU (GpuRegional.edit, windOnce) against the same changes to the CPU model (worker.ts), and
+// the GPU copy of the state for the undo
+export async function regionalEditTest(): Promise<void> {
+  const device = await getDevice();
+  const cfg = { nx: 24, ny: 24, nz: 16, dx: 3000, dy: 3000, dz: 800, dt: 8, nsound: 6, f: 5e-5, beta: 0.2, divDamp: 0.1, dampDepth: 3000, dampRate: 1 / 300, kdiff2: 0, lateral: 'periodic' as const };
+  const m = new RegionalModel(cfg, weismanKlemp, 3), mp = new KesslerMicrophysics(m);
+  m.setBaseWind((z) => ({ u: 4 * Math.tanh(z / 3000), v: -1 }));
+  for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {
+    const q = m.idx(i, j, k), r = Math.hypot(((i + 0.5) * 3000 - 36000) / 9000, ((j + 0.5) * 3000 - 36000) / 9000, (m.zc[k]! - 1500) / 1500);
+    m.scalars[QV]![q] = m.qv0[k]!;
+    if (r < 1) m.th[q] = m.th[q]! + 2 * Math.cos(0.5 * Math.PI * r) ** 2;
+  }
+  for (let s = 0; s < 20; s++) { m.step(); mp.apply(8); }
+  const g = new GpuRegional(device, m, { moist: true, physics: null });
+  g.uploadFrom(m);
+  const before = await g.readState();
+  // the CPU changes (as worker.ts interact): a warm bubble seen from an origin offset (ox, oy), drying capped at
+  // saturation across the periodic edge, a one-time rotating wind
+  const bub = { x: 40000, y: 30000, z: 1800, rh: 12000, rz: 1500, amp: 3, cap: 6, ox: -4000, oy: 2000 };
+  for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {
+    const r = Math.sqrt(((bub.ox + (i + 0.5) * 3000 - bub.x) / bub.rh) ** 2 + ((bub.oy + (j + 0.5) * 3000 - bub.y) / bub.rh) ** 2 + ((m.zc[k]! - bub.z) / bub.rz) ** 2);
+    if (r >= 1) continue;
+    const q = m.idx(i, j, k), d = bub.amp * Math.cos(0.5 * Math.PI * r) ** 2, room = m.th0[k]! + bub.cap - m.th[q]!;
+    m.th[q] = m.th[q]! + Math.max(0, Math.min(d, room));
+  }
+  const mo = { x: 70000, y: 5000, z: 2500, R: 15000, H: 2000, fac: 0.6 }, qv = m.scalars[QV]!;
+  for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {
+    let ex = (i + 0.5) * 3000 - mo.x, ey = (j + 0.5) * 3000 - mo.y;
+    ex -= Math.round(ex / 72000) * 72000; ey -= Math.round(ey / 72000) * 72000;
+    const rh = Math.hypot(ex, ey) / mo.R, rz = Math.abs(m.zc[k]! - mo.z) / mo.H;
+    if (rh >= 1 || rz >= 1) continue;
+    const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = m.idx(i, j, k);
+    const pi = m.pi0[k]! + m.pp[q]!, T = m.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
+    qv[q] = Math.max(0, Math.min(qv[q]! * (1 + (mo.fac - 1) * e), Math.max(qv[q]!, 0.622 * es / Math.max(p - es, 1))));
+  }
+  const wf: WindForcing = { x: 30000, y: 40000, z: 2000, R: 15000, H: 1500, speed: 8, dir: [0, 0, 0], form: 'rotate', sign: 1 };
+  applyWind(m, [wf], 'once');
+  g.edit({ kind: 'bubble', ...bub, warm: true });
+  g.edit({ kind: 'moisture', ...mo, ox: 0, oy: 0 });
+  g.windOnce(wf);
+  const st = await g.readState();
+  const eTh = cmp(m, st, 3, m.th, cfg.nz), eQv = cmp(m, st, 5, qv, cfg.nz), eU = cmp(m, st, 0, m.u, cfg.nz), eV = cmp(m, st, 1, m.v, cfg.nz);
+  let mU = 0, mV = 0, mQ = 0, wV = 0, wQ = 0;
+  for (let q = 0; q < m.size; q++) {
+    const a = Math.abs(st[q]! - m.u[q]!), b = Math.abs(st[m.size + q]! - m.v[q]!), c = Math.abs(st[5 * m.size + q]! - qv[q]!);
+    if (a > mU) mU = a; if (b > mV) { mV = b; wV = q; } if (c > mQ) { mQ = c; wQ = q; }
+  }
+  const detail = `max abs: u ${mU.toExponential(2)} v ${mV.toExponential(2)} (k ${Math.floor(wV / m.plane)}: gpu ${st[m.size + wV]!.toFixed(5)} cpu ${m.v[wV]!.toFixed(5)} before ${before[m.size + wV]!.toFixed(5)}) qv ${mQ.toExponential(2)} (k ${Math.floor(wQ / m.plane)}: gpu ${st[5 * m.size + wQ]!.toExponential(4)} cpu ${qv[wQ]!.toExponential(4)} before ${before[5 * m.size + wQ]!.toExponential(4)})`;
+  let dTh = 0, dQv = 0;
+  for (let q = 0; q < m.size; q++) { dTh = Math.max(dTh, Math.abs(st[3 * m.size + q]! - before[3 * m.size + q]!)); dQv = Math.max(dQv, before[5 * m.size + q]! - st[5 * m.size + q]!); }
+  // (WGSL's sin and cos may err by 2^-11 absolute: the envelope, so each change, by about 5e-4 of itself)
+  gcheck('interactions on the GPU: warm bubble (offset origin), drying across the periodic edge and a one-time rotating wind match the CPU changes (theta rel L2 < 1e-5, qv, u, v < 1e-4)',
+    eTh < 1e-5 && eQv < 1e-4 && eU < 1e-4 && eV < 1e-4 && dTh > 1 && dQv > 1e-4, `theta ${eTh.toExponential(1)}, qv ${eQv.toExponential(1)}, u ${eU.toExponential(1)}, v ${eV.toExponential(1)}; changes ${dTh.toFixed(2)} K, ${(dQv * 1000).toFixed(2)} g/kg; ${detail}`);
+  // undo: a copy on the GPU, restored exactly with the model time
+  g.snapshot();
+  const t0 = g.time, snap = await g.readState();
+  g.step(3); g.edit({ kind: 'bubble', ...bub, warm: false, amp: -5, cap: -10 });
+  const ok = g.restoreSnapshot(), back = await g.readState();
+  let eBack = 0; for (let q = 0; q < back.length; q++) eBack = Math.max(eBack, Math.abs(back[q]! - snap[q]!));
+  gcheck('interactions on the GPU: the copy of the state is restored exactly (and the time)', ok && eBack === 0 && g.time === t0, `max diff ${eBack}, time ${g.time} vs ${t0}`);
   g.destroy();
 }

@@ -20,7 +20,7 @@ import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcin
 import { volumeBytes } from '../../regional/display.js';
 import { EyeNest, syncModel } from './eyeNest.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
-import { C, COL as NCOL, SECTION_VARS, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
+import { C, COL as NCOL, SECTION_VARS, pressure, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
 let m: RegionalModel | null = null;
 let mp: IceMicrophysics | null = null;
@@ -31,6 +31,16 @@ let dpEnv = 0;
 let gpu: GpuRegional | null = null;
 let gpuDevice: GPUDevice | null = null;
 let busy = false;
+/** messages waiting for the model: the stepping loop does not start another batch while any waits, so a change the page
+ *  asks for is applied right after the batch in progress (not after however many batches win the race for the lock) */
+let waiting = 0;
+/** the stepping loop is only waiting for the GPU to finish a batch: a change made on the GPU can be queued now, without
+ *  the lock (commands run in order: right after the batch), and the next frame is sent as soon as the batch is done */
+let stepping = false, frameAsap = false;
+async function waitIdle(): Promise<void> {
+  waiting++;
+  try { while (busy) await new Promise((r) => setTimeout(r, 2)); } finally { waiting--; }
+}
 let gpuBatch = 2;
 const DEBUG = false;
 let physCfg: RegionalPhysicsConfig | null = null;
@@ -157,7 +167,10 @@ function advanceOrigin(): void {
   origin.x += frameVel.u * (t - originT); origin.y += frameVel.v * (t - originT);
   originT = t;
 }
-function resetOrigin(x = 0, y = 0): void { origin = { x, y }; originT = modelNow(); prevAcc = null; tcAcc = null; tcRain = null; undo = null; envDu = 0; }
+function resetOrigin(x = 0, y = 0): void { origin = { x, y }; originT = modelNow(); prevAcc = null; tcAcc = null; tcRain = null; undo = null; envDu = 0; swath = null; }
+/** swaths: running maxima per column since the run (or refinement) started, sampled at every frame: 2-5 km updraft
+ *  helicity (when the frame has the column composites) and the lowest level's ground-relative wind speed (m/s) */
+let swath: { uh: Float64Array; wind: Float64Array } | null = null;
 // precipitation rate from the change of the accumulation between frames
 let prevAcc: { t: number; rain: Float32Array } | null = null, lastRate: Float32Array | null = null;
 const currentGpu = (): GpuRegional | null => gpu;
@@ -186,7 +199,7 @@ function advectTracers(dt: number, nsteps: number): void {
 }
 async function refreshFrame(): Promise<void> {
   if (running || (!m && !axi)) return;
-  while (busy) await new Promise((r) => setTimeout(r, 5));
+  await waitIdle();
   busy = true;
   try { await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
   busy = false;
@@ -203,7 +216,9 @@ const CFL_TARGET = 0.8, CFL_MAX = 1.1;
 let adaptive = true, dt0 = 0;
 // Safety net for interactions: the state just before the last change (float32 copies, models up to 4 M cells) and the
 // model time of the change; a blow-up within a model hour of it restores this state and pauses.
-let undo: { t: number; arrays: Float32Array[]; rain: Float32Array; snow: Float32Array; ub: Float64Array; vb: Float64Array; bu: Float64Array | null; bqv: Float64Array | null; envDu: number } | null = null;
+let undo: { t: number; arrays: Float32Array[]; rain: Float32Array; snow: Float32Array; ub: Float64Array; vb: Float64Array; bu: Float64Array | null; bqv: Float64Array | null; envDu: number;
+  /** the GPU model holding the copy of the state (the change was made on the GPU), else null */
+  gpu: GpuRegional | null } | null = null;
 /** accumulated wind change of 'environment' interactions at 6 km (bounded to +-ENV_DU_MAX) */
 let envDu = 0;
 const ENV_DU_MAX = 30;
@@ -237,12 +252,32 @@ async function nestFit(): Promise<void> {
 function takeUndo(): void {
   if (!m || !mp || m.size * (5 + m.scalars.length) > 4e6 * 11) { undo = null; return; }
   undo = { t: m.time, arrays: [m.u, m.v, m.w, m.th, m.pp, ...m.scalars].map((a) => Float32Array.from(a)), rain: Float32Array.from(mp.rainAcc), snow: Float32Array.from(mp.snowAcc),
-    ub: Float64Array.from(m.ub), vb: Float64Array.from(m.vb), bu: m.boundary ? Float64Array.from(m.boundary.u) : null, bqv: m.boundary?.qv ? Float64Array.from(m.boundary.qv) : null, envDu };
+    ub: Float64Array.from(m.ub), vb: Float64Array.from(m.vb), bu: m.boundary ? Float64Array.from(m.boundary.u) : null, bqv: m.boundary?.qv ? Float64Array.from(m.boundary.qv) : null, envDu, gpu: null };
+}
+/** Keep the state before an interaction made on the GPU: a copy there (same size limit as takeUndo). */
+function takeUndoGpu(): void {
+  if (!m || !gpu || m.size * gpu.nf > 4e6 * 11) { undo = null; return; }
+  gpu.snapshot();
+  const none = new Float32Array(0);
+  undo = { t: gpu.time, arrays: [], rain: none, snow: none, ub: Float64Array.from(m.ub), vb: Float64Array.from(m.vb), bu: null, bqv: null, envDu, gpu };
 }
 /** Restore the state before the last interaction (after a blow-up); returns false without one. */
 async function restoreUndo(): Promise<boolean> {
   if (!undo || !m || !mp) return false;
   const u = undo; undo = null;
+  if (u.gpu) {
+    // a GPU copy: only while that GPU model is still the one running
+    if (u.gpu !== gpu || !gpu.restoreSnapshot()) return false;
+    envDu = u.envDu; m.time = u.t; m.c.dt = dt0; gpu.setDt(dt0);
+    if (eye) {
+      const g = eye.g;
+      await syncModel(gpu, m, mp);
+      stopNest();
+      try { await startNest(g.R, g.dx, g.dz, false); } catch (e) { post({ type: 'log', text: `眼區細化無法重建，已停止 / the eye nest could not be rebuilt: ${String((e as Error).message ?? e)}` }); }
+    }
+    gpuBatch = 1;
+    return true;
+  }
   [m.u, m.v, m.w, m.th, m.pp, ...m.scalars].forEach((a, f) => a.set(u.arrays[f]!));
   mp.rainAcc.set(u.rain); mp.snowAcc.set(u.snow);
   m.ub.set(u.ub); m.vb.set(u.vb);
@@ -394,7 +429,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
   try {
     if (msg.type === 'init' && presetById(msg.setup.preset)?.axi) {
       running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         stopNest(); gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
@@ -408,7 +443,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     }
     else if (msg.type === 'init') {
       running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
       axi = null;
@@ -431,7 +466,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     }
     else if (msg.type === 'initNest') {
       running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
       axi = null;
@@ -456,14 +491,14 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'frames') { frameMode = { kind: msg.kind, every: msg.every ?? 0 }; }
     else if (msg.type === 'step1' && axi) {
       if (running) return;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try { axi.step(1); await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
       busy = false;
     }
     else if (msg.type === 'step1') {
       if (running || !m || !mp) return;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         if (gpu) { const d1 = gpu.dt; stepGpu(1); advectTracers(d1, 1); await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); }
@@ -478,12 +513,12 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'volMode') { volMode = msg.mode | 0; await refreshFrame(); }
     else if (msg.type === 'subgrid') { subgrid = msg.on; await refreshFrame(); }
     else if (msg.type === 'tracers') {
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       tracerN = Math.max(0, Math.min(65536, msg.n | 0)); setupTracers(); await refreshFrame();
     }
     else if (msg.type === 'save' && axi) {
       const wasRunning = running; running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         const a = axi.ax, t = a.time;
@@ -497,7 +532,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'save') {
       if (!m || !mp) return;
       const wasRunning = running; running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         await syncFromGpu();
@@ -523,7 +558,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     }
     else if (msg.type === 'load') {
       running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         const { meta, arrays } = unpackSave(msg.buffer);
@@ -589,7 +624,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       if (!setup || experiment === 'nest' || axi || !m || !mp) return;
       if (msg.type === 'nestStop' && !eye) return;
       const wasRunning = running; running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         await syncFromGpu();
@@ -605,7 +640,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       if (!setup || experiment === 'nest' || axi || !m || !mp) return;
       if (!refinedSetup(setup)) return;
       const wasRunning = running; running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         await syncFromGpu();
@@ -656,7 +691,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       const parent = parents[parents.length - 1] ?? null, target = parent ? parent.setup : coarsenedSetup(setup);
       if (!target) return;
       const wasRunning = running; running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         await syncFromGpu();
@@ -714,12 +749,12 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     }
     else if (msg.type === 'adaptive') {
       adaptive = msg.on;
-      if (!adaptive && gpu) { while (busy) await new Promise((r) => setTimeout(r, 5)); gpu.setDt(dt0); await nestFit(); }
+      if (!adaptive && gpu) { await waitIdle(); gpu.setDt(dt0); await nestFit(); }
     }
     else if (msg.type === 'profile') {
       if (!gpu || !m) { post({ type: 'profile', text: '效能分析需要 WebGPU 後端 / profiling needs the WebGPU backend' }); return; }
       const wasRunning = running; running = false;
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       busy = true;
       try {
         const r = await gpu.profile(3), c = m.c;
@@ -735,18 +770,25 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'clearForcing') { clearForcings(); if (!running) await refreshFrame(); }
     else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment' || msg.type === 'moisture' || msg.type === 'wind') {
       if (!m || !mp) { post({ type: 'error', message: '這個實驗不支援此互動（軸對稱模式請改用參數面板）/ this experiment does not support this interaction (use the panel for the axisymmetric model)' }); return; }
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      if (gpu && stepping && msg.type !== 'environment') {
+        // at once, behind the steps in flight (no lock: nothing is read back or rebuilt)
+        try { const note = await interact(msg); if (note) post({ type: 'log', text: note }); frameAsap = true; }
+        catch (e) { post({ type: 'error', message: String(e) }); }
+        return;
+      }
+      await waitIdle();
       busy = true;
       try {
         const note = await interact(msg);
         if (note) post({ type: 'log', text: note });
         if (gpu) await adaptDt(); else cpuAdaptDt();
-        if (!running) await sendFrame();
+        // the change on screen now, running or not
+        await sendFrame();
       } catch (e) { post({ type: 'error', message: String(e) }); }
       busy = false;
     }
     else if (msg.type === 'boundary' && m && nestSpec && experiment === 'nest') {
-      while (busy) await new Promise((r) => setTimeout(r, 5));
+      await waitIdle();
       m.boundary = nestTargets(msg.payload, nestSpec, m);
       gpu?.setBoundary(m.boundary);
     }
@@ -755,7 +797,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
 
 async function loop(): Promise<void> {
   for (;;) {
-    if (axi && running && !busy) {
+    if (axi && running && !busy && !waiting) {
       busy = true;
       try {
         // steps for about 40 ms x the work setting, within the pacer's allowance
@@ -772,7 +814,7 @@ async function loop(): Promise<void> {
       } catch (e) { running = false; post({ type: 'error', message: String(e) }); }
       busy = false;
     }
-    else if (m && mp && running && !busy) {
+    else if (m && mp && running && !busy && !waiting) {
       busy = true;
       try {
         if (gpu) {
@@ -785,8 +827,9 @@ async function loop(): Promise<void> {
           const dtb = gpu.dt;
           stepGpu(nb); rateSteps += nb;
           advectTracers(nb * dtb, nb);
-          await gpu.device.queue.onSubmittedWorkDone();
-          await adaptDt();
+          // while the GPU works through the batch, changes from the page are queued right behind it (stepping)
+          stepping = true;
+          try { await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); } finally { stepping = false; }
           const el = performance.now() - t0, target = 60 * stepsPerTick;
           if (DEBUG) console.log(`DBG batch ${gpuBatch} steps ${el.toFixed(0)} ms`);
           const perStep = Math.max(el, 1) / nb;
@@ -809,7 +852,7 @@ async function loop(): Promise<void> {
         }
         if (forcings.length) expireForcings();
         if (tracker && m.time - lastTrack >= 600) { lastTrack = m.time; await followStorm(); }
-        if (running && frameDue()) { const tf = performance.now(); await sendFrame(); if (DEBUG) console.log(`DBG frame ${(performance.now() - tf).toFixed(0)} ms`); }
+        if (running && (frameDue() || frameAsap)) { const tf = performance.now(); await sendFrame(!!gpu); if (DEBUG) console.log(`DBG frame ${(performance.now() - tf).toFixed(0)} ms`); }
       } catch (e) { running = false; post({ type: 'error', message: String(e) }); }
       busy = false;
     }
@@ -877,6 +920,7 @@ async function moveDomain(a: { du: number; dv: number; di: number; dj: number })
   if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); eye?.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; if (physCfg) physCfg.frameVel = frameVel; }
   if (a.di || a.dj) {
     m.roll(a.di, a.dj, [mp.rainAcc, mp.snowAcc]); origin.x -= a.di * m.c.dx; origin.y -= a.dj * m.c.dy; prevAcc = null;
+    if (swath && swath.uh.length === m.c.nx * m.c.ny) { rollPlane(swath.uh, a.di, a.dj); rollPlane(swath.wind, a.di, a.dj); }
     // the ground stays put: painted sea and land move through the domain with the fields
     const sf = phys?.surface;
     if (sf && physCfg) { rollPlane(sf.tsk, a.di, a.dj); rollPlane(sf.wet, a.di, a.dj); physCfg.surface = { tsk: sf.tsk, wet: sf.wet }; }
@@ -973,8 +1017,10 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     eye?.surfaceFrom(mm, sf);
     return '';
   }
-  await syncFromGpu();
-  takeUndo();
+  // on the GPU the change is made there by small kernels (no read-back of the state, which takes long on large grids),
+  // with a GPU copy of the state kept for the undo; the environment change rebuilds the models from the CPU state
+  const onGpu = !!gpu && msg.type !== 'environment';
+  if (onGpu) takeUndoGpu(); else { await syncFromGpu(); takeUndo(); }
   gpuBatch = 1;
   const top = nz * mm.c.dz;
   const clampR = (r: number | undefined, d: number): number => Math.max(2 * dx, Math.min(0.45 * L, Number.isFinite(r) ? r! : d));
@@ -988,9 +1034,9 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const f: WindForcing = { x: msg.x, y: msg.y, z: Math.max(0, Math.min(top, msg.z || 0)), R, H, speed, dir, form: msg.form, sign: msg.sign === -1 ? -1 : 1 };
     const what = `${msg.form === 'push' ? '推送 / push' : msg.form === 'rotate' ? (f.sign > 0 ? '逆時針旋轉 / counter-clockwise' : '順時針旋轉 / clockwise') : (f.sign > 0 ? '輻合 / converging' : '輻散 / diverging')} ${speed.toFixed(0)} m/s`;
     if (msg.minutes === 0) {
-      applyWind(mm, [f], 'once');
-      if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
-      if (eye) { applyWind(eye.m, [{ ...f, x: f.x - eye.x0, y: f.y - eye.y0 }], 'once'); eye.upload(); }
+      const fe = eye ? { ...f, x: f.x - eye.x0, y: f.y - eye.y0 } : f;
+      if (onGpu) { gpu!.windOnce(f); eye?.gpu?.windOnce(fe); }
+      else { applyWind(mm, [f], 'once'); if (eye) applyWind(eye.m, [fe], 'once'); }
       return `一次風 / wind once: ${what} at (${(f.x / 1000).toFixed(0)}, ${(f.y / 1000).toFixed(0)}) km, ${(f.z / 1000).toFixed(1)} km high`;
     }
     if (forcings.length >= MAX_FORCINGS) forcings.shift();
@@ -1016,9 +1062,10 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
         qv[q] = Math.max(0, Math.min(qv[q]! * (1 + (fac - 1) * e), Math.max(qv[q]!, 0.622 * es / Math.max(p - es, 1))));
       }
     };
-    moisten(mm, 0, 0);
-    if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
-    if (eye) { moisten(eye.m, eye.x0, eye.y0); eye.upload(); }
+    if (onGpu) {
+      gpu!.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, fac, ox: 0, oy: 0 });
+      if (eye) eye.gpu?.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, fac, ox: eye.x0, oy: eye.y0 });
+    } else { moisten(mm, 0, 0); if (eye) moisten(eye.m, eye.x0, eye.y0); }
     return `${fac >= 1 ? '增濕 / moistened' : '變乾 / dried'} ×${fac} at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km, ${(msg.z / 1000).toFixed(1)} km high`;
   }
   if (msg.type === 'perturb') {
@@ -1040,9 +1087,10 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
         md.th[q] = md.th[q]! + (warm ? Math.max(0, Math.min(d, room)) : Math.min(0, Math.max(d, room)));
       }
     };
-    bubble(mm, 0, 0);
-    if (gpu) gpu.uploadFrom(mm, { rain: mp!.rainAcc, snow: mp!.snowAcc });
-    if (eye) { bubble(eye.m, eye.x0, eye.y0); eye.upload(); }
+    if (onGpu) {
+      gpu!.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, cap, warm, ox: 0, oy: 0 });
+      if (eye) eye.gpu?.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, cap, warm, ox: eye.x0, oy: eye.y0 });
+    } else { bubble(mm, 0, 0); if (eye) bubble(eye.m, eye.x0, eye.y0); }
     return `${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} ${amp >= 0 ? '+' : ''}${amp.toFixed(1)} K at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km, ${(zc / 1000).toFixed(1)} km high`;
   }
   // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km;
@@ -1095,9 +1143,11 @@ async function syncFromGpu(): Promise<void> {
 /** set by sendFrameRaw when the state is numerically unstable */
 let blowPending = false;
 /** Post a frame of the current state; a numerically unstable state is handled by blowUp instead. */
-async function sendFrame(): Promise<void> {
-  blowPending = false;
-  await sendFrameRaw();
+async function sendFrame(fast = false): Promise<void> {
+  blowPending = false; frameAsap = false;
+  // (fast: from the stepping loop, where changes may be queued while the frame is read back)
+  if (fast) stepping = true;
+  try { await sendFrameRaw(); } finally { stepping = false; }
   if (blowPending) { blowPending = false; await blowUp(); }
 }
 async function sendFrameRaw(): Promise<void> {
@@ -1148,10 +1198,11 @@ async function sendFrameRaw(): Promise<void> {
     m.time = tNow; m.steps = sNow;
     if (!Number.isFinite(wmax) || !Number.isFinite(wmin) || Math.max(wmax, -wmin) > W_BLOWUP) { blowPending = true; return; }
     if (!await nestVolume()) { blowPending = true; return; }
+    updateSwath(m, col);
     if (req) charts = await buildCharts(req, col, planeAt, sliceK, gpu);
     advanceOrigin();
     // keep the GPU busy while this frame is unpacked on the CPU
-    if (running && gpu === currentGpu()) { const dtb = gpu.dt; stepGpu(gpuBatch); rateSteps += gpuBatch; advectTracers(gpuBatch * dtb, gpuBatch); }
+    if (running && gpu === currentGpu() && !waiting) { const dtb = gpu.dt; stepGpu(gpuBatch); rateSteps += gpuBatch; advectTracers(gpuBatch * dtb, gpuBatch); }
     trOut = d.tracers ? d.tracers.slice() : null;
   } else {
     let bad = false;
@@ -1167,8 +1218,9 @@ async function sendFrameRaw(): Promise<void> {
       col = columnDiagnostics(m, subgrid);
       planeAt.set(0, modelPlanes(m, 0));
       if (sliceK >= 0) planeAt.set(sliceK, modelPlanes(m, sliceK));
+      updateSwath(m, col);
       charts = await buildCharts(req, col, planeAt, sliceK, null);
-    }
+    } else updateSwath(m, null);
     advanceOrigin();
     trOut = tracers ? tracers.pos.slice() : null;
   }
@@ -1242,6 +1294,19 @@ async function sendFrameRaw(): Promise<void> {
     origin: { ...origin }, charts, tracers: trOut, nest: nestOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt }, [...transfer]);
 }
 
+/** Update the swaths with this frame (col: its column composites, when it has them; the CPU backend computes them only
+ *  for the charts). */
+function updateSwath(mm: RegionalModel, col: Float32Array | null): void {
+  const { nx, ny } = mm.c;
+  if (!swath || swath.uh.length !== nx * ny) swath = { uh: new Float64Array(nx * ny), wind: new Float64Array(nx * ny) };
+  const sw = swath;
+  if (col) for (let c = 0; c < nx * ny; c++) sw.uh[c] = Math.max(sw.uh[c]!, col[NCOL * c + C.uh]!);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const q = mm.idx(i, j, 0), uc = 0.5 * (mm.u[q]! + mm.u[q + 1]!) + frameVel.u, vc = 0.5 * (mm.v[q]! + mm.v[q + mm.sx]!) + frameVel.v;
+    sw.wind[j * nx + i] = Math.max(sw.wind[j * nx + i]!, Math.hypot(uc, vc));
+  }
+}
+
 /** Core (< 60 km) and outer (100-300 km) mean precipitation rates around the centre (ic, jc) of the periodic domain, and the
  *  outer area fraction above 1 mm/h, over each completed model hour (as in runTropicalCyclone.js). */
 function tcRainUpdate(ic: number, jc: number): void {
@@ -1262,7 +1327,7 @@ function tcRainUpdate(ic: number, jc: number): void {
 function chartArrays(c: ChartData): Float32Array[] {
   const out: Float32Array[] = [];
   const add = (r: Record<string, Float32Array | undefined> | undefined | null): void => { if (r) for (const a of Object.values(r)) if (a) out.push(a); };
-  add(c.maps); add(c.slice?.vars); add(c.section?.vars); add(c.sounding?.vars); add(c.rz?.vars as Record<string, Float32Array> | undefined);
+  add(c.maps); if (c.tz) out.push(c.tz); if (c.p0) out.push(c.p0); add(c.slice?.vars); add(c.section?.vars); add(c.sounding?.vars); add(c.rz?.vars as Record<string, Float32Array> | undefined);
   return out;
 }
 
@@ -1280,10 +1345,14 @@ async function buildCharts(req: ChartRequest, col: Float32Array, planes: Map<num
   if (!prevAcc || t > prevAcc.t + 1e-6 || t < prevAcc.t) prevAcc = { t, rain: acc };
   const charts: ChartData = { maps: {}, slice: null, section: null, sounding: null, rz: null };
   const pl0 = planes.get(0) ?? modelPlanes(mm, 0);
-  if (req.maps.length) charts.maps = compositeMaps(mm, col, pl0, { rain: mpp.rainAcc, snow: mpp.snowAcc, rate: lastRate, cu: cuRate }, req.maps, frameVel);
+  if (req.maps.length) {
+    charts.maps = compositeMaps(mm, col, pl0, { rain: mpp.rainAcc, snow: mpp.snowAcc, rate: lastRate, cu: cuRate, uhMax: swath?.uh, windMax: swath?.wind }, req.maps, frameVel);
+    charts.tz = Float32Array.from({ length: nz }, (_, k) => mm.th0[k]! * mm.pi0[k]!);
+  }
   if (sliceK >= 0 && req.slice) {
     const pl = planes.get(sliceK) ?? modelPlanes(mm, sliceK);
     charts.slice = { k: sliceK, z: mm.zc[sliceK]!, vars: sliceFields(mm, pl, sliceK, req.slice.vars, frameVel) };
+    charts.p0 = Float32Array.from({ length: nz }, (_, k) => pressure(mm.pi0[k]!) / 100);
   }
   const cellOf = (x: number, y: number): { i: number; j: number } => ({ i: Math.max(0, Math.min(nx - 1, Math.floor(x / dx))), j: Math.max(0, Math.min(ny - 1, Math.floor(y / dy))) });
   const profiles = async (pts: { i: number; j: number }[]): Promise<{ cols: Float32Array; nf: number }> =>

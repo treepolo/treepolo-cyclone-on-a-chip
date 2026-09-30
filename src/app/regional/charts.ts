@@ -3,8 +3,9 @@
 // and Hovmoller diagrams. The worker computes the fields (GPU display kernels or the same diagnostics
 // on the CPU); this module only draws them and accumulates the time series.
 
-import { parcelAscent, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
+import { parcelAscent, windIndices, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { CameraMode, Cut } from './volume.js';
+import type { SatImage } from './satellite.js';
 import type { StormNow } from '../../regional/storms.js';
 import { type ChartRequest, type RegionalFrame, type RegionalExperiment, type TcRain } from './protocol.js';
 import { INK, SERIES, FONT, FONT_SMALL, type Rect, type Scale, type ScaleKind, colorOf, niceCeil, ticks, fmt, drawField, drawColorbar, drawAxes, drawContours, drawArrow, drawBarb, haloText, tooltip } from './chartDraw.js';
@@ -62,9 +63,30 @@ const VI: Record<string, VarInfo> = {
   cuRain: { label: '參數化對流降水率（積雲方案產生）/ Parameterized convective rain', unit: 'mm/h', scale: 'seq', lo: 0, clear: 0.05, gamma: 0.5, digits: 2 },
   div: { label: '水平輻散（高層正值 = 外流）/ Horizontal divergence (aloft positive = outflow)', unit: '10⁻⁵ s⁻¹', scale: 'div', digits: 1 },
   cond: { label: '總凝結物 / Total condensate', unit: 'g/kg', scale: 'seq', lo: 0, clear: 0.01, gamma: 0.5, digits: 2 },
+  sfcT: { label: '地面氣溫（最低層）/ Surface air temperature (lowest level)', unit: '°C', scale: 'seq', digits: 1 },
+  sfcTd: { label: '地面露點 / Surface dew point', unit: '°C', scale: 'seq', digits: 1 },
+  shear06: { label: '0–6 km 垂直風切 / 0–6 km bulk wind shear', unit: 'm/s', scale: 'seq', lo: 0, digits: 1 },
+  srh01: { label: '0–1 km 風暴相對螺旋度（Bunkers 右移胞）/ 0–1 km storm-relative helicity (Bunkers right mover)', unit: 'm²/s²', scale: 'div', digits: 0 },
+  srh03: { label: '0–3 km 風暴相對螺旋度（Bunkers 右移胞）/ 0–3 km storm-relative helicity (Bunkers right mover)', unit: 'm²/s²', scale: 'div', digits: 0 },
+  lcl: { label: '抬升凝結高度（地面氣塊）/ Lifting condensation level (surface parcel)', unit: 'km', scale: 'seq', lo: 0, digits: 2 },
+  li: { label: '舉升指數（500 hPa，負值 = 不穩定）/ Lifted index (500 hPa; negative = unstable)', unit: 'K', scale: 'div', digits: 1 },
+  stp: { label: '顯著龍捲參數 STP（固定層、地面氣塊）/ Significant tornado parameter (fixed layer, surface parcel)', unit: '', scale: 'seq', lo: 0, clear: 0.1, digits: 2 },
+  scp: { label: '超級胞綜合參數 SCP（固定層、地面氣塊）/ Supercell composite parameter (fixed layer, surface parcel)', unit: '', scale: 'div', digits: 1 },
+  etop: { label: '回波頂高（18 dBZ）/ Echo top (18 dBZ)', unit: 'km', scale: 'seq', lo: 0, clear: 0.01, digits: 1 },
+  vil: { label: '垂直累積液態水 VIL / Vertically integrated liquid', unit: 'kg/m²', scale: 'seq', lo: 0, clear: 0.5, gamma: 0.5, digits: 1 },
+  uhSwath: { label: '上升氣流螺旋度軌跡（開始以來最大值）/ Updraft-helicity swath (maximum so far)', unit: 'm²/s²', scale: 'seq', lo: 0, clear: 5, gamma: 0.6, digits: 0 },
+  windSwath: { label: '地面最大風速軌跡（開始以來最大值）/ Surface wind swath (maximum so far)', unit: 'm/s', scale: 'seq', lo: 0, digits: 1 },
 };
-const SLICE_CHOICES: SliceVar[] = ['dbz', 'w', 'speed', 'zeta', 'div', 'thp', 'thetaE', 'rh', 'pp', 'qv', 'cloud', 'precip', 'u', 'v'];
-const MAP_CHOICES: MapVar[] = ['vis', 'ctopT', 'wvT', 'dbzMax', 'rainRate', 'cuRain', 'pw', 'rain', 'snow', 'uh', 'wMax', 'slp', 'sfcWind', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'ctopZ'];
+const SLICE_CHOICES: SliceVar[] = ['dbz', 'w', 'speed', 'T', 'zeta', 'div', 'thp', 'thetaE', 'rh', 'pp', 'qv', 'cloud', 'precip', 'u', 'v'];
+/** composite and surface maps by group (the variable menu's sections) */
+const MAP_GROUPS: { label: string; vars: MapVar[] }[] = [
+  { label: '衛星 / Satellite', vars: ['vis', 'ctopT', 'wvT'] },
+  { label: '雷達與降水 / Radar & precipitation', vars: ['dbzMax', 'etop', 'vil', 'rainRate', 'cuRain', 'rain', 'snow', 'pw'] },
+  { label: '地面 / Surface', vars: ['slp', 'sfcT', 'sfcTd', 'sfcWind', 'windSwath', 'sfcThp', 'sfcThetaE'] },
+  { label: '劇烈天氣 / Severe weather', vars: ['cape', 'cin', 'li', 'lcl', 'shear06', 'srh01', 'srh03', 'stp', 'scp', 'uh', 'uhSwath', 'wMax', 'ctopZ'] },
+];
+/** standard pressure levels of the slices (hPa): the model level nearest each (height levels) */
+const P_LEVELS = [925, 850, 700, 500, 300, 200];
 const SECTION_CHOICES: SecVar[] = ['dbz', 'w', 'along', 'normal', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'qv', 'pp', 'T'];
 const RZ_CHOICES: RzVar[] = ['vt', 'vr', 'w', 'thp', 'cond'];
 
@@ -118,7 +140,12 @@ export interface ChartsHooks {
   camera(mode: CameraMode): void;
   /** 3-D cutaway (null: none) */
   cut(c: Cut | null): void;
+  /** satellite picture of the live frame at the screen's resolution (satellite.ts), or null where it cannot be drawn */
+  satellite?(req: SatView): SatImage | null;
 }
+/** a satellite picture wanted: channel, the part of the domain shown (fractions) and its size (pixels); infrared: the
+ *  temperature of height (K, level centres) and of the surface (deg C, [j][i]) */
+export interface SatView { kind: 'vis' | 'ir'; u0: number; u1: number; v0: number; v1: number; w: number; h: number; tz?: Float32Array | null; sfcC?: Float32Array | null }
 
 /** The Chinese half of a bilingual label ('中文 / English', also '中文（…）/ English'). */
 const zh = (label: string): string => label.split(/\s*\/\s+/)[0]!;
@@ -127,6 +154,17 @@ export class RegionalCharts {
   view: ViewKind = '3d';
   private sel = { slice: 'dbz' as SliceVar, composite: 'dbzMax' as MapVar, section: 'dbz' as SecVar, rz: 'vt' as RzVar };
   private level = 3;
+  /** slices on a standard pressure level (hPa; the nearest model level), or null: the chosen height level */
+  private plev: number | null = null;
+  /** base-state pressure (hPa) of the levels, from the last slice data */
+  private p0: Float32Array | null = null;
+  /** Model level nearest pressure P (hPa): the base state when known, else the standard atmosphere. */
+  private levelOfP(P: number): number {
+    const g = this.grid; if (!g) return this.level;
+    const p0 = this.p0 && this.p0.length === g.nz ? this.p0 : Float32Array.from({ length: g.nz }, (_, k) => 1013.25 * Math.pow(Math.max(0, 1 - (k + 0.5) * g.dz / 44330.8), 5.2559));
+    let best = 0; for (let k = 0; k < g.nz; k++) if (Math.abs(p0[k]! - P) < Math.abs(p0[best]! - P)) best = k;
+    return best;
+  }
   private show = { arrows: true, isobars: true, sfcWind: false, vectors: true, rzOnPoint: false };
   private line: { x0: number; y0: number; x1: number; y1: number } | null = null;
   private point: { x: number; y: number } | null = null;
@@ -216,6 +254,11 @@ export class RegionalCharts {
 
   onFrame(f: RegionalFrame): void {
     this.frame = f;
+    if (f.charts?.p0) {
+      this.p0 = f.charts.p0;
+      // a pressure-level chart: the level nearest the pressure in the model's own base state
+      if (this.plev) { const k = this.levelOfP(this.plev); if (k !== this.level) { this.level = k; this.sendRequest(); } }
+    }
     const s = f.stats;
     const smp: Sample = { t: f.time, dp: s.dp, vmax: s.vmax, rmw: s.rmw, wmax: s.wmax, zeta: s.zetaMax, uh: s.uhMax, dbz: s.dbzMax, vg: s.vGround, rain: s.rainmax, cape: s.capeMax, storm: s.storm, ew: s.eyewalls, tcRain: s.tcRain ?? null };
     const last = this.samples[this.samples.length - 1];
@@ -258,10 +301,11 @@ export class RegionalCharts {
     const v = this.view, g = this.grid;
     const req: ChartRequest = { maps: [], slice: null, section: null, sounding: null, rz: null };
     if (!g) return req;
-    if (v === 'slice') req.slice = { k: this.level, vars: [...new Set<SliceVar>([this.sel.slice, 'u', 'v'])] };
+    if (v === 'slice') req.slice = { k: this.level, vars: [...new Set<SliceVar>([this.sel.slice, 'u', 'v', ...(this.plev ? ['pp', 'T', 'qv'] as SliceVar[] : [])])] };
     if (v === 'composite') {
       const maps = new Set<MapVar>([this.sel.composite]);
       if (this.sel.composite === 'vis') maps.add('visZ');
+      if (this.sel.composite === 'ctopT') maps.add('sfcT');
       if (this.show.isobars) maps.add('slp');
       if (this.show.sfcWind) { maps.add('sfcU'); maps.add('sfcV'); }
       req.maps = [...maps];
@@ -321,9 +365,14 @@ export class RegionalCharts {
   private buildBar(): void {
     const b = this.bar;
     b.textContent = '';
-    const sel = (opts: { v: string; label: string }[], value: string, on: (v: string) => void, title: string): HTMLSelectElement => {
+    const sel = (opts: { v: string; label: string; group?: string }[], value: string, on: (v: string) => void, title: string): HTMLSelectElement => {
       const s = document.createElement('select'); s.title = title;
-      for (const o of opts) { const e = document.createElement('option'); e.value = o.v; e.textContent = o.label; s.append(e); }
+      let grp: HTMLOptGroupElement | null = null;
+      for (const o of opts) {
+        const e = document.createElement('option'); e.value = o.v; e.textContent = o.label;
+        if (o.group && o.group !== grp?.label) { grp = document.createElement('optgroup'); grp.label = o.group; s.append(grp); }
+        (o.group && grp ? grp : s).append(e);
+      }
       s.value = value; s.onchange = (): void => on(s.value); b.append(s); return s;
     };
     const chk = (label: string, on: boolean, set: (v: boolean) => void): void => {
@@ -370,7 +419,9 @@ export class RegionalCharts {
     }
     if (vv === 'slice') {
       sel(SLICE_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.slice, (v) => { this.sel.slice = v as SliceVar; this.sendRequest(); this.redraw(); }, '變數 / Variable');
-      if (this.grid) {
+      sel([{ v: '0', label: '高度層（拉桿）/ Height level (slider)' }, ...P_LEVELS.map((p) => ({ v: String(p), label: `${p} hPa 等壓面圖 / ${p} hPa chart` }))], String(this.plev ?? 0),
+        (v) => { this.plev = Number(v) || null; if (this.plev) this.level = this.levelOfP(this.plev); this.sendRequest(); this.buildBar(); this.redraw(); }, '層 / Level');
+      if (this.grid && !this.plev) {
         const r = document.createElement('input'); r.type = 'range'; r.min = '0'; r.max = String(this.grid.nz - 1); r.value = String(this.level); r.className = 'lvl';
         r.title = '高度 / Height';
         const lab = document.createElement('span'); lab.className = 'hint';
@@ -378,12 +429,18 @@ export class RegionalCharts {
         r.oninput = (): void => { this.level = Number(r.value); upd(); this.sendRequest(); };
         upd(); b.append(r, lab);
       }
+      if (this.plev) hint('白線：等壓面高度（每格間距見圖下）；取最接近的模式層 / white: height of the pressure surface (interval below the map), on the nearest model level');
       chk('風向箭頭 / Wind arrows', this.show.arrows, (v) => { this.show.arrows = v; });
       sel(TOOLS, this.tool, (v) => { this.tool = v as MapTool; this.buildBar(); }, '滑鼠工具 / Mouse tool');
       hint(this.toolHint());
     }
     if (vv === 'composite') {
-      sel(MAP_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.composite, (v) => { this.sel.composite = v as MapVar; this.sendRequest(); this.redraw(); }, '變數 / Variable');
+      sel(MAP_GROUPS.flatMap((g) => g.vars.map((v) => ({ v, label: VI[v]!.label, group: g.label }))), this.sel.composite, (v) => { this.sel.composite = v as MapVar; this.sendRequest(); this.buildBar(); this.redraw(); }, '變數 / Variable');
+      const cv = this.sel.composite;
+      if (cv === 'vis') hint('由模式的 3D 雲場從正上方逐像素渲染（螢幕解析度，放大會更細）；太陽在西北方 40°，陰影長度按實際高度 / rendered straight down from the model\'s 3-D cloud field at screen resolution (finer when zoomed); sun from the north-west, 40° up, true shadow lengths');
+      if (cv === 'ctopT') hint('由模式的 3D 雲場逐像素計算雲與地面的紅外線放射（螢幕解析度）；滑鼠顯示該點亮度溫度 / infrared emission of cloud and surface from the model\'s 3-D field at screen resolution; the pointer shows the brightness temperature');
+      if (cv === 'uhSwath' || cv === 'windSwath') hint('軌跡：本次執行（或細化）以來每個畫面取樣的最大值 / swath: the largest value at every frame since this run (or refinement) started');
+      if (cv === 'stp' || cv === 'scp' || cv === 'srh01' || cv === 'srh03') hint('固定層、地面氣塊版本；風暴移動用 Bunkers 右移胞 / fixed-layer, surface-based parcel; storm motion: Bunkers right mover');
       chk('海平面等壓線 / Isobars', this.show.isobars, (v) => { this.show.isobars = v; });
       chk('地面風箭頭 / Surface wind', this.show.sfcWind, (v) => { this.show.sfcWind = v; });
       sel(TOOLS, this.tool, (v) => { this.tool = v as MapTool; this.buildBar(); }, '滑鼠工具 / Mouse tool');
@@ -570,12 +627,13 @@ export class RegionalCharts {
     const mag = this.magnified();
     if (mag) { this.clampZoom(); const g = this.mg; ctx.setTransform(dpr * g.z, 0, 0, dpr * g.z, -dpr * g.z * g.x0, -dpr * g.z * g.y0); }
     this.mapF = null; this.plotF = null;
+    // (data-waiting: the chart shows the waiting message; for tests)
+    c.dataset.waiting = '0';
     const top = 8, area: Rect = { x: 0, y: top, w: W, h: H - top };
     const f = this.frame, ch = f?.charts;
-    const msg = (t: string): void => this.centerText(t, area);
     if (this.view === 'series') this.drawSeries(area);
     else if (this.view === 'hovmoller') this.drawHovmoller(area);
-    else if (!f || !ch) msg('等待資料… / Waiting for data…');
+    else if (!f || !ch) this.waiting(area);
     else if (this.view === 'slice') this.drawSlice(area);
     else if (this.view === 'composite') this.drawComposite(area);
     else if (this.view === 'section') this.drawSection(area);
@@ -630,7 +688,7 @@ export class RegionalCharts {
   private drawPlan(r: Rect, name: string, data: Float32Array, title: string, colorbar = true): MapFrame {
     const ctx = this.ctx, g = this.grid!, mf = this.mapFrame(r, colorbar), m = mf.v;
     const sc = scaleFor(name, data);
-    this.clipped(mf, () => drawField(ctx, mf.r, g.nx, g.ny, (i, j) => data[j * g.nx + i]!, sc, this.underlay()));
+    this.clipped(mf, () => drawField(ctx, mf.r, g.nx, g.ny, (i, j) => data[j * g.nx + i]!, sc, this.underlay(), sc.kind === 'wv' || sc.kind === 'ir' || sc.kind === 'vis'));
     this.mapAxes(mf);
     if (colorbar) drawColorbar(ctx, { x: m.x + m.w + 12, y: m.y + 14, w: 12, h: Math.max(40, m.h - 14) }, sc, VI[name]!.unit, VI[name]!.digits);
     ctx.font = FONT; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
@@ -689,19 +747,42 @@ export class RegionalCharts {
   private drawSlice(area: Rect): void {
     const s = this.frame!.charts!.slice, name = this.sel.slice;
     if (!s || !s.vars[name]) { this.waiting(area); return; }
-    const data = s.vars[name]!, info = VI[name]!;
-    const mf = this.drawPlan(area, name, data, `${info.label} · z = ${(s.z / 1000).toFixed(2)} km · ${this.timeLabel()}`);
+    const data = s.vars[name]!, info = VI[name]!, g = this.grid!, P = this.plev;
+    const where = P ? `${P} hPa（模式層 z = ${(s.z / 1000).toFixed(2)} km）/ ${P} hPa (model level z = ${(s.z / 1000).toFixed(2)} km)` : `z = ${(s.z / 1000).toFixed(2)} km`;
+    const mf = this.drawPlan(area, name, data, `${zh(info.label)} · ${where} · ${this.timeLabel()}`);
+    // pressure-level chart: height of the pressure surface from the level's pressure and virtual temperature
+    // (hypsometric equation over the short distance between the level and the surface)
+    let Z: Float32Array | null = null;
+    const pp = s.vars.pp, T = s.vars.T, qv = s.vars.qv, p0 = this.p0;
+    if (P && pp && T && qv && p0 && p0.length === g.nz) {
+      Z = new Float32Array(g.nx * g.ny);
+      let lo = Infinity, hi = -Infinity;
+      for (let c = 0; c < Z.length; c++) {
+        const p = p0[s.k]! + pp[c]!, tv = (T[c]! + 273.15) * (1 + 0.61e-3 * qv[c]!);
+        const z = s.z + 287.05 * tv / 9.80665 * Math.log(p / P); Z[c] = z; lo = Math.min(lo, z); hi = Math.max(hi, z);
+      }
+      const step = Math.max(5, niceCeil((hi - lo) / 12)), lv: number[] = [], Zc = Z;
+      for (let z = Math.ceil(lo / step) * step; z <= hi; z += step) lv.push(z);
+      const X = (i: number): number => mf.r.x + (i + 0.5) / g.nx * mf.r.w, Y = (j: number): number => mf.r.y + mf.r.h - (j + 0.5) / g.ny * mf.r.h;
+      this.clipped(mf, () => drawContours(this.ctx, g.nx, g.ny, (i, j) => Zc[j * g.nx + i]!, X, Y, lv, () => ({ color: 'rgba(250,250,250,0.9)', width: 1.2 })));
+      this.ctx.font = FONT_SMALL; this.ctx.textAlign = 'left'; this.ctx.textBaseline = 'middle';
+      haloText(this.ctx, `${P} hPa 等高線 / height contours: ${step} m（${(lo / 1000).toFixed(3)}–${(hi / 1000).toFixed(3)} km）`, mf.v.x, mf.v.y + mf.v.h + 30, INK.secondary);
+    }
     if (this.show.arrows && s.vars.u && s.vars.v) this.drawWind(mf, s.vars.u, s.vars.v);
     this.drawMarks(mf);
-    this.mapReadout(mf, (i, j) => [`${zh(info.label)}: ${fmt(data[j * this.grid!.nx + i]!, info.digits)} ${info.unit}`,
-      ...(s.vars.u && s.vars.v ? [`風 / wind: ${fmt(Math.hypot(s.vars.u[j * this.grid!.nx + i]!, s.vars.v[j * this.grid!.nx + i]!), 1)} m/s`] : [])]);
+    const Zr = Z;
+    this.mapReadout(mf, (i, j) => [`${zh(info.label)}: ${fmt(data[j * g.nx + i]!, info.digits)} ${info.unit}`,
+      ...(s.vars.u && s.vars.v ? [`風 / wind: ${fmt(Math.hypot(s.vars.u[j * g.nx + i]!, s.vars.v[j * g.nx + i]!), 1)} m/s`] : []),
+      ...(Zr && P ? [`${P} hPa 高度 / height: ${fmt(Zr[j * g.nx + i]!, 0)} m`] : [])]);
   }
 
   private drawComposite(area: Rect): void {
+    this.satBt = null;
     const mp = this.frame!.charts!.maps, name = this.sel.composite, data = mp[name];
     if (!data) { this.waiting(area); return; }
     const info = VI[name]!;
-    const mf = name === 'vis' && mp.visZ ? this.drawVisible(area, data, mp.visZ) : this.drawPlan(area, name, data, `${info.label} · ${this.timeLabel()}`);
+    const mf = (name === 'vis' || name === 'ctopT' ? this.drawSatellite(area, name) : null)
+      ?? (name === 'vis' && mp.visZ ? this.drawVisible(area, data, mp.visZ) : this.drawPlan(area, name, data, `${info.label} · ${this.timeLabel()}`));
     const g = this.grid!, X = (i: number): number => mf.r.x + (i + 0.5) / g.nx * mf.r.w, Y = (j: number): number => mf.r.y + mf.r.h - (j + 0.5) / g.ny * mf.r.h;
     const slp = mp.slp;
     if (this.show.isobars && slp) {
@@ -714,7 +795,55 @@ export class RegionalCharts {
     }
     if (this.show.sfcWind && mp.sfcU && mp.sfcV) this.drawWind(mf, mp.sfcU, mp.sfcV);
     this.drawMarks(mf);
-    this.mapReadout(mf, (i, j) => [`${zh(info.label)}: ${fmt(data[j * g.nx + i]!, info.digits)} ${info.unit}`, ...(slp ? [`SLP ${fmt(slp[j * g.nx + i]!, 1)} hPa`] : [])]);
+    // (set by drawSatellite above)
+    const satBt = this.satBt as ((x: number, y: number) => number | null) | null;
+    const bt = name === 'ctopT' && this.hover && satBt ? satBt(this.hover.x, this.hover.y) : null;
+    this.mapReadout(mf, (i, j) => [...(bt !== null ? [`亮度溫度 / brightness temperature: ${fmt(bt - 273.15, 1)} °C`] : []),
+      `${zh(info.label)}: ${fmt(data[j * g.nx + i]!, info.digits)} ${info.unit}`, ...(slp ? [`SLP ${fmt(slp[j * g.nx + i]!, 1)} hPa`] : [])]);
+  }
+
+  /** the last satellite picture drawn and its canvas (pointer moves redraw the chart; the picture stays) */
+  private satDrawn: { img: SatImage; off: HTMLCanvasElement } | null = null;
+  /** brightness temperature (K) under the pointer of the infrared picture on screen */
+  private satBt: ((x: number, y: number) => number | null) | null = null;
+  /**
+   * Satellite picture rendered from the model's 3-D field straight down at the resolution of the screen (satellite.ts):
+   * visible (true colour) or infrared (brightness temperature). Null where it cannot be drawn (the column pictures
+   * below are drawn instead).
+   */
+  private drawSatellite(area: Rect, name: 'vis' | 'ctopT'): MapFrame | null {
+    const hook = this.hooks.satellite, ch = this.frame?.charts; if (!hook || !ch) return null;
+    const ir = name === 'ctopT', mp = ch.maps;
+    if (ir && (!mp.sfcT || !ch.tz)) return null;
+    const ctx = this.ctx, mf = this.mapFrame(area, ir), m = mf.v, dpr = Math.min(2, window.devicePixelRatio || 1);
+    const u0 = (m.x - mf.r.x) / mf.r.w, u1 = (m.x + m.w - mf.r.x) / mf.r.w, v0 = (mf.r.y + mf.r.h - m.y - m.h) / mf.r.h, v1 = (mf.r.y + mf.r.h - m.y) / mf.r.h;
+    const img = hook({ kind: ir ? 'ir' : 'vis', u0, u1, v0, v1, w: m.w * dpr, h: m.h * dpr, tz: ch.tz, sfcC: mp.sfcT });
+    if (!img) return null;
+    const sc = scaleFor('ctopT', mp.ctopT ?? new Float32Array(1));
+    let d = this.satDrawn;
+    if (!d || d.img !== img) {
+      const off = document.createElement('canvas'); off.width = img.w; off.height = img.h;
+      const id = new ImageData(img.w, img.h);
+      if (img.rgba) id.data.set(img.rgba);
+      else if (img.bt) {
+        const bt = img.bt, px = id.data;
+        for (let i = 0; i < bt.length; i++) { const c = colorOf(sc, bt[i]! - 273.15); px[4 * i] = c[0]; px[4 * i + 1] = c[1]; px[4 * i + 2] = c[2]; px[4 * i + 3] = 255; }
+      }
+      off.getContext('2d')!.putImageData(id, 0, 0);
+      d = this.satDrawn = { img, off };
+    }
+    ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(d.off, m.x, m.y, m.w, m.h); ctx.restore();
+    this.mapAxes(mf);
+    if (ir) drawColorbar(ctx, { x: m.x + m.w + 12, y: m.y + 14, w: 12, h: Math.max(40, m.h - 14) }, sc, '°C', 1);
+    ctx.font = FONT; ctx.fillStyle = INK.primary; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+    ctx.fillText(`${ir ? '紅外線雲圖（亮度溫度）/ Infrared (brightness temperature)' : '可見光雲圖（真實色彩）/ Visible (true colour)'} · ${this.timeLabel()}`, m.x, m.y - 8);
+    const bt = img.bt;
+    this.satBt = bt ? (x, y) => {
+      const px = Math.floor((x - m.x) / m.w * img.w), py = Math.floor((y - m.y) / m.h * img.h);
+      return px >= 0 && py >= 0 && px < img.w && py < img.h ? bt[py * img.w + px]! : null;
+    } : null;
+    this.mapF = mf;
+    return mf;
   }
 
   /**
@@ -779,7 +908,7 @@ export class RegionalCharts {
     return mf;
   }
 
-  private waiting(r: Rect, more = ''): void { this.centerText('等待資料… / Waiting for data…' + (more ? ` / ${more}` : ''), r); }
+  private waiting(r: Rect, more = ''): void { this.canvas.dataset.waiting = '1'; this.centerText('等待資料… / Waiting for data…' + (more ? ` / ${more}` : ''), r); }
   /** Centred bilingual message: each ' / '-separated part on its own line. */
   private centerText(t: string, r: Rect): void {
     const ctx = this.ctx, parts = t.split(/\s*\/\s+/);
@@ -956,11 +1085,14 @@ export class RegionalCharts {
     // --- hodograph inset (top right of the skew-T) and indices
     const hs = Math.min(skew.w * 0.36, skew.h * 0.42, 230), hr: Rect = { x: skew.x + skew.w - hs - 40, y: skew.y + 8, w: hs, h: hs };
     const ind = indices(u, v, T, p, qv, nz, dz);
+    // lifted index: environment minus parcel temperature at the level nearest 500 hPa
+    let k5 = 0; for (let k = 0; k < nz; k++) if (Math.abs(p[k]! - 500) < Math.abs(p[k5]! - 500)) k5 = k;
+    const li = Tk[k5]! - Tp[k5]!;
     this.drawHodograph(hr, u, v, nz, dz, ind.rm);
     const lines = [
       `CAPE ${pc.cape.toFixed(0)} J/kg · CIN ${pc.cin.toFixed(0)} J/kg`,
       `LCL ${pc.lcl >= 0 ? (zc(pc.lcl) / 1000).toFixed(1) : '—'} km · LFC ${pc.lfc >= 0 ? (zc(pc.lfc) / 1000).toFixed(1) : '—'} km · EL ${pc.el >= 0 ? (zc(pc.el) / 1000).toFixed(1) : '—'} km`,
-      `可降水量 / PW ${ind.pw.toFixed(1)} mm`,
+      `可降水量 / PW ${ind.pw.toFixed(1)} mm · 舉升指數 / LI ${li.toFixed(1)} K`,
       `0–6 km 風切 / shear ${ind.shear6.toFixed(1)} m/s`,
       `SRH 0–1 km ${ind.srh1.toFixed(0)} · 0–3 km ${ind.srh3.toFixed(0)} m²/s²`,
       `右移胞移動 / Bunkers RM (${ind.rm.u.toFixed(1)}, ${ind.rm.v.toFixed(1)}) m/s`,
@@ -1244,12 +1376,9 @@ function moistAdiabat(T0: number, q0: number, p0: number, prs: number[]): number
 function indices(u: Float32Array, v: Float32Array, T: Float32Array, p: Float32Array, qv: Float32Array, nz: number, dz: number): { pw: number; shear6: number; rm: { u: number; v: number }; srh1: number; srh3: number } {
   let pw = 0;
   for (let k = 0; k < nz; k++) { const rho = p[k]! * 100 / (287.05 * (T[k]! + 273.15) * (1 + 0.61e-3 * qv[k]!)); pw += rho * qv[k]! / 1000 * dz; }
-  const at = (z: number): [number, number] => { const kf = Math.max(0, Math.min(nz - 1, z / dz - 0.5)), k0 = Math.floor(kf), k1 = Math.min(nz - 1, k0 + 1), f = kf - k0; return [u[k0]! + f * (u[k1]! - u[k0]!), v[k0]! + f * (v[k1]! - v[k0]!)]; };
-  const mean = (z0: number, z1: number): [number, number] => { let a = 0, b = 0; const n = 60; for (let i = 0; i < n; i++) { const w = at(z0 + (i + 0.5) * (z1 - z0) / n); a += w[0]; b += w[1]; } return [a / n, b / n]; };
-  const s0 = at(0), s6 = at(6000);
-  const m = mean(0, 6000), lo = mean(0, 500), hi = mean(5500, 6000), sx = hi[0] - lo[0], sy = hi[1] - lo[1], sl = Math.hypot(sx, sy) || 1;
-  const rm = { u: m[0] + 7.5 * sy / sl, v: m[1] - 7.5 * sx / sl };
-  const srh = (ztop: number): number => { let h = 0; const n = Math.max(4, Math.round(ztop / 100)); for (let i = 0; i < n; i++) { const a = at(i * ztop / n), b = at((i + 1) * ztop / n); h += (b[0] - rm.u) * (a[1] - rm.v) - (a[0] - rm.u) * (b[1] - rm.v); } return h; };
-  return { pw, shear6: Math.hypot(s6[0] - s0[0], s6[1] - s0[1]), rm, srh1: srh(1000), srh3: srh(3000) };
+  // the same samples as the maps (windIndices)
+  const at = (z: number): [number, number] => { const kf = Math.max(0, Math.min(nz - 1, z / dz - 0.5)), k0 = Math.min(nz - 2, Math.floor(kf)), k1 = k0 + 1, f = kf - k0; return [u[k0]! + f * (u[k1]! - u[k0]!), v[k0]! + f * (v[k1]! - v[k0]!)]; };
+  const w = windIndices(at);
+  return { pw, shear6: w.shear, rm: { u: w.cx, v: w.cy }, srh1: w.srh1, srh3: w.srh3 };
 }
 void colorOf; void ticks;

@@ -4,6 +4,7 @@ import { sequential, diverging } from '../colormap.js';
 import { mountSavesPanel, storeSave, type SaveMeta } from '../saves.js';
 import { UnattendedRun } from './runner.js';
 import { RegionalCharts } from './charts.js';
+import { SatelliteRenderer } from './satellite.js';
 import { Missions } from './missions.js';
 import { SetupForm } from './setupForm.js';
 import { defaultDt, type RegionalSetup } from './setup.js';
@@ -39,6 +40,8 @@ let lastVol: ReplayFrame | null = null, refining = false;
 // replay of the 3-D view: frames kept by the page (memory budget from the device memory when the browser tells it)
 const replay = new ReplayStore(Math.min(400, 64 * ((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 4)) * 1e6);
 let replayIdx: number | null = null, replayPlaying = false, replayAcc = 0;
+/** satellite picture renderer (undefined: not made yet, null: unavailable) and the 3-D view's second channel */
+let sat: SatelliteRenderer | null | undefined, volMode = 0;
 /** Show a stored or live display volume in the 3-D view. */
 function showVolume(f: ReplayFrame): void {
   view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top, f.nest ? { ...f.nest, Lx: f.Lx, Ly: f.Ly } : null);
@@ -46,7 +49,7 @@ function showVolume(f: ReplayFrame): void {
 }
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
   request: (req) => send({ type: 'charts', req }),
-  volMode: (mode) => { send({ type: 'volMode', mode }); view.setMode(mode); },
+  volMode: (mode) => { volMode = mode; send({ type: 'volMode', mode }); view.setMode(mode); },
   tracers: (n) => send({ type: 'tracers', n }),
   interact: (kind, x, y, radius) => {
     if (kind === 'warm' || kind === 'cold') send({ type: 'perturb', kind, x, y });
@@ -54,6 +57,12 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
   },
   camera: (mode) => { view.setCamera(mode); $('flyPad').hidden = mode !== 'fly'; },
   cut: (c) => view.setCut(c),
+  // satellite pictures of the live frame (the renderer is made when first wanted)
+  satellite: (r) => {
+    const f = lastVol; if (!f) return null;
+    if (sat === undefined) sat = SatelliteRenderer.create();
+    return sat ? sat.render(f, { ...r, precip: volMode === 0, land, sea: curSea }) : null;
+  },
   view: (v) => {
     $('view').hidden = v !== '3d'; $('chart').hidden = v === '3d';
     if (v === '3d') { const f = replayIdx !== null ? replay.frames[replayIdx] : lastVol; if (f) showVolume(f); }

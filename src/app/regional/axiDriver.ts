@@ -8,7 +8,7 @@ import { IceMicrophysics, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { tcSounding, eyewallPeaks, type TcSounding } from '../../regional/tropical.js';
 import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, albedo } from '../../regional/display.js';
 import { GALE7, GALE10 } from '../../regional/storms.js';
-import { SECTION_VARS, WV_PATH, qsatW, sectionValues, parcelAscent, pressure, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
+import { SECTION_VARS, WV_PATH, ETOP_DBZ, VIL_ZMAX, qsatW, sectionValues, parcelAscent, pressure, windIndices, level500, stpIndex, scpIndex, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { ChartData, ChartRequest, GroundField, RegionalFrame, TcRain } from './protocol.js';
 
 /** User-adjustable parameters of the axisymmetric experiment. */
@@ -44,6 +44,8 @@ const SV = Object.fromEntries(SECTION_VARS.map((v, i) => [v, i])) as Record<Sect
 export class AxiDriver {
   readonly ax: AxisymModel;
   readonly mp: IceMicrophysics;
+  /** swaths per radius: 2-5 km updraft helicity and the lowest level's wind speed (running maxima) */
+  private swath: { uh: Float64Array; wind: Float64Array } | null = null;
   /** display grid: N x N cells of size dxv over [0, 2 D] (centre at (D, D)) */
   readonly N = 160; readonly D: number; readonly dxv: number;
   private prevRain: { t: number; acc: Float64Array } | null = null;
@@ -124,9 +126,14 @@ export class AxiDriver {
   }
 
   /** Column composites per radius (same meaning as the 3-D column records). */
-  private columns(): { dbz: Float64Array; ctopT: Float64Array; ctopZ: Float64Array; uh: Float64Array; wMax: Float64Array; cape: Float64Array; cin: Float64Array; vis: Float64Array; visZ: Float64Array; pw: Float64Array; wvT: Float64Array; wmin: number; cmax: number; pmax: number } {
+  private columns(): { dbz: Float64Array; ctopT: Float64Array; ctopZ: Float64Array; uh: Float64Array; wMax: Float64Array; cape: Float64Array; cin: Float64Array; vis: Float64Array; visZ: Float64Array; pw: Float64Array; wvT: Float64Array;
+    shear: Float64Array; srh1: Float64Array; srh3: Float64Array; lcl: Float64Array; li: Float64Array; etop: Float64Array; vil: Float64Array; wmin: number; cmax: number; pmax: number } {
     const ax = this.ax, { nz, dz } = ax.a, nr = this.nDisp;
     const vis = new Float64Array(nr), visZ = new Float64Array(nr), pw = new Float64Array(nr), wvT = new Float64Array(nr), bet = new Float64Array(nz);
+    // severe-weather indices as columnDiagnostics (the wind in radial / tangential components: the indices do not
+    // depend on the direction of the axes)
+    const shear = new Float64Array(nr), srh1 = new Float64Array(nr), srh3 = new Float64Array(nr), lcl = new Float64Array(nr), li = new Float64Array(nr), etop = new Float64Array(nr), vil = new Float64Array(nr);
+    const Tp = new Float64Array(nz), k500 = level500(ax.pi0), zc0 = ax.zc[0]!;
     const dbz = new Float64Array(nr).fill(-30), ctopT = new Float64Array(nr), ctopZ = new Float64Array(nr), uh = new Float64Array(nr), wMax = new Float64Array(nr), cape = new Float64Array(nr), cin = new Float64Array(nr);
     const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz);
     const zs = Array.from({ length: nz }, (_, k) => (ax.zc[k]! >= 2000 && ax.zc[k]! <= 5000 ? this.zeta(k) : null));
@@ -137,7 +144,10 @@ export class AxiDriver {
         const q = ax.idx(i, 0, k), rho = ax.rho0[k]!, S = ax.scalars;
         bet[k] = this.ext(i, k).c; tau += bet[k]! * dz; pw[i] = pw[i]! + rho * dz * Math.max(0, S[0]![q]!);
         const qr = Math.max(S[QR]![q]!, 0), qs = Math.max(S[QS]![q]!, 0), qg = Math.max(S[QG]![q]!, 0);
-        zmax = Math.max(zmax, 3.63e9 * Math.pow(rho * qr, 1.75) + 9.80e8 * Math.pow(rho * qs, 1.75) + 4.33e10 * Math.pow(rho * qg, 1.75));
+        const zr = 3.63e9 * Math.pow(rho * qr, 1.75) + 9.80e8 * Math.pow(rho * qs, 1.75) + 4.33e10 * Math.pow(rho * qg, 1.75);
+        zmax = Math.max(zmax, zr);
+        if (zr >= Math.pow(10, ETOP_DBZ / 10)) etop[i] = ax.zc[k]!;
+        if (zr > 0) vil[i] = vil[i]! + 3.44e-6 * Math.pow(Math.min(zr, VIL_ZMAX), 4 / 7) * dz;
         const pi = ax.pi0[k]! + ax.pp[q]!;
         T[k] = ax.th[q]! * pi; p[k] = pressure(pi); qv[k] = S[0]![q]!;
         const cl = Math.max(0, S[QC]![q]! + S[QI]![q]!), pr = Math.max(0, S[QR]![q]! + qs + qg);
@@ -148,7 +158,15 @@ export class AxiDriver {
       }
       if (ctopZ[i] === 0) ctopT[i] = T[0]!;
       dbz[i] = 10 * Math.log10(Math.max(zmax, 1e-3));
-      const pc = parcelAscent(T, p, qv, dz); cape[i] = pc.cape; cin[i] = pc.cin;
+      const pc = parcelAscent(T, p, qv, dz, Tp); cape[i] = pc.cape; cin[i] = pc.cin;
+      lcl[i] = pc.lcl >= 0 ? ax.zc[pc.lcl]! : -1; li[i] = T[k500]! - Tp[k500]!;
+      const wi = windIndices((h) => {
+        const fk = (h - zc0) / dz, k0 = Math.max(0, Math.min(nz - 2, Math.floor(fk))), f = Math.max(0, Math.min(1, fk - k0));
+        const qa = ax.idx(i, 0, k0), qb = ax.idx(i, 0, k0 + 1);
+        const ua = 0.5 * (ax.u[qa]! + ax.u[qa + 1]!), ub = 0.5 * (ax.u[qb]! + ax.u[qb + 1]!), va = ax.v[qa]!, vb = ax.v[qb]!;
+        return [ua + (ub - ua) * f, va + (vb - va) * f];
+      });
+      shear[i] = wi.shear; srh1[i] = wi.srh1; srh3[i] = wi.srh3;
       // satellite-like values as columnDiagnostics (src/regional/diagnostics.ts)
       let above = pw[i]!, zEmit = ax.zc[nz - 1]!; wvT[i] = T[nz - 1]!;
       for (let k = 0; k < nz; k++) { above -= ax.rho0[k]! * dz * Math.max(0, qv[k]!); if (above < WV_PATH) { wvT[i] = T[k]!; zEmit = ax.zc[k]!; break; } }
@@ -158,7 +176,14 @@ export class AxiDriver {
       for (let k = 0; k < nz; k++) { const d = bet[k]! * dz; if (tau - below >= 1) visZ[i] = ax.zc[k]!; zw += d * ax.zc[k]!; below += d; }
       if (tau < 1) visZ[i] = tau > 1e-3 ? zw / tau : 0;
     }
-    return { dbz, ctopT, ctopZ, uh, wMax, cape, cin, vis, visZ, pw, wvT, wmin, cmax, pmax };
+    // swaths (running maxima per radius since the start, sampled at every frame)
+    if (!this.swath || this.swath.uh.length !== nr) this.swath = { uh: new Float64Array(nr), wind: new Float64Array(nr) };
+    for (let i = 0; i < nr; i++) {
+      const q = ax.idx(i, 0, 0);
+      this.swath.uh[i] = Math.max(this.swath.uh[i]!, uh[i]!);
+      this.swath.wind[i] = Math.max(this.swath.wind[i]!, Math.hypot(0.5 * (ax.u[q]! + ax.u[q + 1]!), ax.v[q]!));
+    }
+    return { dbz, ctopT, ctopZ, uh, wMax, cape, cin, vis, visZ, pw, wvT, shear, srh1, srh3, lcl, li, etop, vil, wmin, cmax, pmax };
   }
 
   // ---------------------------------------------------------------- revolving onto the display grid
@@ -292,15 +317,32 @@ export class AxiDriver {
         case 'sfcWind': prof = Float64Array.from({ length: nr }, (_, i) => Math.hypot(at('u', 0, i), at('v', 0, i))); break;
         case 'sfcThp': prof = sfc('thp'); break;
         case 'sfcThetaE': prof = sfc('thetaE'); break;
+        // the axisymmetric model has no cumulus scheme: no parameterized rain
+        case 'cuRain': prof = new Float64Array(nr); break;
+        case 'sfcT': prof = sfc('T'); break;
+        case 'shear06': prof = col.shear; break;
+        case 'srh01': prof = col.srh1; break;
+        case 'srh03': prof = col.srh3; break;
+        case 'lcl': prof = col.lcl.map((x) => (x < 0 ? NaN : x / 1000)); break;
+        case 'li': prof = col.li; break;
+        case 'stp': prof = col.cape.map((c, i) => stpIndex(c, col.lcl[i]!, col.srh1[i]!, col.shear[i]!)); break;
+        case 'scp': prof = col.cape.map((c, i) => scpIndex(c, col.srh3[i]!, col.shear[i]!)); break;
+        case 'etop': prof = col.etop.map((x) => x / 1000); break;
+        case 'vil': prof = col.vil; break;
+        case 'uhSwath': prof = this.swath?.uh ?? null; break;
+        case 'windSwath': prof = this.swath?.wind ?? null; break;
+        case 'sfcTd': prof = sfc('Td'); break;
         case 'slp': prof = Float64Array.from({ length: nr }, (_, i) => { const q = ax.idx(i, 0, 0), pi = ax.pi0[0]! + ax.pp[q]!, tv = ax.th[q]! * pi * (1 + 0.61 * ax.scalars[0]![q]!); return pressure(pi) * Math.exp(9.80665 * ax.zc[0]! / (287.05 * tv)) / 100; }); break;
         case 'sfcU': charts.maps.sfcU = keep(windMaps().u); break;
         case 'sfcV': charts.maps.sfcV = keep(windMaps().v); break;
       }
       if (prof) charts.maps[mv] = keep(this.revolve(prof));
     }
+    if (req.maps.length) charts.tz = keep(Float32Array.from({ length: nz }, (_, k) => ax.th0[k]! * ax.pi0[k]!));
     // horizontal slice
     if (req.slice) {
       const k = Math.max(0, Math.min(nz - 1, req.slice.k | 0)), vars: Partial<Record<SliceVar, Float32Array>> = {};
+      charts.p0 = keep(Float32Array.from({ length: nz }, (_, kk) => pressure(ax.pi0[kk]!) / 100));
       const prof = (v: SectionVar): Float64Array => Float64Array.from({ length: nr }, (_, i) => at(v, k, i));
       const w2 = new Set(req.slice.vars);
       let wk: { u: Float32Array; v: Float32Array } | null = null;
