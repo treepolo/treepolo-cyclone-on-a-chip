@@ -45,38 +45,58 @@ export function unpackSave(buf: ArrayBuffer): { meta: SaveMeta; arrays: SaveArra
 }
 
 // ---------------------------------------------------------------- IndexedDB
+// 'saves' holds each whole record (with its data, which can be hundreds of MB), 'meta' the same records without their
+// data: the list reads only 'meta', so opening a page never brings every save's data into memory (a list read with
+// getAll on 'saves' did: several GB with a few large saves). Version 1 had only 'saves'; the upgrade fills 'meta' with a
+// cursor, one record at a time.
+type SaveInfo = Omit<SaveRecord, 'data'>;
+const info = ({ data: _d, ...r }: SaveRecord): SaveInfo => r;
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const r = indexedDB.open('cyclone-on-a-chip-saves', 1);
-    r.onupgradeneeded = (): void => { r.result.createObjectStore('saves', { keyPath: 'id' }); };
+    const r = indexedDB.open('cyclone-on-a-chip-saves', 2);
+    r.onupgradeneeded = (ev): void => {
+      const db = r.result, old = (ev as IDBVersionChangeEvent).oldVersion;
+      if (old < 1) db.createObjectStore('saves', { keyPath: 'id' });
+      if (old < 2) {
+        const meta = db.createObjectStore('meta', { keyPath: 'id' });
+        if (old >= 1) {
+          const cur = r.transaction!.objectStore('saves').openCursor();
+          cur.onsuccess = (): void => { const c = cur.result; if (!c) return; meta.put(info(c.value as SaveRecord)); c.continue(); };
+        }
+      }
+    };
     r.onsuccess = (): void => resolve(r.result);
     r.onerror = (): void => reject(r.error);
   });
 }
-async function tx<T>(mode: IDBTransactionMode, f: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+/** Run f in a transaction over the stores; resolves with its request's result when the transaction completes. */
+async function tx<T>(stores: string[], mode: IDBTransactionMode, f: (t: IDBTransaction) => IDBRequest<T>): Promise<T> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const t = db.transaction('saves', mode), req = f(t.objectStore('saves'));
-    req.onsuccess = (): void => resolve(req.result);
-    req.onerror = (): void => reject(req.error);
+    const t = db.transaction(stores, mode), req = f(t);
+    t.oncomplete = (): void => { db.close(); resolve(req.result); };
+    t.onerror = (): void => { db.close(); reject(t.error ?? req.error); };
+    t.onabort = (): void => { db.close(); reject(t.error ?? new Error('aborted')); };
   });
 }
 export async function storeSave(meta: SaveMeta, data: ArrayBuffer): Promise<SaveRecord> {
   const rec: SaveRecord = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind: meta.kind, title: meta.title, created: Date.now(), bytes: data.byteLength, data };
-  await tx('readwrite', (s) => s.put(rec));
+  await tx(['saves', 'meta'], 'readwrite', (t) => { t.objectStore('saves').put(rec); return t.objectStore('meta').put(info(rec)); });
   return rec;
 }
-/** Saves of one kind, newest first, without their data. */
-export async function listSaves(kind: 'global' | 'regional'): Promise<Omit<SaveRecord, 'data'>[]> {
-  const all = await tx('readonly', (s) => s.getAll() as IDBRequest<SaveRecord[]>);
-  return all.filter((r) => r.kind === kind).sort((a, b) => b.created - a.created).map(({ data: _d, ...r }) => r);
+/** Saves of one kind, newest first, without their data (read from 'meta' only). */
+export async function listSaves(kind: 'global' | 'regional'): Promise<SaveInfo[]> {
+  const all = await tx(['meta'], 'readonly', (t) => t.objectStore('meta').getAll() as IDBRequest<SaveInfo[]>);
+  return all.filter((r) => r.kind === kind).sort((a, b) => b.created - a.created);
 }
 export async function loadSave(id: string): Promise<SaveRecord> {
-  const r = await tx('readonly', (s) => s.get(id) as IDBRequest<SaveRecord | undefined>);
+  const r = await tx(['saves'], 'readonly', (t) => t.objectStore('saves').get(id) as IDBRequest<SaveRecord | undefined>);
   if (!r) throw new Error('找不到存檔 / save not found');
   return r;
 }
-export async function deleteSave(id: string): Promise<void> { await tx('readwrite', (s) => s.delete(id)); }
+export async function deleteSave(id: string): Promise<void> {
+  await tx(['saves', 'meta'], 'readwrite', (t) => { t.objectStore('saves').delete(id); return t.objectStore('meta').delete(id); });
+}
 
 // ---------------------------------------------------------------- ZIP (one deflated entry)
 const CRC_TABLE = ((): Uint32Array => {
