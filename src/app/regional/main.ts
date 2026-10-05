@@ -145,9 +145,9 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     tornadoWatch(m.time, s.tornado, m.dx);
     showStorms(s.storms ?? [], s.mainId ?? null, m);
     $('legend').textContent = m.groundField === 'none' ? '深藍 = 海、深綠 = 陸地 / dark blue = sea, dark green = land' : `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
-  } else if (m.type === 'error') { log(`錯誤 / Error: ${m.message}`); running = false; sync(); $<HTMLButtonElement>('eyeGo').disabled = !nestOk; if (runner.running) void runner.abort(`error: ${m.message}`); }
+  } else if (m.type === 'error') { failSave?.(new Error(m.message)); log(`錯誤 / Error: ${m.message}`); running = false; sync(); $<HTMLButtonElement>('eyeGo').disabled = !nestOk; if (runner.running) void runner.abort(`error: ${m.message}`); }
   else if (m.type === 'nest') { showNest(m.info); $<HTMLButtonElement>('eyeGo').disabled = !nestOk; if (!m.info) view.clearNest(); }
-  else if (m.type === 'saveData') { pendingSave?.({ meta: m.meta, data: m.buffer }); pendingSave = null; }
+  else if (m.type === 'saveData') pendingSave?.({ meta: m.meta, data: m.buffer });
   else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; $('ovRun').textContent = '▶'; if (runner.running) void runner.end('done'); }
   else if (m.type === 'log') log(m.text);
   else if (m.type === 'land') { land = m.land; charts.setLand(m.land); showSurface(); }
@@ -416,13 +416,16 @@ $('eyeStop').onclick = (): void => { $<HTMLButtonElement>('eyeStop').disabled = 
 $('profile').onclick = (): void => { $<HTMLButtonElement>('profile').disabled = true; $('profileOut').textContent = '量測中… / Measuring…'; worker.postMessage({ type: 'profile' } satisfies ToRegionalWorker); };
 $('refine').onclick = (): void => { $<HTMLButtonElement>('refine').disabled = true; refining = true; log('細化中… / Refining…'); send({ type: 'refine' }); };
 // ---------------- saved simulations
-let pendingSave: ((r: { meta: SaveMeta; data: ArrayBuffer }) => void) | null = null;
-const savesPanel = mountSavesPanel($('saves'), 'regional',
-  () => new Promise((resolve, reject) => {
-    if (pendingSave) { reject(new Error('存檔進行中 / a save is already in progress')); return; }
-    pendingSave = resolve; send({ type: 'save' });
-    setTimeout(() => { if (pendingSave === resolve) { pendingSave = null; reject(new Error('逾時 / timed out')); } }, 120000);
-  }),
+let pendingSave: ((r: { meta: SaveMeta; data: ArrayBuffer }) => void) | null = null, failSave: ((e: Error) => void) | null = null;
+const captureSave = (): Promise<{ meta: SaveMeta; data: ArrayBuffer }> => new Promise((resolve, reject) => {
+  if (pendingSave) { reject(new Error('存檔進行中 / a save is already in progress')); return; }
+  const end = (): void => { pendingSave = null; failSave = null; clearTimeout(timer); };
+  const timer = window.setTimeout(() => { end(); reject(new Error('逾時 / timed out')); }, 120000);
+  pendingSave = (r): void => { end(); resolve(r); };
+  failSave = (e): void => { end(); reject(e); };
+  send({ type: 'save' });
+});
+const savesPanel = mountSavesPanel($('saves'), 'regional', captureSave,
   (_meta, data) => { running = false; sync(); send({ type: 'load', buffer: data.slice(0), backend: backend() }); },
   log);
 // ---------------- pacing
@@ -440,11 +443,6 @@ $('untilGo').onclick = (): void => {
   log(`執行 ${h} 模式小時後自動暫停 / running for ${h} model hours`);
 };
 // ---------------- unattended runs
-const captureSave = (): Promise<{ meta: SaveMeta; data: ArrayBuffer }> => new Promise((resolve, reject) => {
-  if (pendingSave) { reject(new Error('存檔進行中 / a save is already in progress')); return; }
-  pendingSave = resolve; send({ type: 'save' });
-  setTimeout(() => { if (pendingSave === resolve) { pendingSave = null; reject(new Error('逾時 / timed out')); } }, 120000);
-});
 const runner = new UnattendedRun({
   experiment: () => `${curExp}: ${$('desc').textContent ?? ''}`,
   grid: () => $('grid').textContent ?? '',

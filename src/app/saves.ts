@@ -54,6 +54,10 @@ const info = ({ data: _d, ...r }: SaveRecord): SaveInfo => r;
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const r = indexedDB.open('cyclone-on-a-chip-saves', 2);
+    // an older page of this site holding the database open blocks the upgrade (the request then never answers): say so
+    // after a while instead of waiting for ever
+    const blocked = (): void => { setTimeout(() => reject(new Error('存檔資料庫被另一個開著的本站分頁佔用，請關閉其他分頁後重試 / the save database is held open by another tab of this site: close the other tabs and retry')), 6000); };
+    r.onblocked = blocked;
     r.onupgradeneeded = (ev): void => {
       const db = r.result, old = (ev as IDBVersionChangeEvent).oldVersion;
       if (old < 1) db.createObjectStore('saves', { keyPath: 'id' });
@@ -65,7 +69,7 @@ function openDb(): Promise<IDBDatabase> {
         }
       }
     };
-    r.onsuccess = (): void => resolve(r.result);
+    r.onsuccess = (): void => { r.result.onversionchange = (): void => r.result.close(); resolve(r.result); };
     r.onerror = (): void => reject(r.error);
   });
 }
@@ -99,36 +103,66 @@ export async function deleteSave(id: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------- ZIP (one deflated entry)
-const CRC_TABLE = ((): Uint32Array => {
-  const t = new Uint32Array(256);
+// CRC-32 by 8 bytes at a time (a byte-at-a-time JS loop takes seconds on a few hundred MB), incremental over chunks
+const CRC8 = ((): Uint32Array => {
+  const t = new Uint32Array(8 * 256);
   for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  for (let n = 0; n < 256; n++) { let c = t[n]!; for (let k = 1; k < 8; k++) { c = t[c & 255]! ^ (c >>> 8); t[k * 256 + n] = c >>> 0; } }
   return t;
 })();
-function crc32(d: Uint8Array): number {
-  let c = 0xffffffff;
-  for (let i = 0; i < d.length; i++) c = CRC_TABLE[(c ^ d[i]!) & 255]! ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
+/** CRC state after more bytes (start from 0xffffffff, finish with (c ^ 0xffffffff) >>> 0). */
+function crcUpdate(crc: number, d: Uint8Array): number {
+  let c = crc, i = 0;
+  const n = d.length, n8 = n - (n & 7), T = CRC8;
+  for (; i < n8; i += 8) {
+    const a = (d[i]! | (d[i + 1]! << 8) | (d[i + 2]! << 16) | (d[i + 3]! << 24)) ^ c, b = d[i + 4]! | (d[i + 5]! << 8) | (d[i + 6]! << 16) | (d[i + 7]! << 24);
+    c = T[1792 + (a & 255)]! ^ T[1536 + ((a >>> 8) & 255)]! ^ T[1280 + ((a >>> 16) & 255)]! ^ T[1024 + (a >>> 24)]! ^ T[768 + (b & 255)]! ^ T[512 + ((b >>> 8) & 255)]! ^ T[256 + ((b >>> 16) & 255)]! ^ T[b >>> 24]!;
+  }
+  for (; i < n; i++) c = T[(c ^ d[i]!) & 255]! ^ (c >>> 8);
+  return c;
 }
-async function streamBytes(input: Uint8Array, t: CompressionStream | DecompressionStream): Promise<Uint8Array> {
+const crc32 = (d: Uint8Array): number => (crcUpdate(0xffffffff, d) ^ 0xffffffff) >>> 0;
+async function streamBytes(input: Uint8Array, t: DecompressionStream): Promise<Uint8Array> {
   const s = new Blob([input]).stream().pipeThrough(t);
   return new Uint8Array(await new Response(s).arrayBuffer());
 }
-export async function makeZip(entryName: string, data: ArrayBuffer): Promise<Blob> {
-  const raw = new Uint8Array(data), comp = await streamBytes(raw, new CompressionStream('deflate-raw'));
-  const name = new TextEncoder().encode(entryName), crc = crc32(raw);
+/** Let the page paint (a message set just before a long job must be on screen before the job starts). */
+export const paint = (): Promise<void> => new Promise((r) => { const t = setTimeout(r, 60); requestAnimationFrame(() => { clearTimeout(t); setTimeout(r, 0); }); });
+/**
+ * Deflate in 4 MB pieces (through a CompressionStream, off the main thread) with the CRC computed along the way and the
+ * progress reported (done / total bytes): the output stays a list of pieces for the Blob (no copy of the whole).
+ */
+async function deflateChunks(raw: Uint8Array, onProgress?: (done: number, total: number) => void): Promise<{ parts: Uint8Array[]; size: number; crc: number }> {
+  const cs = new CompressionStream('deflate-raw'), writer = cs.writable.getWriter(), reader = cs.readable.getReader();
+  const parts: Uint8Array[] = []; let size = 0;
+  const drain = (async (): Promise<void> => { for (;;) { const { done, value } = await reader.read(); if (done) return; parts.push(value); size += value.length; } })();
+  let c = 0xffffffff;
+  const CH = 4 << 20;
+  for (let o = 0; o < raw.length; o += CH) {
+    const piece = raw.subarray(o, Math.min(raw.length, o + CH));
+    c = crcUpdate(c, piece);
+    await writer.write(piece);
+    onProgress?.(Math.min(raw.length, o + CH), raw.length);
+  }
+  await writer.close(); await drain;
+  return { parts, size, crc: (c ^ 0xffffffff) >>> 0 };
+}
+export async function makeZip(entryName: string, data: ArrayBuffer, onProgress?: (done: number, total: number) => void): Promise<Blob> {
+  const raw = new Uint8Array(data), { parts, size, crc } = await deflateChunks(raw, onProgress);
+  const name = new TextEncoder().encode(entryName);
   const local = new DataView(new ArrayBuffer(30));
   local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(8, 8, true);
   local.setUint16(12, 33, true);                          // DOS date 1980-01-01 (time of day 0)
-  local.setUint32(14, crc, true); local.setUint32(18, comp.length, true); local.setUint32(22, raw.length, true); local.setUint16(26, name.length, true);
+  local.setUint32(14, crc, true); local.setUint32(18, size, true); local.setUint32(22, raw.length, true); local.setUint16(26, name.length, true);
   const central = new DataView(new ArrayBuffer(46));
   central.setUint32(0, 0x02014b50, true); central.setUint16(4, 20, true); central.setUint16(6, 20, true); central.setUint16(10, 8, true);
   central.setUint16(14, 33, true);
-  central.setUint32(16, crc, true); central.setUint32(20, comp.length, true); central.setUint32(24, raw.length, true); central.setUint16(28, name.length, true);
+  central.setUint32(16, crc, true); central.setUint32(20, size, true); central.setUint32(24, raw.length, true); central.setUint16(28, name.length, true);
   central.setUint32(42, 0, true);
   const end = new DataView(new ArrayBuffer(22));
   end.setUint32(0, 0x06054b50, true); end.setUint16(8, 1, true); end.setUint16(10, 1, true);
-  end.setUint32(12, 46 + name.length, true); end.setUint32(16, 30 + name.length + comp.length, true);
-  return new Blob([local, name, comp, central, name, end], { type: 'application/zip' });
+  end.setUint32(12, 46 + name.length, true); end.setUint32(16, 30 + name.length + size, true);
+  return new Blob([local, name, ...parts, central, name, end], { type: 'application/zip' });
 }
 export async function readZip(buf: ArrayBuffer): Promise<ArrayBuffer> {
   const dv = new DataView(buf);
@@ -155,15 +189,19 @@ export async function offerDownload(filename: string, data: Blob): Promise<strin
   try { await dl.save({ filename, data }); return '已匯出 / exported'; }
   catch (e) { const c = (e as { code?: string }).code; if (c === 'declined') return '已取消 / cancelled'; throw new Error(`匯出失敗 / export failed: ${c ?? String(e)}`); }
 }
-export async function exportSave(rec: SaveRecord): Promise<string> {
+export async function exportSave(rec: SaveRecord, progress: (text: string) => void = () => {}): Promise<string> {
   const safe = rec.title.replace(/[^\p{L}\p{N}._ -]+/gu, '_').slice(0, 80);
   const filename = `${safe || 'simulation'}.zip`;
-  const zip = await makeZip('cyclone-save.bin', rec.data);
+  progress('壓縮 0 % / compressing 0 %');
+  let last = 0;
+  const zip = await makeZip('cyclone-save.bin', rec.data, (d, t) => { const now = performance.now(); if (now - last > 150 || d === t) { last = now; progress(`壓縮 ${Math.round(100 * d / t)} %（${fmtBytes(d)} / ${fmtBytes(t)}）/ compressing`); } });
+  progress(`交給下載（${fmtBytes(zip.size)}）… / handing over the download`);
   const own = await offerDownload(filename, zip);
   if (own) return own;
   // embedded in the global page (regional overlay): let the host page offer the file
   if (window.parent !== window) {
     const id = Math.random().toString(36).slice(2);
+    progress('等待下載視窗… / waiting for the download dialog');
     const answer = new Promise<string | null>((resolve) => {
       const on = (ev: MessageEvent): void => { if (ev.source === window.parent && ev.data?.type === 'export-save-done' && ev.data.id === id) { removeEventListener('message', on); resolve(ev.data.result as string | null); } };
       addEventListener('message', on);
@@ -183,16 +221,34 @@ export async function exportSave(rec: SaveRecord): Promise<string> {
 export const fmtBytes = (n: number): string => n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} kB`;
 
 /** Render a saves panel into `root`: list with load / export / delete, a save button and an import
- *  control. `capture` produces the current simulation's save; `onLoad` restores one. */
+ *  control. `capture` produces the current simulation's save; `onLoad` restores one. Every job shows what it is doing in a
+ *  status line at once (and keeps the buttons from being pressed again meanwhile); deleting asks in the page (a
+ *  confirm() dialog is never shown inside an artifact, where it answers "no" by itself). */
 export function mountSavesPanel(root: HTMLElement, kind: 'global' | 'regional',
   capture: () => Promise<{ meta: SaveMeta; data: ArrayBuffer }>, onLoad: (meta: SaveMeta, data: ArrayBuffer) => void, log: (s: string) => void): { refresh(): Promise<void> } {
   root.innerHTML = `<div class="controls"><button data-a="save">存檔目前模擬 / Save now</button><label class="filebtn"><input type="file" accept=".zip,.bin" hidden />匯入存檔 / Import</label></div>
+<div class="muted savestatus" role="status" style="min-height:1.3em;color:#8fc1ff"></div>
 <div class="muted">存檔保存在這個瀏覽器；清除網站資料會一起刪除，重要的請「匯出」成檔案。/ Saves live in this browser and are deleted with the site data; export the important ones.</div>
 <div class="saves"></div>`;
-  const listEl = root.querySelector('.saves') as HTMLElement;
+  const listEl = root.querySelector('.saves') as HTMLElement, statusEl = root.querySelector('.savestatus') as HTMLElement;
+  const saveBtn = root.querySelector('[data-a="save"]') as HTMLButtonElement, input = root.querySelector('input[type=file]') as HTMLInputElement;
+  let working = false;
+  const buttons = (): HTMLButtonElement[] => Array.from(root.querySelectorAll<HTMLButtonElement>("button"));
+  const status = (t: string): void => { statusEl.textContent = t; };
+  /** one job at a time: status at once, buttons off while it runs, the time it took at the end */
+  const job = async (what: string, f: (step: (s: string) => void) => Promise<string | void>): Promise<void> => {
+    if (working) return;
+    working = true; for (const b of buttons()) b.disabled = true; input.disabled = true;
+    const t0 = performance.now(), step = (s: string): void => status(`${what}：${s}`);
+    status(`${what}… / working`); await paint();
+    try { const r = await f(step); log(`${r ?? what} · ${((performance.now() - t0) / 1000).toFixed(1)} s`); }
+    catch (e) { log(`${what}失敗 / failed: ${String((e as Error).message ?? e)}`); }
+    working = false; input.disabled = false; status('');
+    for (const b of buttons()) b.disabled = false;
+  };
   const refresh = async (): Promise<void> => {
-    let items: Omit<SaveRecord, 'data'>[] = [];
-    try { items = await listSaves(kind); } catch (e) { listEl.textContent = `無法使用瀏覽器儲存空間 / browser storage unavailable: ${String(e)}`; return; }
+    let items: SaveInfo[] = [];
+    try { items = await listSaves(kind); } catch (e) { listEl.textContent = `無法使用瀏覽器儲存空間 / browser storage unavailable: ${String((e as Error).message ?? e)}`; return; }
     listEl.replaceChildren();
     if (!items.length) { listEl.textContent = '（尚無存檔 / no saves yet）'; return; }
     for (const it of items) {
@@ -204,13 +260,21 @@ export function mountSavesPanel(root: HTMLElement, kind: 'global' | 'regional',
       const btns = document.createElement('div'); btns.className = 'controls';
       for (const [a, label] of [['load', '載入 / Load'], ['export', '匯出 / Export'], ['del', '刪除 / Delete']] as const) {
         const b = document.createElement('button'); b.textContent = label;
-        b.onclick = async (): Promise<void> => {
-          try {
-            if (a === 'del') { if (!confirm(`刪除「${it.title}」？/ Delete this save?`)) return; await deleteSave(it.id); await refresh(); return; }
+        let armed = 0;
+        b.onclick = (): void => {
+          if (a === 'del') {
+            // first press arms (the button asks), the second within 4 s deletes
+            if (!armed) { armed = window.setTimeout(() => { armed = 0; b.textContent = label; b.style.background = ''; }, 4000); b.textContent = '再按一次確定刪除 / press again to delete'; b.style.background = '#7a2020'; return; }
+            clearTimeout(armed); armed = 0;
+            void job(`刪除「${it.title}」`, async () => { await deleteSave(it.id); await refresh(); return `已刪除 / deleted: ${it.title}`; });
+            return;
+          }
+          void job(a === 'load' ? `載入「${it.title}」` : `匯出「${it.title}」`, async (step) => {
+            step('讀取存檔… / reading the save'); await paint();
             const rec = await loadSave(it.id);
-            if (a === 'load') { log(`載入存檔 / Loading save: ${rec.title}`); onLoad(unpackSave(rec.data).meta, rec.data); }
-            else log(await exportSave(rec));
-          } catch (e) { log(String((e as Error).message ?? e)); }
+            if (a === 'load') { step('還原模式… / restoring'); await paint(); onLoad(unpackSave(rec.data).meta, rec.data); return `已載入 / loaded: ${rec.title}`; }
+            return `${await exportSave(rec, step)}: ${rec.title}`;
+          });
         };
         btns.appendChild(b);
       }
@@ -218,23 +282,28 @@ export function mountSavesPanel(root: HTMLElement, kind: 'global' | 'regional',
       listEl.appendChild(row);
     }
   };
-  (root.querySelector('[data-a="save"]') as HTMLButtonElement).onclick = async (ev): Promise<void> => {
-    const b = ev.currentTarget as HTMLButtonElement;
-    b.disabled = true;
-    try { const { meta, data } = await capture(); await storeSave(meta, data); log(`已存檔 / Saved: ${meta.title} (${fmtBytes(data.byteLength)})`); await refresh(); }
-    catch (e) { log(`存檔失敗 / save failed: ${String((e as Error).message ?? e)}`); }
-    b.disabled = false;
+  saveBtn.onclick = (): void => {
+    void job('存檔', async (step) => {
+      step('擷取模式狀態（等目前這步算完）… / capturing the model state');
+      const { meta, data } = await capture();
+      step(`寫入瀏覽器儲存空間（${fmtBytes(data.byteLength)}）… / writing to browser storage`); await paint();
+      await storeSave(meta, data); await refresh();
+      return `已存檔 / saved: ${meta.title} (${fmtBytes(data.byteLength)})`;
+    });
   };
-  const input = root.querySelector('input[type=file]') as HTMLInputElement;
-  input.onchange = async (): Promise<void> => {
+  input.onchange = (): void => {
     const f = input.files?.[0]; input.value = '';
     if (!f) return;
-    try {
+    void job('匯入', async (step) => {
+      step(`讀取檔案（${fmtBytes(f.size)}）… / reading the file`);
       const data = await readZip(await f.arrayBuffer());
+      step('檢查內容… / checking'); await paint();
       const { meta } = unpackSave(data);
       if (meta.kind !== kind) throw new Error(meta.kind === 'global' ? '這是全球模式的存檔，請在全球模式頁面匯入 / this is a global-model save' : '這是區域模式的存檔，請在區域模式頁面匯入 / this is a regional-model save');
-      await storeSave(meta, data); log(`已匯入 / Imported: ${meta.title}`); await refresh();
-    } catch (e) { log(String((e as Error).message ?? e)); }
+      step('寫入瀏覽器儲存空間… / writing to browser storage');
+      await storeSave(meta, data); await refresh();
+      return `已匯入 / imported: ${meta.title}`;
+    });
   };
   void refresh();
   return { refresh };
