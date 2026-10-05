@@ -513,7 +513,7 @@ export async function regionalChartsTest(): Promise<void> {
   gcheck('charts: updraft helicity rel L2 < 1e-3, CAPE < 1e-2, CIN < 5e-2', uh < 1e-3 && cape < 1e-2 && cin < 5e-2, `${uh.toExponential(1)} ${cape.toExponential(1)} ${cin.toExponential(1)}`);
   {
     // severe-weather indices: wind indices from the same interpolated samples, echo top, VIL, LCL and lifted index
-    const wind = [C.shear, C.srh1, C.srh3].map(rel), vil = rel(C.vil);
+    const wind = [C.shear, C.srh1, C.srh3, C.u850, C.v850, C.u200, C.v200, C.shear01].map(rel), vil = rel(C.vil);
     let lclMis = 0, etMis = 0, liErr = 0, srhMax = 0, shMax = 0, vilMax = 0, etMax = 0;
     for (let q = 0; q < nx * nx; q++) {
       const o = COL * q;
@@ -522,7 +522,7 @@ export async function regionalChartsTest(): Promise<void> {
       liErr = Math.max(liErr, Math.abs(d.col[o + C.li]! - cpu[o + C.li]!));
       srhMax = Math.max(srhMax, Math.abs(cpu[o + C.srh3]!)); shMax = Math.max(shMax, cpu[o + C.shear]!); vilMax = Math.max(vilMax, cpu[o + C.vil]!); etMax = Math.max(etMax, cpu[o + C.etop]!);
     }
-    gcheck('charts: GPU 0-6 km shear, 0-1 / 0-3 km helicity (rel L2 < 1e-4) and VIL (< 1e-3) match the CPU; LCL and echo top identical in 98 % of columns, lifted index within 0.02 K; all present',
+    gcheck('charts: GPU 0-6 and 0-1 km shear, 0-1 / 0-3 km helicity, 850 / 200 hPa winds (rel L2 < 1e-4) and VIL (< 1e-3) match the CPU; LCL and echo top identical in 98 % of columns, lifted index within 0.02 K; all present',
       wind.every((x) => x < 1e-4) && vil < 1e-3 && lclMis <= 0.02 * nx * nx && etMis <= 0.02 * nx * nx && liErr < 0.02 && srhMax > 10 && shMax > 10 && vilMax > 1 && etMax > 5000,
       `${wind.map((x) => x.toExponential(1)).join(' ')} ${vil.toExponential(1)}; LCL ${lclMis}, echo top ${etMis} columns differ, LI ${liErr.toExponential(1)} K; SRH ${srhMax.toFixed(0)} m2/s2, shear ${shMax.toFixed(1)} m/s, VIL ${vilMax.toFixed(1)} kg/m2, echo top ${(etMax / 1000).toFixed(1)} km`);
   }

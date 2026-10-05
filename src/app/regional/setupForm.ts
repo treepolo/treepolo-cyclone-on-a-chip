@@ -22,7 +22,7 @@ const FIELDS: Field[] = [
   { key: 'dx', label: '水平格距 / Δx (km)', group: 'grid', kind: 'num', scale: 1000, step: 0.25, tip: '越細越真實也越慢：格點數 ∝ 1/Δx² / finer is more realistic and slower: cells grow as 1/Δx²' },
   { key: 'top', label: '模式頂 / Top (km)', group: 'grid', kind: 'num', scale: 1000, step: 1, show: notAxi },
   { key: 'dz', label: '垂直格距 / Δz (m)', group: 'grid', kind: 'num', step: 50, show: notAxi },
-  { key: 'dt', label: '時間步長 / Δt (s, 0 = 自動 auto)', group: 'grid', kind: 'num', step: 1, show: notAxi, tip: '0 = 依格距自動選擇；太大會數值發散 / 0 picks one from the grid spacing; too large blows up' },
+  { key: 'dt', label: '步長 / Step size Δt (s, 0 = 自動 auto)', group: 'grid', kind: 'num', step: 1, show: notAxi, tip: '0 = 依格距自動選擇；太大會數值發散 / 0 picks one from the grid spacing; too large blows up' },
   { key: 'boundary', label: '側邊界 / Boundaries', group: 'grid', kind: 'sel', options: [['periodic', '週期 / periodic'], ['open', '開放 / open']], show: notAxi,
     tip: '週期：從一邊出去的空氣從對邊回來；開放：邊緣向環境場鬆弛 / periodic: what leaves one side enters the other; open: the edges relax to the environment' },
   { key: 'follow', label: '計算範圍跟隨風暴 / Domain follows the storm', group: 'grid', kind: 'chk', show: notAxi },
@@ -138,7 +138,7 @@ export class SetupForm {
     this.showFields();
     if (this.isNest) { this.info.textContent = '巢狀區域的條件來自全球模式 / the nest takes its conditions from the global model'; this.applyBtn.disabled = true; return; }
     const s = this.value(), cells = setupCells(s), nz = Math.round(s.top / s.dz), nx = Math.round(s.L / s.dx);
-    const parts = [presetById(s.preset)?.axi ? `軸對稱 / axisymmetric, Δr ${Math.max(1, Math.min(4, s.dx / 1000))} km` : `${nx}×${nx}×${nz} = ${(cells / 1e6).toFixed(cells < 1e6 ? 2 : 1)} M 格點 / cells · Δt ${autoDt(s)} s`, envText(s)];
+    const parts = [presetById(s.preset)?.axi ? `軸對稱 / axisymmetric, Δr ${Math.max(1, Math.min(4, s.dx / 1000))} km` : `${nx}×${nx}×${nz} = ${(cells / 1e6).toFixed(cells < 1e6 ? 2 : 1)} M 格點 / cells · 步長 ${autoDt(s)} s`, envText(s)];
     if (!presetById(s.preset)?.axi) {
       if (cells > MAX_CELLS) parts.push(`⚠ 太大（上限 ${MAX_CELLS / 1e6} M）/ too large (limit ${MAX_CELLS / 1e6} M)`);
       else if (cells > 10e6) parts.push('⚠ 可能超過顯示卡記憶體 / may exceed the GPU memory');

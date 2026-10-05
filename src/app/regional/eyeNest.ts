@@ -87,14 +87,14 @@ export class EyeNest {
 
   /**
    * Inner steps for an outer step dt: the configured inner step, or (rate: the inner grid's largest Courant rate, 1/s)
-   * the adaptive one (Courant number 0.8, growing by at most 10 % per check, within the acoustic limit on the GPU).
+   * the adaptive one (target Courant number cfl, 0.8 by default, growing by at most 10 % per check, within the acoustic limit on the GPU).
    */
-  fit(dt: number, rate: number | null = null): void {
+  fit(dt: number, rate: number | null = null, cfl: number = CFL_TARGET): void {
     let dtc = this.dt0;
     if (rate !== null && Number.isFinite(rate)) {
       const c = this.m.c, cur = dt / this.nsub, ac = c.nsound * 0.45 * Math.min(c.dx, c.dy) / 350;
       const hi = this.gpu ? Math.max(this.dt0, Math.min(3 * this.dt0, ac)) : this.dt0;
-      let next = Math.min(hi, CFL_TARGET / Math.max(rate, 1e-9));
+      let next = Math.min(hi, cfl / Math.max(rate, 1e-9));
       if (next > cur) next = Math.min(next, 1.1 * cur);
       dtc = Math.max(0.25 * this.dt0, next);
     }

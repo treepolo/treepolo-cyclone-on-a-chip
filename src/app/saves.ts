@@ -8,8 +8,8 @@
 //   download otherwise
 
 export interface SaveArrays { [name: string]: Float32Array | Uint8Array }
-export interface SaveMeta { kind: 'global' | 'regional'; title: string; [k: string]: unknown }
-export interface SaveRecord { id: string; kind: 'global' | 'regional'; title: string; created: number; bytes: number; data: ArrayBuffer }
+export interface SaveMeta { kind: 'global' | 'regional' | 'replay'; title: string; [k: string]: unknown }
+export interface SaveRecord { id: string; kind: 'global' | 'regional' | 'replay'; title: string; created: number; bytes: number; data: ArrayBuffer }
 
 const MAGIC = 0x53435943;   // 'CYCS' little-endian
 
@@ -299,7 +299,7 @@ export function mountSavesPanel(root: HTMLElement, kind: 'global' | 'regional',
       const data = await readZip(await f.arrayBuffer());
       step('檢查內容… / checking'); await paint();
       const { meta } = unpackSave(data);
-      if (meta.kind !== kind) throw new Error(meta.kind === 'global' ? '這是全球模式的存檔，請在全球模式頁面匯入 / this is a global-model save' : '這是區域模式的存檔，請在區域模式頁面匯入 / this is a regional-model save');
+      if (meta.kind !== kind) throw new Error(meta.kind === 'replay' ? '這是回放資料，請用「回放」面板的「載入回放資料」 / this is replay data: use "Load replay data" in the replay panel' : meta.kind === 'global' ? '這是全球模式的存檔，請在全球模式頁面匯入 / this is a global-model save' : '這是區域模式的存檔，請在區域模式頁面匯入 / this is a regional-model save');
       step('寫入瀏覽器儲存空間… / writing to browser storage');
       await storeSave(meta, data); await refresh();
       return `已匯入 / imported: ${meta.title}`;

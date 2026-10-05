@@ -8,7 +8,7 @@ import { IceMicrophysics, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { tcSounding, eyewallPeaks, type TcSounding } from '../../regional/tropical.js';
 import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, albedo } from '../../regional/display.js';
 import { GALE7, GALE10 } from '../../regional/storms.js';
-import { SECTION_VARS, WV_PATH, ETOP_DBZ, VIL_ZMAX, qsatW, sectionValues, parcelAscent, pressure, windIndices, level500, stpIndex, scpIndex, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
+import { SECTION_VARS, WV_PATH, ETOP_DBZ, VIL_ZMAX, qsatW, sectionValues, parcelAscent, pressure, windIndices, level500, levelNear, stpIndex, scpIndex, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { ChartData, ChartRequest, GroundField, RegionalFrame, TcRain } from './protocol.js';
 
 /** User-adjustable parameters of the axisymmetric experiment. */
@@ -127,13 +127,13 @@ export class AxiDriver {
 
   /** Column composites per radius (same meaning as the 3-D column records). */
   private columns(): { dbz: Float64Array; ctopT: Float64Array; ctopZ: Float64Array; uh: Float64Array; wMax: Float64Array; cape: Float64Array; cin: Float64Array; vis: Float64Array; visZ: Float64Array; pw: Float64Array; wvT: Float64Array;
-    shear: Float64Array; srh1: Float64Array; srh3: Float64Array; lcl: Float64Array; li: Float64Array; etop: Float64Array; vil: Float64Array; wmin: number; cmax: number; pmax: number } {
+    shear: Float64Array; shear01: Float64Array; shear850200: Float64Array; srh1: Float64Array; srh3: Float64Array; lcl: Float64Array; li: Float64Array; etop: Float64Array; vil: Float64Array; wmin: number; cmax: number; pmax: number } {
     const ax = this.ax, { nz, dz } = ax.a, nr = this.nDisp;
     const vis = new Float64Array(nr), visZ = new Float64Array(nr), pw = new Float64Array(nr), wvT = new Float64Array(nr), bet = new Float64Array(nz);
     // severe-weather indices as columnDiagnostics (the wind in radial / tangential components: the indices do not
     // depend on the direction of the axes)
-    const shear = new Float64Array(nr), srh1 = new Float64Array(nr), srh3 = new Float64Array(nr), lcl = new Float64Array(nr), li = new Float64Array(nr), etop = new Float64Array(nr), vil = new Float64Array(nr);
-    const Tp = new Float64Array(nz), k500 = level500(ax.pi0), zc0 = ax.zc[0]!;
+    const shear = new Float64Array(nr), shear01 = new Float64Array(nr), shear850200 = new Float64Array(nr), srh1 = new Float64Array(nr), srh3 = new Float64Array(nr), lcl = new Float64Array(nr), li = new Float64Array(nr), etop = new Float64Array(nr), vil = new Float64Array(nr);
+    const Tp = new Float64Array(nz), k500 = level500(ax.pi0), k850 = levelNear(ax.pi0, 85000), k200 = levelNear(ax.pi0, 20000), zc0 = ax.zc[0]!;
     const dbz = new Float64Array(nr).fill(-30), ctopT = new Float64Array(nr), ctopZ = new Float64Array(nr), uh = new Float64Array(nr), wMax = new Float64Array(nr), cape = new Float64Array(nr), cin = new Float64Array(nr);
     const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz);
     const zs = Array.from({ length: nz }, (_, k) => (ax.zc[k]! >= 2000 && ax.zc[k]! <= 5000 ? this.zeta(k) : null));
@@ -166,7 +166,9 @@ export class AxiDriver {
         const ua = 0.5 * (ax.u[qa]! + ax.u[qa + 1]!), ub = 0.5 * (ax.u[qb]! + ax.u[qb + 1]!), va = ax.v[qa]!, vb = ax.v[qb]!;
         return [ua + (ub - ua) * f, va + (vb - va) * f];
       });
-      shear[i] = wi.shear; srh1[i] = wi.srh1; srh3[i] = wi.srh3;
+      shear[i] = wi.shear; shear01[i] = wi.shear1; srh1[i] = wi.srh1; srh3[i] = wi.srh3;
+      // 200 - 850 hPa: radial and tangential wind components stand in for u, v (same rotation at both levels)
+      { const a = ax.idx(i, 0, k850), b = ax.idx(i, 0, k200); shear850200[i] = Math.hypot(0.5 * (ax.u[b]! + ax.u[b + 1]!) - 0.5 * (ax.u[a]! + ax.u[a + 1]!), ax.v[b]! - ax.v[a]!); }
       // satellite-like values as columnDiagnostics (src/regional/diagnostics.ts)
       let above = pw[i]!, zEmit = ax.zc[nz - 1]!; wvT[i] = T[nz - 1]!;
       for (let k = 0; k < nz; k++) { above -= ax.rho0[k]! * dz * Math.max(0, qv[k]!); if (above < WV_PATH) { wvT[i] = T[k]!; zEmit = ax.zc[k]!; break; } }
@@ -183,7 +185,7 @@ export class AxiDriver {
       this.swath.uh[i] = Math.max(this.swath.uh[i]!, uh[i]!);
       this.swath.wind[i] = Math.max(this.swath.wind[i]!, Math.hypot(0.5 * (ax.u[q]! + ax.u[q + 1]!), ax.v[q]!));
     }
-    return { dbz, ctopT, ctopZ, uh, wMax, cape, cin, vis, visZ, pw, wvT, shear, srh1, srh3, lcl, li, etop, vil, wmin, cmax, pmax };
+    return { dbz, ctopT, ctopZ, uh, wMax, cape, cin, vis, visZ, pw, wvT, shear, shear01, shear850200, srh1, srh3, lcl, li, etop, vil, wmin, cmax, pmax };
   }
 
   // ---------------------------------------------------------------- revolving onto the display grid
@@ -284,6 +286,7 @@ export class AxiDriver {
         storms: [{ id: 1, kind: 'vortex', name: 'TC1', x: origin.x + this.D, y: origin.y + this.D, xd: this.D, yd: this.D, u: 0, v: 0, age: ax.time,
           pmin: this.centralSlp(), dp: -mt.dp, vmax: mt.vmax, rmw: mt.rmw, r7: this.galeRadius(GALE7), r10: this.galeRadius(GALE10) }], mainId: 1 },
       origin, charts, tracers: null, nest: null, stepsPerSecond, dt: ax.a.dt,
+      step: { mode: 'manual', cfl: 0, dt0: ax.a.dt, adv: 0, ac: 0, seq: 0 },
     };
     return { msg, transfer };
   }
@@ -321,6 +324,10 @@ export class AxiDriver {
         case 'cuRain': prof = new Float64Array(nr); break;
         case 'sfcT': prof = sfc('T'); break;
         case 'shear06': prof = col.shear; break;
+        case 'shear01': prof = col.shear01; break;
+        case 'shear850200': prof = col.shear850200; break;
+        // a constant sea surface under the whole vortex
+        case 'sst': prof = new Float64Array(nr).fill(this.p.sst - 273.15); break;
         case 'srh01': prof = col.srh1; break;
         case 'srh03': prof = col.srh3; break;
         case 'lcl': prof = col.lcl.map((x) => (x < 0 ? NaN : x / 1000)); break;

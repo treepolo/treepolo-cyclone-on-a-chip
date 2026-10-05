@@ -1,6 +1,7 @@
 // Messages between the regional-model UI and its worker.
 import type { MapVar, SliceVar, SectionVar, RzVar } from '../../regional/diagnostics.js';
 import type { StormNow } from '../../regional/storms.js';
+import type { ReplayAux, ReplayMeta, ReplayRec, ReplayTier, Q16 } from '../../regional/replayData.js';
 
 export type RegionalExperiment = 'supercell' | 'tc' | 'supercell_hr' | 'tc_hr' | 'tc_3' | 'nest' | 'tornado' | 'tornado_c' | 'tc_axi' | 'custom';
 /** tropical cyclones: mean rain rate in the core and the outer region over the last model hour (mm/h), outer wet fraction */
@@ -34,6 +35,14 @@ export type ToRegionalWorker =
   /** time every GPU kernel for a few steps and report */
   | { type: 'profile' }
   | { type: 'adaptive'; on: boolean }
+  /** step size: automatic (from the Courant number; `cfl` is its target) or manual (`dt` seconds, kept as it is) */
+  | { type: 'step'; mode: 'auto' | 'manual'; dt?: number; cfl?: number; /** counted by the page; the frames echo the last one handled, so a frame sent before it is not taken for the new state */ seq?: number }
+  /** recording for the replay: every `every` model seconds a frame is kept (`keep` in the frame) with what `tier` says */
+  | { type: 'record'; on: boolean; tier: ReplayTier; every: number; /** keep the next frame at once */ now?: boolean }
+  /** the charts of a recorded frame (tier 'full'): computed on a model of its own from the packed state; the meta and the
+   *  frame data are sent only when the worker does not hold them (`need` in the answer) */
+  | { type: 'replayChart'; id: number; req: ChartRequest; metaId: number; meta?: ReplayMeta; key: number;
+      frame?: { state: Q16[]; aux: ReplayAux | null; centre: { x: number; y: number } | null } }
   /** continue the running simulation on the finer grid of its set-up (build.ts refinedSetup) */
   | { type: 'refine' }
   /** refine the eye and eyewall: a finer grid (spacings near dx, dz; m) in a cylinder of radius R (m) at the centre of the
@@ -140,6 +149,10 @@ export interface RegionalFrame {
     /** tropical cyclones: mean precipitation rates (mm/h) in the core (< 60 km) and the outer region (100-300 km) over the last
      *  completed model hour, and the outer area fraction raining more than 1 mm/h (rainband diagnostics) */
     tcRain?: TcRain | null;
+    /** tropical cyclones: environmental deep-layer shear: the vector difference of the 200 and 850 hPa winds averaged over the
+     *  200-800 km annulus around the centre (the vortex itself averages out): magnitude (m/s) and the direction it points toward
+     *  (degrees clockwise from north) */
+    shear?: { mag: number; dir: number } | null;
     /** tropical cyclones: azimuthal-mean tangential wind at 1.5 km, rings of width dr from the centre */
     vtProfile: { dr: number; vt: number[] } | null;
     /** tornado-like vortex at the lowest level (grids of 500 m or finer): vertical vorticity >= 0.1 s^-1 with a
@@ -154,8 +167,14 @@ export interface RegionalFrame {
   /** the eye nest's volume (null: none) */
   nest: NestFrame | null;
   stepsPerSecond: number;
-  /** current time step (s): varies with adaptive stepping on the GPU */
+  /** current step size (s): varies with the automatic step size */
   dt: number;
+  /** the step size control: mode, the target Courant number of the automatic mode, the nominal step (s) of the set-up, and the
+   *  Courant numbers of the current step: advective (sum over the three directions of |u| dt / dx) and of the acoustic sub-steps */
+  step: { mode: 'auto' | 'manual'; cfl: number; dt0: number; adv: number; ac: number; seq: number };
+  /** a frame the replay keeps (recording on and its interval reached), with what the recording tier adds */
+  keep?: boolean;
+  rec?: ReplayRec | null;
 }
 
 export type FromRegionalWorker =
@@ -176,6 +195,8 @@ export type FromRegionalWorker =
   /** the lasting wind forcings now (domain positions, m; until: model time they end, null: until cleared) */
   | { type: 'forcings'; list: ForcingInfo[] }
   | { type: 'profile'; text: string }
+  /** charts of a recorded frame; `need`: the worker holds no meta / no frame data of that id, send it again */
+  | { type: 'replayChart'; id: number; charts: ChartData | null; need?: 'meta' | 'frame'; error?: string }
   | { type: 'paused'; reason: string }
   | { type: 'log'; text: string }
   | { type: 'saveData'; meta: import('../saves.js').SaveMeta; buffer: ArrayBuffer }

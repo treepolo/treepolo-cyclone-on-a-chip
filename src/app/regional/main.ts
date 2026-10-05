@@ -11,7 +11,10 @@ import { defaultDt, type RegionalSetup } from './setup.js';
 import type { StormNow } from '../../regional/storms.js';
 import { Tools3D } from './tools3d.js';
 import { ReplayStore, type ReplayFrame } from './replay.js';
-import type { FromRegionalWorker, GroundField, NestInfo, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import { ReplayCharts } from './replayCharts.js';
+import { mountReplayPanel } from './replayPanel.js';
+import type { ReplayMeta } from '../../regional/replayData.js';
+import type { ChartData, FromRegionalWorker, GroundField, RegionalFrame, NestInfo, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 import { nestGeometry, nestCells } from '../../regional/twoway.js';
 import type { RegionalConfig } from '../../regional/core.js';
 
@@ -37,9 +40,13 @@ let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } |
 const missions = new Missions($('missions'), (s) => log(s));
 let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
 let lastVol: ReplayFrame | null = null, refining = false;
-// replay of the 3-D view: frames kept by the page (memory budget from the device memory when the browser tells it)
-const replay = new ReplayStore(Math.min(400, 64 * ((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 4)) * 1e6);
+// replay: frames the worker marks to be kept (the recording settings are in the replay panel); a replay file loaded from disk
+// is shown from a store of its own (fileMode), apart from the live recording
+const replay = new ReplayStore(400e6), fileStore = new ReplayStore(400e6);
+let fileMode = false;
+const rs = (): ReplayStore => (fileMode ? fileStore : replay);
 let replayIdx: number | null = null, replayPlaying = false, replayAcc = 0;
+const replayCharts = new ReplayCharts((m) => send(m));
 /** satellite picture renderer (undefined: not made yet, null: unavailable) and the 3-D view's second channel */
 let sat: SatelliteRenderer | null | undefined, volMode = 0;
 /** Show a stored or live display volume in the 3-D view. */
@@ -48,10 +55,11 @@ function showVolume(f: ReplayFrame): void {
   view.setGround(f.nx, f.ny, f.ground);
 }
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
-  request: (req) => send({ type: 'charts', req }),
+  request: (req) => { if (replayIdx !== null) void replayChartsNow(); else send({ type: 'charts', req }); },
   volMode: (mode) => { volMode = mode; send({ type: 'volMode', mode }); view.setMode(mode); },
   tracers: (n) => send({ type: 'tracers', n }),
   interact: (kind, x, y, radius) => {
+    if (replayIdx !== null) { log('回放中不能互動；先按「回到即時」/ no interaction during a replay: press Live first'); return; }
     if (kind === 'warm' || kind === 'cold') send({ type: 'perturb', kind, x, y });
     else if (kind !== 'inspect') send({ type: 'paint', kind, x, y, radius });
   },
@@ -59,25 +67,28 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
   cut: (c) => view.setCut(c),
   // satellite pictures of the live frame (the renderer is made when first wanted)
   satellite: (r) => {
-    const f = lastVol; if (!f) return null;
+    const f = replayIdx !== null ? rs().frames[replayIdx] ?? null : lastVol; if (!f) return null;
     if (sat === undefined) sat = SatelliteRenderer.create();
     return sat ? sat.render(f, { ...r, precip: volMode === 0, land, sea: curSea }) : null;
   },
   view: (v) => {
     $('view').hidden = v !== '3d'; $('chart').hidden = v === '3d';
-    if (v === '3d') { const f = replayIdx !== null ? replay.frames[replayIdx] : lastVol; if (f) showVolume(f); }
+    if (v === '3d') { const f = replayIdx !== null ? rs().frames[replayIdx] : lastVol; if (f) showVolume(f); }
+    else if (replayIdx !== null) void replayChartsNow();
   },
 });
 
 worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
   if (m.type === 'ready') {
+    // a new model ends the replay (a refinement keeps the recording, but not a replay file shown)
+    if (!refining || fileMode) { replay.clear(); endReplay(); }
     dt = m.dt;
     land = m.land;
     gridNow = { nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dz: m.dz, dt: m.dt, open: m.setup?.boundary === 'open' };
     // vertical exaggeration so that the troposphere is visible (unless chosen)
     if (exag === null) { const e = autoExag(m.nx * m.dx); $<HTMLInputElement>('exag').value = String(e); $('exagV').textContent = `${e}×`; }
-    $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${m.dx >= 1000 ? `${(m.dx / 1000).toFixed(1)} km` : `${m.dx.toFixed(0)} m`}, Δz ${m.dz.toFixed(0)} m, Δt ${m.dt} s`;
+    $('grid').textContent = `${m.nx}×${m.ny}×${m.nz}, Δx ${m.dx >= 1000 ? `${(m.dx / 1000).toFixed(1)} km` : `${m.dx.toFixed(0)} m`}, Δz ${m.dz.toFixed(0)} m, 步長 ${m.dt} s`;
     $('backend').textContent = m.backend === 'gpu' ? 'WebGPU（f32）' : 'CPU（Float64）';
     if (m.note) log(m.note);
     $('desc').textContent = m.description;
@@ -102,8 +113,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     showSurface();
     tools.setGrid({ Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, dx: m.dx, dz: m.dz, paint: m.setup ? m.setup.fluxes && !presetAxi(m.setup) : m.experiment === 'nest', interact: m.experiment !== 'tc_axi' });
     missions.reset({ e: m.experiment, tc: m.tc });
-    if (!refining) { replay.clear(); endReplay(); }
     refining = false;
+    replayPanel.onReady(m.tc, m.experiment === 'tc_axi');
     log(`就緒 / Ready: ${m.description}`);
   } else if (m.type === 'frame') {
     runner.sample(m);
@@ -122,22 +133,28 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
-    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [], nest: m.nest };
+    lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dz: m.dz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [], nest: m.nest,
+      stats: m.stats, origin: m.origin };
     if (m.nest) showNest(m.nest);
-    replay.push(lastVol);
+    // the frames the worker marks (recording interval in model time) go to the replay store
+    if (m.keep && !fileMode) { if (!replay.push({ ...lastVol, rec: m.rec ?? null })) replayPanel.onFull(); replayPanel.refresh(); }
     if (in3d && replayIdx === null) { showVolume(lastVol); view.setTracers(m.tracers, m.nx * m.dx, m.ny * m.dx, m.nz * m.dz); }
     replayBar();
     const s = m.stats, t = m.time;
     $('time').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h (${(t / 86400).toFixed(2)} d)`;
     $('ovTime').textContent = t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`;
+    dt = m.dt;
+    showStep(m.step, m.dt);
     const ms = m.stepsPerSecond * m.dt;
-    $('rate').textContent = `${m.stepsPerSecond.toFixed(m.stepsPerSecond < 10 ? 2 : 1)} 步/s steps/s · ${ms < 60 ? `${ms.toFixed(1)} 模式秒/s model-s/s` : `${(ms / 60).toFixed(1)} 模式分/s model-min/s`} · Δt ${m.dt.toFixed(1)} s`;
+    $('rate').textContent = `${m.stepsPerSecond.toFixed(m.stepsPerSecond < 10 ? 2 : 1)} 步/s steps/s · ${ms < 60 ? `${ms.toFixed(1)} 模式秒/s model-s/s` : `${(ms / 60).toFixed(1)} 模式分/s model-min/s`} · 步長 ${m.dt.toFixed(1)} s`;
     $('w').textContent = `${s.wmin.toFixed(1)} … ${s.wmax.toFixed(1)} m/s`;
     $('qc').textContent = `${(s.qcmax * 1000).toFixed(2)} g/kg`;
     $('qr').textContent = `${(s.qrmax * 1000).toFixed(2)} g/kg`;
     $('rainmax').textContent = `${s.rainmax.toFixed(1)} mm`;
     $('vmax').textContent = `${s.vmax.toFixed(1)} m/s`;
     $('dp').textContent = s.dp === null ? '—' : `${s.dp.toFixed(1)} hPa${s.rmw ? ` · RMW ${(s.rmw / 1000).toFixed(0)} km` : ''}`;
+    const dirName = (d: number): string => ['北', '東北', '東', '東南', '南', '西南', '西', '西北'][Math.round(d / 45) % 8]!;
+    $('envShear').textContent = s.shear ? `${s.shear.mag.toFixed(1)} m/s（指向${dirName(s.shear.dir)} ${s.shear.dir.toFixed(0)}°）` : '—';
     $('eyewalls').textContent = !s.eyewalls ? '—' : s.eyewalls.length === 0 ? '未形成 / none yet'
       : (s.eyewalls.length >= 2 ? '雙眼牆 / concentric: ' : '') + s.eyewalls.map((e) => `${(e.r / 1000).toFixed(0)} km (${e.v.toFixed(0)} m/s)`).join(' · ');
     $('zeta').textContent = `${s.zetaMax.toFixed(3)} s⁻¹ · ${s.vGround.toFixed(1)} m/s`;
@@ -151,6 +168,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; $('ovRun').textContent = '▶'; if (runner.running) void runner.end('done'); }
   else if (m.type === 'log') log(m.text);
   else if (m.type === 'land') { land = m.land; charts.setLand(m.land); showSurface(); }
+  else if (m.type === 'replayChart') replayCharts.onAnswer(m);
   else if (m.type === 'forcings') tools.setForcings(m.list);
   else if (m.type === 'profile') { $('profileOut').textContent = m.text; $<HTMLButtonElement>('profile').disabled = false; }
 };
@@ -226,7 +244,7 @@ function showStorms(list: StormNow[], mainId: number | null, f: { nx: number; ny
 }
 /** Labels above the storms in the 3-D view (redrawn every animation frame: the camera moves). */
 function placeStormLabels(): void {
-  const host = $('stormLabels'), rf = replayIdx !== null ? replay.frames[replayIdx] ?? null : null;
+  const host = $('stormLabels'), rf = replayIdx !== null ? rs().frames[replayIdx] ?? null : null;
   const list = rf ? rf.storms : stormsNow;
   if (charts.view !== '3d' || !$<HTMLInputElement>('showLabels').checked || (!rf && !stormFrame) || !list.length) { if (host.childElementCount) host.replaceChildren(); return; }
   const [bx, by, bz] = view.boxSize, Lx = rf ? rf.Lx : stormFrame!.nx * stormFrame!.dx, Ly = rf ? rf.Ly : stormFrame!.ny * stormFrame!.dx, off = $('view').offsetTop;
@@ -276,12 +294,38 @@ $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectEle
 $('subgrid').onchange = (): void => send({ type: 'subgrid', on: $<HTMLInputElement>('subgrid').checked });
 $('exag').oninput = (): void => {
   exag = Number($<HTMLInputElement>('exag').value); $('exagV').textContent = `${exag}×`;
-  const f = replayIdx !== null ? replay.frames[replayIdx] : lastVol;
+  const f = replayIdx !== null ? rs().frames[replayIdx] : lastVol;
   if (f && charts.view === '3d') showVolume(f);
 };
 $('fov').oninput = (): void => { const d = Number($<HTMLInputElement>('fov').value); view.setFov(d); $('fovV').textContent = `${d}°`; };
 $('speed').oninput = (): void => send({ type: 'speed', stepsPerTick: Number($<HTMLInputElement>('speed').value) });
-$('adaptive').onchange = (): void => send({ type: 'adaptive', on: $<HTMLInputElement>('adaptive').checked });
+// Step size (Δt): automatic with a target Courant number, or a manual value (editing the value makes it manual)
+const dtModeEl = $<HTMLSelectElement>('dtMode'), dtValEl = $<HTMLInputElement>('dtVal'), dtCflEl = $<HTMLInputElement>('dtCfl');
+const stepNow = (): number => { const v = Number(dtValEl.value); return Number.isFinite(v) && v > 0 ? v : dt; };
+let stepSeq = 0;
+const sendCfl = (): void => { const c = Number(dtCflEl.value); if (Number.isFinite(c) && c > 0) send({ type: 'step', seq: ++stepSeq, mode: dtModeEl.value as 'auto' | 'manual', cfl: c, ...(dtModeEl.value === 'manual' ? { dt: stepNow() } : {}) }); };
+dtModeEl.onchange = (): void => { if (dtModeEl.value === 'auto') sendCfl(); else send({ type: 'step', seq: ++stepSeq, mode: 'manual', dt: stepNow() }); };
+dtCflEl.onchange = sendCfl;
+const setManual = (v: number): void => { if (!(v > 0)) return; dtModeEl.value = 'manual'; dtValEl.value = String(+v.toPrecision(3)); send({ type: 'step', seq: ++stepSeq, mode: 'manual', dt: v }); };
+dtValEl.onchange = (): void => setManual(Number(dtValEl.value));
+$('dtHalf').onclick = (): void => setManual(stepNow() / 2);
+$('dtDouble').onclick = (): void => setManual(stepNow() * 2);
+/** Show the step size control of a frame (not over a field being edited). */
+function showStep(s: { mode: 'auto' | 'manual'; cfl: number; dt0: number; adv: number; ac: number; seq: number }, dtNow: number): void {
+  // (a frame sent before the worker handled the last change still shows the old state: its controls are not taken)
+  const fixed = curExp === 'tc_axi', active = document.activeElement, stale = s.seq < stepSeq;
+  dtModeEl.disabled = dtValEl.disabled = dtCflEl.disabled = fixed;
+  $<HTMLButtonElement>('dtHalf').disabled = $<HTMLButtonElement>('dtDouble').disabled = fixed;
+  if (active !== dtModeEl && !stale) dtModeEl.value = fixed ? 'manual' : s.mode;
+  if (active !== dtCflEl && !stale && s.cfl > 0) dtCflEl.value = String(s.cfl);
+  if (active !== dtValEl && !stale) dtValEl.value = String(+dtNow.toPrecision(3));
+  $('dtCflRow').hidden = dtModeEl.value === 'manual';
+  const info = $('dtInfo');
+  if (fixed) { info.textContent = '固定 / fixed'; info.style.color = ''; return; }
+  const bad = s.adv > 1.2 || s.ac > 0.7;
+  info.textContent = `平流 ${s.adv.toFixed(2)} · 聲波 ${s.ac.toFixed(2)}${s.mode === 'auto' ? ` · 基準 ${s.dt0.toFixed(1)} s` : ''}`;
+  info.style.color = bad ? '#e86a4a' : '';
+}
 // Nesting: embedded by the global page (in-page overlay, #nest...) or opened with ?nest=1; the
 // parent/opener posts the global state and the chosen point.
 const host = window.parent !== window ? window.parent : (window.opener as Window | null);
@@ -298,38 +342,82 @@ if (location.hash.startsWith('#nest') || new URLSearchParams(location.search).ha
 }
 if (window.parent !== window) { const back = document.getElementById('backLink'); if (back) back.hidden = true; }
 init();
-// ---------------- replay of the 3-D view
+// ---------------- replay
 const fmtT = (t: number): string => (t < 7200 * 3 ? `${(t / 60).toFixed(0)} min` : `${(t / 3600).toFixed(1)} h`);
 function replayBar(): void {
-  const n = replay.length, sl = $<HTMLInputElement>('rpSlider');
+  const st = rs(), n = st.length, sl = $<HTMLInputElement>('rpSlider');
   sl.max = String(Math.max(0, n - 1));
   if (replayIdx === null) return;
   replayIdx = Math.min(replayIdx, n - 1);
   sl.value = String(replayIdx);
-  const f = replay.frames[replayIdx];
-  $('rpTime').textContent = f ? `${fmtT(f.t)}（${replayIdx + 1}/${n}）` : '—';
+  const f = st.frames[replayIdx];
+  $('rpTime').textContent = f ? `${fileMode ? '檔案 ' : ''}${fmtT(f.t)}（${replayIdx + 1}/${n}）` : '—';
+}
+/** the chart data of the replayed frame for the charts' current request (one at a time; the newest request waits its turn) */
+let rpBusy = false, rpAgain = false;
+async function replayChartsNow(): Promise<void> {
+  if (rpBusy) { rpAgain = true; return; }
+  rpBusy = true;
+  try {
+    do {
+      rpAgain = false;
+      const st = rs(), i = replayIdx, f = i === null ? undefined : st.frames[i];
+      if (!f || charts.view === '3d') continue;
+      let charts_: ChartData, note: string;
+      try { ({ charts: charts_, note } = await replayCharts.compute(f, st, charts.currentRequest())); }
+      catch (e) { log(`回放圖表失敗 / replay chart failed: ${String((e as Error).message ?? e)}`); continue; }
+      if (replayIdx === null || st.frames[replayIdx] !== f) continue;                     // moved on meanwhile
+      const frame = { type: 'frame', time: f.t, nx: f.nx, ny: f.ny, nz: f.nz, dx: f.dx, dz: f.dz, cloud: f.cloud, rain: f.rain, ground: new Float32Array(0), groundField: 'rain', groundRange: [0, 1],
+        stats: f.stats, origin: f.origin, charts: charts_, tracers: null, nest: f.nest ?? null, stepsPerSecond: 0, dt: 0, step: { mode: 'manual', cfl: 0, dt0: 0, adv: 0, ac: 0, seq: 0 } } as RegionalFrame;
+      charts.showReplay(frame, note);
+    } while (rpAgain);
+  } finally { rpBusy = false; }
 }
 function showReplay(i: number): void {
-  if (!replay.length) return;
-  replayIdx = Math.max(0, Math.min(replay.length - 1, i));
-  const f = replay.frames[replayIdx]!;
+  const st = rs();
+  if (!st.length) return;
+  replayIdx = Math.max(0, Math.min(st.length - 1, i));
+  const f = st.frames[replayIdx]!;
   if (charts.view === '3d') { showVolume(f); view.setTracers(null, f.Lx, f.Ly, f.top); }
+  else void replayChartsNow();
   replayBar();
+  replayPanel.refresh();
 }
 function endReplay(): void {
-  replayIdx = null; replayPlaying = false; $('replayBar').hidden = true; $('rpPlay').textContent = '▶';
+  const was = replayIdx !== null || fileMode;
+  replayIdx = null; replayPlaying = false; $('replayBar').hidden = true; $('stage').classList.remove('rpOn'); $('rpPlay').textContent = '▶';
+  if (fileMode) { fileMode = false; fileStore.clear(); replayPanel.apply(); }
+  if (was) charts.endReplay();
   if (lastVol && charts.view === '3d') showVolume(lastVol);
+  replayPanel.refresh();
 }
-$('ovReplay').onclick = (): void => {
+function startReplay(): void {
   if (replayIdx !== null) { endReplay(); return; }
-  if (!replay.length) { log('還沒有可以重播的畫面 / nothing to replay yet'); return; }
-  $('replayBar').hidden = false; replayPlaying = false; showReplay(0);
-  log(`重播：${replay.length} 個畫面，${replay.megabytes.toFixed(0)} MB / replay: ${replay.length} frames`);
-};
+  if (!rs().length) { log('還沒有可以重播的畫面（要先讓模擬跑一下，或載入回放資料）/ nothing to replay yet'); return; }
+  $('replayBar').hidden = false; $('stage').classList.add('rpOn'); replayPlaying = false; showReplay(0);
+  log(`重播：${rs().length} 個畫面，${rs().megabytes.toFixed(0)} MB / replay: ${rs().length} frames`);
+}
+$('ovReplay').onclick = startReplay;
+/** A replay file was read: its frames are shown (with its own grid and history in the charts) until Live is pressed. */
+function enterFile(frames: ReplayFrame[], metas: Map<number, ReplayMeta>, title: string): void {
+  if (replayIdx !== null || fileMode) endReplay();
+  fileStore.load(frames, metas); fileMode = true;
+  send({ type: 'record', on: false, tier: replayPanel.settings.tier, every: replayPanel.settings.every });   // the live frames are not kept meanwhile
+  const f = frames[0]!, meta = [...metas.values()][0];
+  const nx = Math.round(f.Lx / f.dx), ny = Math.round(f.Ly / f.dx), nz = Math.round(f.top / f.dz);
+  const tc = meta ? meta.tc : f.stats.vtProfile !== null || f.stats.dp !== null;
+  charts.enterFile({ nx, ny, nz, dx: f.dx, dy: f.dx, dz: f.dz, experiment: (meta?.experiment ?? 'custom') as RegionalExperiment, land: meta?.land ?? null, tc, sea: meta?.sea ?? false },
+    frames.map((x) => ({ time: x.t, stats: x.stats })));
+  $('replayBar').hidden = false; $('stage').classList.add('rpOn'); replayPlaying = false; showReplay(0);
+  log(`回放資料「${title}」：${frames.length} 格；按「回到即時」離開 / replay data loaded; press Live to leave`);
+}
+const replayPanel = mountReplayPanel({ $, send, log, live: replay, file: fileStore, fileMode: () => fileMode, step: () => dt,
+  grid: () => (gridNow.nx ? gridNow : null), replayTime: () => (replayIdx === null ? null : rs().frames[replayIdx]?.t ?? null),
+  openReplay: startReplay, loaded: enterFile, cleared: () => { if (replayIdx !== null && !fileMode) endReplay(); } });
 $('rpSlider').oninput = (): void => { replayPlaying = false; $('rpPlay').textContent = '▶'; showReplay(Number($<HTMLInputElement>('rpSlider').value)); };
 $('rpPlay').onclick = (): void => {
   if (replayIdx === null) return;
-  if (!replayPlaying && replayIdx >= replay.length - 1) showReplay(0);
+  if (!replayPlaying && replayIdx >= rs().length - 1) showReplay(0);
   replayPlaying = !replayPlaying; replayAcc = 0; $('rpPlay').textContent = replayPlaying ? '⏸' : '▶';
 };
 $('rpLive').onclick = endReplay;
@@ -341,7 +429,7 @@ function tick(): void {
     replayAcc += dts * Number($<HTMLSelectElement>('rpSpeed').value);
     if (replayAcc >= 1) {
       const next = replayIdx + Math.floor(replayAcc); replayAcc -= Math.floor(replayAcc);
-      if (next >= replay.length - 1) { showReplay(replay.length - 1); replayPlaying = false; $('rpPlay').textContent = '▶'; } else showReplay(next);
+      if (next >= rs().length - 1) { showReplay(rs().length - 1); replayPlaying = false; $('rpPlay').textContent = '▶'; } else showReplay(next);
     }
   }
   if (in3d) view.render(Number($<HTMLInputElement>('cloudK').value));

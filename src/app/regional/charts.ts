@@ -6,6 +6,7 @@
 import { parcelAscent, windIndices, type MapVar, type SliceVar, type SectionVar, type RzVar } from '../../regional/diagnostics.js';
 import type { CameraMode, Cut } from './volume.js';
 import type { SatImage } from './satellite.js';
+import { scaleRange, defaultRange, setScaleRange, hasOverride, FIXED } from './scales.js';
 import type { StormNow } from '../../regional/storms.js';
 import { type ChartRequest, type RegionalFrame, type RegionalExperiment, type TcRain } from './protocol.js';
 import { INK, SERIES, FONT, FONT_SMALL, type Rect, type Scale, type ScaleKind, colorOf, niceCeil, ticks, fmt, drawField, drawColorbar, drawAxes, drawContours, drawArrow, drawBarb, haloText, tooltip } from './chartDraw.js';
@@ -63,6 +64,9 @@ const VI: Record<string, VarInfo> = {
   cuRain: { label: '參數化對流降水率（積雲方案產生）/ Parameterized convective rain', unit: 'mm/h', scale: 'seq', lo: 0, clear: 0.05, gamma: 0.5, digits: 2 },
   div: { label: '水平輻散（高層正值 = 外流）/ Horizontal divergence (aloft positive = outflow)', unit: '10⁻⁵ s⁻¹', scale: 'div', digits: 1 },
   cond: { label: '總凝結物 / Total condensate', unit: 'g/kg', scale: 'seq', lo: 0, clear: 0.01, gamma: 0.5, digits: 2 },
+  sst: { label: '海面溫度（可用塗抹工具改）/ Sea-surface temperature (editable with the paint tool)', unit: '°C', scale: 'seq', digits: 1 },
+  shear850200: { label: '垂直風切 200–850 hPa（颱風標準）/ Deep-layer vertical wind shear 200–850 hPa', unit: 'm/s', scale: 'seq', digits: 1 },
+  shear01: { label: '垂直風切 0–1 km（低層）/ Low-level vertical wind shear 0–1 km', unit: 'm/s', scale: 'seq', digits: 1 },
   sfcT: { label: '地面氣溫（最低層）/ Surface air temperature (lowest level)', unit: '°C', scale: 'seq', digits: 1 },
   sfcTd: { label: '地面露點 / Surface dew point', unit: '°C', scale: 'seq', digits: 1 },
   shear06: { label: '0–6 km 垂直風切 / 0–6 km bulk wind shear', unit: 'm/s', scale: 'seq', lo: 0, digits: 1 },
@@ -80,34 +84,18 @@ const VI: Record<string, VarInfo> = {
 const SLICE_CHOICES: SliceVar[] = ['dbz', 'w', 'speed', 'T', 'zeta', 'div', 'thp', 'thetaE', 'rh', 'pp', 'qv', 'cloud', 'precip', 'u', 'v'];
 /** composite and surface maps by group (the variable menu's sections) */
 const MAP_GROUPS: { label: string; vars: MapVar[] }[] = [
+  { label: '環境 / Environment', vars: ['sst', 'shear850200', 'shear06', 'shear01', 'pw', 'sfcT', 'sfcTd'] },
   { label: '衛星 / Satellite', vars: ['vis', 'ctopT', 'wvT'] },
-  { label: '雷達與降水 / Radar & precipitation', vars: ['dbzMax', 'etop', 'vil', 'rainRate', 'cuRain', 'rain', 'snow', 'pw'] },
-  { label: '地面 / Surface', vars: ['slp', 'sfcT', 'sfcTd', 'sfcWind', 'windSwath', 'sfcThp', 'sfcThetaE'] },
-  { label: '劇烈天氣 / Severe weather', vars: ['cape', 'cin', 'li', 'lcl', 'shear06', 'srh01', 'srh03', 'stp', 'scp', 'uh', 'uhSwath', 'wMax', 'ctopZ'] },
+  { label: '雷達與降水 / Radar & precipitation', vars: ['dbzMax', 'etop', 'vil', 'rainRate', 'cuRain', 'rain', 'snow'] },
+  { label: '地面 / Surface', vars: ['slp', 'sfcWind', 'windSwath', 'sfcThp', 'sfcThetaE'] },
+  { label: '劇烈天氣 / Severe weather', vars: ['cape', 'cin', 'li', 'lcl', 'srh01', 'srh03', 'stp', 'scp', 'uh', 'uhSwath', 'wMax', 'ctopZ'] },
 ];
 /** standard pressure levels of the slices (hPa): the model level nearest each (height levels) */
 const P_LEVELS = [925, 850, 700, 500, 300, 200];
 const SECTION_CHOICES: SecVar[] = ['dbz', 'w', 'along', 'normal', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'qv', 'pp', 'T'];
 const RZ_CHOICES: RzVar[] = ['vt', 'vr', 'w', 'thp', 'cond'];
 
-/** Colour scale for a field (fixed ranges where the variable has them, otherwise nice rounded extremes). */
-function scaleFor(name: string, data: ArrayLike<number>): Scale {
-  const vi = VI[name]!;
-  let lo = Infinity, hi = -Infinity, amax = 0;
-  for (let i = 0; i < data.length; i++) { const v = data[i]!; if (!Number.isFinite(v)) continue; lo = Math.min(lo, v); hi = Math.max(hi, v); amax = Math.max(amax, Math.abs(v)); }
-  if (!Number.isFinite(lo)) { lo = 0; hi = 1; }
-  if (vi.scale === 'div') { const a = niceCeil(Math.max(amax, 1e-6)); return { kind: 'div', lo: -a, hi: a, gamma: 1, clear: null, reverse: false }; }
-  if (vi.lo !== undefined) lo = vi.lo;
-  if (vi.hi !== undefined) hi = vi.hi;
-  if (vi.scale === 'seq' && vi.lo === undefined && vi.hi === undefined) {
-    const st = niceCeil(Math.max(hi - lo, 1e-6) / 5); lo = Math.floor(lo / st) * st; hi = Math.ceil(hi / st) * st;
-  } else if (vi.scale === 'seq' && vi.hi === undefined) hi = lo + niceCeil(Math.max(hi - lo, vi.clear ?? 1e-6));
-  else if (vi.scale === 'seq' && vi.lo === undefined) lo = hi - niceCeil(Math.max(hi - lo, vi.clear ?? 1e-6));
-  if (hi <= lo) hi = lo + 1;
-  return { kind: vi.scale, lo, hi, gamma: vi.gamma ?? 1, clear: vi.clear ?? null, reverse: !!vi.reverse };
-}
-
-interface Sample { t: number; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null; ew: { r: number; v: number }[] | null; tcRain: TcRain | null }
+interface Sample { t: number; shear: number | null; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null; ew: { r: number; v: number }[] | null; tcRain: TcRain | null }
 interface GridInfo {
   nx: number; ny: number; nz: number; dx: number; dy: number; dz: number; experiment: RegionalExperiment; land: Uint8Array | null;
   /** tropical-cyclone-like run (pressure deficit, eyewall and rainband diagnostics); surface all sea where not land */
@@ -170,6 +158,15 @@ export class RegionalCharts {
   private point: { x: number; y: number } | null = null;
   private grid: GridInfo | null = null;
   private frame: RegionalFrame | null = null;
+  /** replay: the charts show a recorded frame (`note`: what to say where it holds no data for the chart); the live frames still
+   *  arrive (`liveFrame`) and, unless a replay file is shown, add to the series */
+  private rp: { note: string } | null = null;
+  private liveFrame: RegionalFrame | null = null;
+  /** model time of the replayed frame: marked in the series */
+  private replayT: number | null = null;
+  /** the live run's grid, history and view state while a replay file's own are shown */
+  private saved: { samples: Sample[]; hov: { t: number; dr: number; vt: number[] }[]; storms: RegionalCharts['storms']; stormColor: Map<number, number>; selStorm: number | null; grid: GridInfo | null; frame: RegionalFrame | null;
+    line: RegionalCharts['line']; point: RegionalCharts['point']; mz: RegionalCharts['mz']; level: number } | null = null;
   private samples: Sample[] = [];
   /** per-storm samples (ground-relative), the storm whose numbers the series show (null: domain maxima) and the
    *  colour slot of each storm (fixed when it first appears) */
@@ -253,21 +250,30 @@ export class RegionalCharts {
   private nearestLevel(z: number): number { const g = this.grid!; return Math.max(0, Math.min(g.nz - 1, Math.round(z / g.dz - 0.5))); }
 
   onFrame(f: RegionalFrame): void {
-    this.frame = f;
-    if (f.charts?.p0) {
-      this.p0 = f.charts.p0;
-      // a pressure-level chart: the level nearest the pressure in the model's own base state
-      if (this.plev) { const k = this.levelOfP(this.plev); if (k !== this.level) { this.level = k; this.sendRequest(); } }
+    if (this.saved) return;                       // a replay file is shown with its own history
+    this.liveFrame = f;
+    if (!this.rp) {
+      this.frame = f;
+      if (f.charts?.p0) {
+        this.p0 = f.charts.p0;
+        // a pressure-level chart: the level nearest the pressure in the model's own base state
+        if (this.plev) { const k = this.levelOfP(this.plev); if (k !== this.level) { this.level = k; this.sendRequest(); } }
+      }
     }
-    const s = f.stats;
-    const smp: Sample = { t: f.time, dp: s.dp, vmax: s.vmax, rmw: s.rmw, wmax: s.wmax, zeta: s.zetaMax, uh: s.uhMax, dbz: s.dbzMax, vg: s.vGround, rain: s.rainmax, cape: s.capeMax, storm: s.storm, ew: s.eyewalls, tcRain: s.tcRain ?? null };
+    this.ingest(f.time, f.stats);
+    if (this.view !== '3d') this.redraw();
+  }
+
+  /** Add a frame's numbers to the time series, the storm tracks and the Hovmöller diagram. */
+  private ingest(time: number, s: RegionalFrame['stats']): void {
+    const smp: Sample = { t: time, shear: s.shear?.mag ?? null, dp: s.dp, vmax: s.vmax, rmw: s.rmw, wmax: s.wmax, zeta: s.zetaMax, uh: s.uhMax, dbz: s.dbzMax, vg: s.vGround, rain: s.rainmax, cape: s.capeMax, storm: s.storm, ew: s.eyewalls, tcRain: s.tcRain ?? null };
     const last = this.samples[this.samples.length - 1];
-    if (last && f.time < last.t - 1e-6) { this.samples = []; this.hov = []; this.storms.clear(); this.stormColor.clear(); }
+    if (last && time < last.t - 1e-6) { this.samples = []; this.hov = []; this.storms.clear(); this.stormColor.clear(); }
     for (const st of s.storms ?? []) {
       let e = this.storms.get(st.id);
       if (!e) { e = { name: st.name, kind: st.kind, pts: [] }; this.storms.set(st.id, e); this.stormColor.set(st.id, this.stormColor.size % SERIES.length); }
-      const p = e.pts[e.pts.length - 1], row = { ...st, t: f.time };
-      if (p && Math.abs(p.t - f.time) < 1e-6) e.pts[e.pts.length - 1] = row; else e.pts.push(row);
+      const p = e.pts[e.pts.length - 1], row = { ...st, t: time };
+      if (p && Math.abs(p.t - time) < 1e-6) e.pts[e.pts.length - 1] = row; else e.pts.push(row);
       if (e.pts.length > 3000) e.pts = e.pts.filter((_, i) => i % 2 === 1 || i === e!.pts.length - 1);
     }
     // bounded number of remembered storms: forget the oldest ended ones
@@ -275,22 +281,65 @@ export class RegionalCharts {
       const live = new Set((s.storms ?? []).map((x) => x.id));
       for (const id of [...this.storms.keys()]) { if (this.storms.size <= 60) break; if (!live.has(id) && id !== this.selStorm) this.storms.delete(id); }
     }
-    if (last && Math.abs(f.time - last.t) < 1e-6) this.samples[this.samples.length - 1] = smp; else this.samples.push(smp);
+    const lastNow = this.samples[this.samples.length - 1];
+    if (lastNow && Math.abs(time - lastNow.t) < 1e-6) this.samples[this.samples.length - 1] = smp; else this.samples.push(smp);
     if (s.vtProfile) {
-      const h = this.hov[this.hov.length - 1], row = { t: f.time, dr: s.vtProfile.dr, vt: s.vtProfile.vt };
-      if (h && Math.abs(h.t - f.time) < 1e-6) this.hov[this.hov.length - 1] = row; else this.hov.push(row);
+      const h = this.hov[this.hov.length - 1], row = { t: time, dr: s.vtProfile.dr, vt: s.vtProfile.vt };
+      if (h && Math.abs(h.t - time) < 1e-6) this.hov[this.hov.length - 1] = row; else this.hov.push(row);
     }
     // bounded history: drop every other sample (keeping the newest) beyond 4000
     if (this.samples.length > 4000) this.samples = this.samples.filter((_, i) => i % 2 === 1 || i === this.samples.length - 1);
     if (this.hov.length > 3000) this.hov = this.hov.filter((_, i) => i % 2 === 1 || i === this.hov.length - 1);
+  }
+
+  // ---------------------------------------------------------------- replay
+
+  /** a recorded frame is shown instead of the live one */
+  get replaying(): boolean { return this.rp !== null; }
+  /** the chart data the current view wants (the page computes it for a recorded frame) */
+  currentRequest(): ChartRequest { return this.request(); }
+  /** Show a recorded frame (its chart data computed for the current request); `note`: what the charts say where the frame holds
+   *  no data for them. */
+  showReplay(f: RegionalFrame, note: string): void {
+    this.rp = { note }; this.frame = f; this.replayT = f.time;
+    if (f.charts?.p0) this.p0 = f.charts.p0;
     if (this.view !== '3d') this.redraw();
+  }
+  /** Back to the live run (with the live grid and history again when a replay file was shown). */
+  endReplay(): void {
+    if (!this.rp && !this.saved) return;
+    this.rp = null; this.replayT = null;
+    const sv = this.saved;
+    if (sv) {
+      this.saved = null;
+      this.samples = sv.samples; this.hov = sv.hov; this.storms = sv.storms; this.stormColor = sv.stormColor; this.selStorm = sv.selStorm;
+      this.grid = sv.grid; this.line = sv.line; this.point = sv.point; this.mz = sv.mz; this.level = sv.level; this.liveFrame = sv.frame;
+      this.buildBar(); this.sendCut();
+    }
+    this.frame = this.liveFrame;
+    this.lastReq = '';
+    this.sendRequest();
+    this.redraw();
+  }
+  /** A replay file: its grid and history (the frames' numbers) replace the live ones until endReplay. */
+  enterFile(grid: GridInfo, frames: { time: number; stats: RegionalFrame['stats'] }[]): void {
+    if (!this.saved) this.saved = { samples: this.samples, hov: this.hov, storms: this.storms, stormColor: this.stormColor, selStorm: this.selStorm, grid: this.grid, frame: this.liveFrame ?? this.frame,
+      line: this.line, point: this.point, mz: this.mz, level: this.level };
+    this.samples = []; this.hov = []; this.storms = new Map(); this.stormColor = new Map(); this.selStorm = null;
+    this.grid = grid; this.line = null; this.point = null; this.mz = { z: 1, u0: 0, v0: 0 };
+    this.level = this.nearestLevel(this.view === 'slice' ? this.levelZ() : 1500);
+    this.frame = null;
+    for (const f of frames) this.ingest(f.time, f.stats);
+    this.buildBar();
+    this.sendCut();
+    this.lastReq = '';
   }
 
   /** Series as CSV (time in hours). */
   seriesCsv(): string {
-    const rows = ['t_h,dp_hPa,vmax_ms,rmw_km,wmax_ms,zeta_s-1,uh_m2s2,dbz_max,vground_ms,rainmax_mm,cape_max_Jkg,storm_x_km,storm_y_km,rain_core_mmh,rain_outer_mmh,wet_outer'];
+    const rows = ['t_h,dp_hPa,vmax_ms,rmw_km,wmax_ms,zeta_s-1,uh_m2s2,dbz_max,vground_ms,rainmax_mm,cape_max_Jkg,storm_x_km,storm_y_km,rain_core_mmh,rain_outer_mmh,wet_outer,env_shear_ms'];
     for (const s of this.samples) rows.push([s.t / 3600, s.dp, s.vmax, s.rmw === null ? null : s.rmw / 1000, s.wmax, s.zeta, s.uh, s.dbz, s.vg, s.rain, s.cape, s.storm ? s.storm.x / 1000 : null, s.storm ? s.storm.y / 1000 : null,
-      s.tcRain?.core ?? null, s.tcRain?.outer ?? null, s.tcRain?.wet ?? null]
+      s.tcRain?.core ?? null, s.tcRain?.outer ?? null, s.tcRain?.wet ?? null, s.shear]
       .map((v) => (v === null || v === undefined ? '' : +Number(v).toPrecision(6))).join(','));
     return rows.join('\n');
   }
@@ -362,6 +411,36 @@ export class RegionalCharts {
 
   // ---------------------------------------------------------------- toolbar
 
+  /** Inputs for the fixed colour scale of a variable (the range it is drawn with; changing it keeps it fixed). */
+  private scaleBox(name: string, ctx: '' | 'rz' = ''): void {
+    const vi = VI[name]; if (!vi || (vi.scale !== 'seq' && vi.scale !== 'div')) return;
+    const b = this.bar, tc = !!this.grid?.tc, key = ctx ? `${ctx}:${name}` : name;
+    const lab = document.createElement('span'); lab.className = 'hint'; lab.textContent = '色階 / scale';
+    const mk = (v: number): HTMLInputElement => {
+      const i = document.createElement('input'); i.type = 'number'; i.step = 'any'; i.className = 'sc'; i.value = String(+v.toPrecision(4));
+      i.title = '固定色階，不隨資料變動；可自己改 / fixed colour scale, does not follow the data; editable'; return i;
+    };
+    const [lo, hi] = scaleRange(key, tc);
+    const done = (): void => { this.buildBar(); this.redraw(); };
+    b.append(lab);
+    if (vi.scale === 'div') {
+      const a = mk(Math.max(Math.abs(lo), Math.abs(hi)));
+      a.onchange = (): void => { const x = Math.abs(Number(a.value)); if (x > 0) setScaleRange(key, tc, [-x, x]); done(); };
+      b.append(document.createTextNode('±'), a);
+    } else {
+      const l = mk(lo), h = mk(hi);
+      const set = (): void => { const x = Number(l.value), y = Number(h.value); if (Number.isFinite(x) && Number.isFinite(y) && y > x) setScaleRange(key, tc, [x, y]); done(); };
+      l.onchange = set; h.onchange = set;
+      b.append(l, document.createTextNode('～'), h);
+    }
+    if (hasOverride(key, tc)) {
+      const d = defaultRange(key, tc), r = document.createElement('button');
+      r.textContent = '↺'; r.title = `還原預設色階 / restore the default scale (${d[0]} … ${d[1]})`;
+      r.onclick = (): void => { setScaleRange(key, tc, null); done(); };
+      b.append(r);
+    }
+  }
+
   private buildBar(): void {
     const b = this.bar;
     b.textContent = '';
@@ -418,7 +497,8 @@ export class RegionalCharts {
       if (this.cam === 'fly') hint('自由飛行：W/S 前後、A/D 左右、Q/E 上下（Shift 加速）、拖曳轉頭、滾輪前進後退 / free flight: W/S forward/back, A/D left/right, Q/E down/up (Shift: faster), drag to look, wheel to move');
     }
     if (vv === 'slice') {
-      sel(SLICE_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.slice, (v) => { this.sel.slice = v as SliceVar; this.sendRequest(); this.redraw(); }, '變數 / Variable');
+      sel(SLICE_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.slice, (v) => { this.sel.slice = v as SliceVar; this.sendRequest(); this.buildBar(); this.redraw(); }, '變數 / Variable');
+      this.scaleBox(this.sel.slice);
       sel([{ v: '0', label: '高度層（拉桿）/ Height level (slider)' }, ...P_LEVELS.map((p) => ({ v: String(p), label: `${p} hPa 等壓面圖 / ${p} hPa chart` }))], String(this.plev ?? 0),
         (v) => { this.plev = Number(v) || null; if (this.plev) this.level = this.levelOfP(this.plev); this.sendRequest(); this.buildBar(); this.redraw(); }, '層 / Level');
       if (this.grid && !this.plev) {
@@ -437,6 +517,7 @@ export class RegionalCharts {
     if (vv === 'composite') {
       sel(MAP_GROUPS.flatMap((g) => g.vars.map((v) => ({ v, label: VI[v]!.label, group: g.label }))), this.sel.composite, (v) => { this.sel.composite = v as MapVar; this.sendRequest(); this.buildBar(); this.redraw(); }, '變數 / Variable');
       const cv = this.sel.composite;
+      this.scaleBox(cv);
       if (cv === 'vis') hint('由模式的 3D 雲場從正上方逐像素渲染（螢幕解析度，放大會更細）；太陽在西北方 40°，陰影長度按實際高度 / rendered straight down from the model\'s 3-D cloud field at screen resolution (finer when zoomed); sun from the north-west, 40° up, true shadow lengths');
       if (cv === 'ctopT') hint('由模式的 3D 雲場逐像素計算雲與地面的紅外線放射（螢幕解析度）；滑鼠顯示該點亮度溫度 / infrared emission of cloud and surface from the model\'s 3-D field at screen resolution; the pointer shows the brightness temperature');
       if (cv === 'uhSwath' || cv === 'windSwath') hint('軌跡：本次執行（或細化）以來每個畫面取樣的最大值 / swath: the largest value at every frame since this run (or refinement) started');
@@ -447,12 +528,14 @@ export class RegionalCharts {
       hint(this.toolHint());
     }
     if (vv === 'section') {
-      sel(SECTION_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.section, (v) => { this.sel.section = v as SecVar; this.redraw(); }, '變數 / Variable');
+      sel(SECTION_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.section, (v) => { this.sel.section = v as SecVar; this.buildBar(); this.redraw(); }, '變數 / Variable');
+      this.scaleBox(this.sel.section);
       chk('剖面內風向量 / In-plane wind', this.show.vectors, (v) => { this.show.vectors = v; });
       hint('在小地圖上拖曳畫新的剖面線。白線：雲邊界 0.1 g/kg；藍虛線：0 °C；向量：沿剖面風與 w，同一比例 / drag on the small map to draw a new line. White: cloud edge 0.1 g/kg; blue dashed: 0 °C; vectors: along-section wind and w on the same scale');
     }
     if (vv === 'rz') {
-      sel(RZ_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.rz, (v) => { this.sel.rz = v as RzVar; this.redraw(); }, '變數 / Variable');
+      sel(RZ_CHOICES.map((v) => ({ v, label: VI[v]!.label })), this.sel.rz, (v) => { this.sel.rz = v as RzVar; this.buildBar(); this.redraw(); }, '變數 / Variable');
+      this.scaleBox(this.sel.rz, 'rz');
       chk('以選取的探空點為中心 / Centre on the picked point', this.show.rzOnPoint, (v) => { this.show.rzOnPoint = v; });
       hint('預設中心：地面氣壓最低處。白色等值線：切向風（填色為切向風時改畫 w），虛線為負 / default centre: surface-pressure minimum. White contours: tangential wind (w when the fill is the tangential wind), dashed negative');
     }
@@ -684,10 +767,19 @@ export class RegionalCharts {
     return (i, j) => (land ? (land[j * g.nx + i] ? ground : sea) : allSea ? sea : ground);
   }
 
+  /** The fixed colour scale of a variable (scales.ts; the user's range when set). */
+  private scale(name: string, ctx: '' | 'rz' = ''): Scale {
+    const vi = VI[name]!, tc = !!this.grid?.tc;
+    if (vi.scale !== 'seq' && vi.scale !== 'div') return { kind: vi.scale, lo: vi.lo ?? 0, hi: vi.hi ?? 1, gamma: 1, clear: null, reverse: false };
+    const [lo, hi] = scaleRange(ctx ? `${ctx}:${name}` : name, tc);
+    if (vi.scale === 'div') { const a = Math.max(Math.abs(lo), Math.abs(hi)) || 1; return { kind: 'div', lo: -a, hi: a, gamma: 1, clear: null, reverse: false }; }
+    return { kind: 'seq', lo, hi: hi > lo ? hi : lo + 1, gamma: vi.gamma ?? 1, clear: vi.clear ?? null, reverse: !!vi.reverse };
+  }
+
   /** Plan-view map of a [j][i] field with colour bar, axes and title. */
   private drawPlan(r: Rect, name: string, data: Float32Array, title: string, colorbar = true): MapFrame {
     const ctx = this.ctx, g = this.grid!, mf = this.mapFrame(r, colorbar), m = mf.v;
-    const sc = scaleFor(name, data);
+    const sc = this.scale(name);
     this.clipped(mf, () => drawField(ctx, mf.r, g.nx, g.ny, (i, j) => data[j * g.nx + i]!, sc, this.underlay(), sc.kind === 'wv' || sc.kind === 'ir' || sc.kind === 'vis'));
     this.mapAxes(mf);
     if (colorbar) drawColorbar(ctx, { x: m.x + m.w + 12, y: m.y + 14, w: 12, h: Math.max(40, m.h - 14) }, sc, VI[name]!.unit, VI[name]!.digits);
@@ -728,8 +820,7 @@ export class RegionalCharts {
   /** Wind arrows sampled every few cells ([j][i] components in m/s). */
   private drawWind(mf: MapFrame, u: Float32Array, v: Float32Array): void {
     const g = this.grid!, n = Math.max(1, Math.round(Math.max(g.nx, g.ny) / 22 * mf.v.w / mf.r.w));
-    let vmax = 0; for (let i = 0; i < u.length; i++) vmax = Math.max(vmax, Math.hypot(u[i]!, v[i]!));
-    const ref = niceCeil(Math.max(vmax, 1)), px = mf.r.w / g.nx * n * 0.9 / ref;
+    const ref = FIXED.arrowRef(!!g.tc), px = mf.r.w / g.nx * n * 0.9 / ref;
     this.clipped(mf, () => {
       for (let j = Math.floor(n / 2); j < g.ny; j += n) for (let i = Math.floor(n / 2); i < g.nx; i += n) {
         const c = j * g.nx + i, x = mf.r.x + (i + 0.5) / g.nx * mf.r.w, y = mf.r.y + mf.r.h - (j + 0.5) / g.ny * mf.r.h;
@@ -761,7 +852,7 @@ export class RegionalCharts {
         const p = p0[s.k]! + pp[c]!, tv = (T[c]! + 273.15) * (1 + 0.61e-3 * qv[c]!);
         const z = s.z + 287.05 * tv / 9.80665 * Math.log(p / P); Z[c] = z; lo = Math.min(lo, z); hi = Math.max(hi, z);
       }
-      const step = Math.max(5, niceCeil((hi - lo) / 12)), lv: number[] = [], Zc = Z;
+      const step = FIXED.heightStep(P), lv: number[] = [], Zc = Z;
       for (let z = Math.ceil(lo / step) * step; z <= hi; z += step) lv.push(z);
       const X = (i: number): number => mf.r.x + (i + 0.5) / g.nx * mf.r.w, Y = (j: number): number => mf.r.y + mf.r.h - (j + 0.5) / g.ny * mf.r.h;
       this.clipped(mf, () => drawContours(this.ctx, g.nx, g.ny, (i, j) => Zc[j * g.nx + i]!, X, Y, lv, () => ({ color: 'rgba(250,250,250,0.9)', width: 1.2 })));
@@ -787,8 +878,8 @@ export class RegionalCharts {
     const slp = mp.slp;
     if (this.show.isobars && slp) {
       let lo = Infinity, hi = -Infinity; for (const v of slp) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-      const step = Math.max(0.5, niceCeil((hi - lo) / 14)), lv: number[] = [];
-      for (let p = Math.ceil(lo / step) * step; p <= hi; p += step) lv.push(p);
+      const step = FIXED.isobar(!!g.tc), lv: number[] = [];
+      for (let p = Math.ceil(lo / step) * step; p <= hi && lv.length < 80; p += step) lv.push(p);
       this.clipped(mf, () => drawContours(this.ctx, g.nx, g.ny, (i, j) => slp[j * g.nx + i]!, X, Y, lv, () => ({ color: 'rgba(250,250,250,0.85)', width: 1 })));
       this.ctx.font = FONT_SMALL; this.ctx.textAlign = 'left'; this.ctx.textBaseline = 'middle';
       haloText(this.ctx, `等壓線 / isobars: ${step} hPa`, mf.v.x, mf.v.y + mf.v.h + 30, INK.secondary);
@@ -819,7 +910,7 @@ export class RegionalCharts {
     const u0 = (m.x - mf.r.x) / mf.r.w, u1 = (m.x + m.w - mf.r.x) / mf.r.w, v0 = (mf.r.y + mf.r.h - m.y - m.h) / mf.r.h, v1 = (mf.r.y + mf.r.h - m.y) / mf.r.h;
     const img = hook({ kind: ir ? 'ir' : 'vis', u0, u1, v0, v1, w: m.w * dpr, h: m.h * dpr, tz: ch.tz, sfcC: mp.sfcT });
     if (!img) return null;
-    const sc = scaleFor('ctopT', mp.ctopT ?? new Float32Array(1));
+    const sc = this.scale('ctopT');
     let d = this.satDrawn;
     if (!d || d.img !== img) {
       const off = document.createElement('canvas'); off.width = img.w; off.height = img.h;
@@ -908,7 +999,10 @@ export class RegionalCharts {
     return mf;
   }
 
-  private waiting(r: Rect, more = ''): void { this.canvas.dataset.waiting = '1'; this.centerText('等待資料… / Waiting for data…' + (more ? ` / ${more}` : ''), r); }
+  private waiting(r: Rect, more = ''): void {
+    this.canvas.dataset.waiting = '1';
+    this.centerText(this.rp?.note || '等待資料… / Waiting for data…' + (more ? ` / ${more}` : ''), r);
+  }
   /** Centred bilingual message: each ' / '-separated part on its own line. */
   private centerText(t: string, r: Rect): void {
     const ctx = this.ctx, parts = t.split(/\s*\/\s+/);
@@ -941,7 +1035,7 @@ export class RegionalCharts {
       return sec.vars[vn][o]!;
     };
     const data = new Float32Array(np * nz); for (let k = 0; k < nz; k++) for (let p = 0; p < np; p++) data[k * np + p] = val(name, p, k);
-    const sc = scaleFor(name, data), ztop = nz * g.dz / 1000;
+    const sc = this.scale(name), ztop = nz * g.dz / 1000;
     const r: Rect = { x: main.x + 56, y: main.y + 44, w: Math.max(40, main.w - 56 - 76), h: Math.max(40, main.h - 44 - 40) };
     drawField(ctx, r, np, nz, (p, k) => data[k * np + p]!, sc, () => [16, 22, 30]);
     const X = (p: number): number => r.x + (p + 0.5) / np * r.w, Y = (k: number): number => r.y + r.h - (k + 0.5) / nz * r.h;
@@ -949,8 +1043,7 @@ export class RegionalCharts {
     if (name !== 'cloud') drawContours(ctx, np, nz, (p, k) => sec.vars.cloud[k * np + p]!, X, Y, [0.1], () => ({ color: 'rgba(245,245,245,0.9)', width: 1 }));
     drawContours(ctx, np, nz, (p, k) => sec.vars.T[k * np + p]!, X, Y, [0], () => ({ color: 'rgba(143,208,248,0.9)', width: 1, dash: [4, 3] }));
     if (this.show.vectors) {
-      let vm = 0; for (let k = 0; k < nz; k++) for (let p = 0; p < np; p++) vm = Math.max(vm, Math.hypot(val('along', p, k), sec.vars.w[k * np + p]!));
-      const ref = niceCeil(Math.max(vm, 1)), sp = Math.max(1, Math.round(np / 24)), sk = Math.max(1, Math.round(nz / 14)), px = Math.min(r.w / np * sp, r.h / nz * sk) * 0.95 / ref;
+      const ref = FIXED.sectionRef(!!g.tc), sp = Math.max(1, Math.round(np / 24)), sk = Math.max(1, Math.round(nz / 14)), px = Math.min(r.w / np * sp, r.h / nz * sk) * 0.95 / ref;
       for (let k = Math.floor(sk / 2); k < nz; k += sk) for (let p = Math.floor(sp / 2); p < np; p += sp) drawArrow(ctx, X(p), Y(k), val('along', p, k) * px, -sec.vars.w[k * np + p]! * px);
       ctx.font = FONT_SMALL; ctx.fillStyle = INK.secondary; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
       drawArrow(ctx, r.x + r.w - ref * px, r.y - 12, ref * px, 0);
@@ -977,13 +1070,13 @@ export class RegionalCharts {
     const { nr, dr } = rz, nz = g.nz, name = this.sel.rz, info = VI[name]!, data = rz.vars[name];
     const R = nr * dr / 1000, ztop = nz * g.dz / 1000;
     const r: Rect = { x: area.x + 56, y: area.y + 26, w: Math.max(40, area.w - 56 - 80), h: Math.max(40, area.h - 26 - 44) };
-    const sc = scaleFor(name, data);
+    const sc = this.scale(name, 'rz');
     drawField(ctx, r, nr, nz, (i, k) => data[k * nr + i]!, sc, () => [16, 22, 30]);
     const X = (i: number): number => r.x + (i + 0.5) / nr * r.w, Y = (k: number): number => r.y + r.h - (k + 0.5) / nz * r.h;
     const cn = name === 'vt' ? 'w' : 'vt', cd = rz.vars[cn];
     let am = 0; for (const v of cd) am = Math.max(am, Math.abs(v));
-    const step = cn === 'vt' ? Math.max(2, niceCeil(am / 7)) : Math.max(0.25, niceCeil(am / 5)), lv: number[] = [];
-    for (let v = step; v <= am; v += step) lv.push(v, -v);
+    const step = FIXED.rzContour(cn === 'vt'), lv: number[] = [];
+    for (let v = step; v <= am && lv.length < 80; v += step) lv.push(v, -v);
     drawContours(ctx, nr, nz, (i, k) => cd[k * nr + i]!, X, Y, lv, (L) => ({ color: L > 0 ? 'rgba(250,250,250,0.9)' : 'rgba(250,250,250,0.6)', width: 1, dash: L < 0 ? [4, 3] : [] }));
     drawAxes(ctx, r, { lo: 0, hi: R, label: '半徑 / radius (km)' }, { lo: 0, hi: ztop, label: 'z (km)' });
     drawColorbar(ctx, { x: r.x + r.w + 12, y: r.y + 14, w: 12, h: r.h - 14 }, sc, info.unit, info.digits);
@@ -1105,11 +1198,10 @@ export class RegionalCharts {
 
   private drawHodograph(r: Rect, u: Float32Array, v: Float32Array, nz: number, dz: number, rm: { u: number; v: number }): void {
     const ctx = this.ctx, kTop = Math.min(nz - 1, Math.round(10000 / dz - 0.5));
-    let vm = 10; for (let k = 0; k <= kTop; k++) vm = Math.max(vm, Math.hypot(u[k]!, v[k]!), Math.hypot(rm.u, rm.v));
-    const R = niceCeil(vm * 1.05), cx = r.x + r.w / 2, cy = r.y + r.h / 2, s = r.w / 2 / R;
+    void kTop;
+    const { r: R, ring } = FIXED.hodograph(!!this.grid?.tc), cx = r.x + r.w / 2, cy = r.y + r.h / 2, s = r.w / 2 / R;
     ctx.fillStyle = 'rgba(11,16,23,0.85)'; ctx.fillRect(r.x, r.y, r.w, r.h);
     ctx.strokeStyle = INK.grid; ctx.lineWidth = 1;
-    const ring = niceCeil(R / 3);
     for (let q = ring; q <= R + 1e-9; q += ring) { ctx.beginPath(); ctx.arc(cx, cy, q * s, 0, 2 * Math.PI); ctx.stroke(); }
     ctx.beginPath(); ctx.moveTo(r.x, cy); ctx.lineTo(r.x + r.w, cy); ctx.moveTo(cx, r.y); ctx.lineTo(cx, r.y + r.h); ctx.stroke();
     ctx.strokeStyle = INK.axis; ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
@@ -1129,6 +1221,16 @@ export class RegionalCharts {
 
   // ---------------------------------------------------------------- time series
 
+  /** Mark the replayed time in the panels of a series (vertical line). */
+  private markReplay(rects: Rect[], t0: number, t1: number): void {
+    const h = this.replayT === null ? NaN : this.replayT / 3600;
+    if (!(h >= t0 - 1e-9 && h <= t1 + 1e-9)) return;
+    const ctx = this.ctx;
+    ctx.save(); ctx.fillStyle = SERIES[3]!;
+    for (const r of rects) ctx.fillRect(r.x + (h - t0) / (t1 - t0) * r.w - 0.75, r.y, 1.5, r.h);
+    ctx.restore();
+  }
+
   private drawSeries(area: Rect): void {
     const sel = this.selStorm !== null ? this.storms.get(this.selStorm) : undefined;
     if (sel) { this.drawStormSeries(area, sel); return; }
@@ -1141,6 +1243,7 @@ export class RegionalCharts {
       { label: '最大地面風 / Max surface wind', unit: 'm/s', get: (s) => s.vmax, digits: 1 },
       { label: '最大風速半徑 / Radius of max wind', unit: 'km', get: (s) => (s.rmw === null ? null : s.rmw / 1000), digits: 0 },
       { label: '最大上升速度 / Max updraft', unit: 'm/s', get: (s) => s.wmax, digits: 1 },
+      { label: '環境垂直風切（200–850 hPa，200–800 km 圓環平均）/ Environmental shear', unit: 'm/s', get: (s) => s.shear, digits: 1 },
       { label: '外圍雨量（100–300 km，雨帶）/ Outer rain (rainbands)', unit: 'mm/h', get: (s) => s.tcRain?.outer ?? null, digits: 2 },
     ] : [
       { label: '最大上升速度 / Max updraft', unit: 'm/s', get: (s) => s.wmax, digits: 1 },
@@ -1191,8 +1294,9 @@ export class RegionalCharts {
       });
       tooltip(ctx, [`t = ${(s.t / 3600).toFixed(2)} h`, ...panels.map((pn) => { const v = pn.get(s); return `${zh(pn.label)}: ${v === null ? '—' : fmt(v, pn.digits)} ${pn.unit}`; })], hover!.x, hover!.y, this.canvas.clientWidth, this.canvas.clientHeight);
     }
+    this.markReplay(rects, t0, t1);
     this.plotF = { r: rects[0]!, kind: 'series', x0: t0, x1: t1, y0: 0, y1: 1, panels: rects };
-    if (trackR) this.drawTrack(trackR, hi >= 0 ? S[hi]!.t : null);
+    if (trackR) this.drawTrack(trackR, hi >= 0 ? S[hi]!.t : this.replayT);
   }
 
   /** Time series of one storm: vortices pressure deficit, maximum wind, radius of maximum wind and minimum pressure;
@@ -1248,8 +1352,9 @@ export class RegionalCharts {
       rects.forEach((r) => { const x = r.x + (s.t / 3600 - t0) / (t1 - t0) * r.w; ctx.fillStyle = INK.secondary; ctx.fillRect(x, r.y, 1, r.h); });
       tooltip(ctx, [`${st.name} · t = ${(s.t / 3600).toFixed(2)} h`, ...panels.map((pn) => { const v = pn.get(s); return `${zh(pn.label)}: ${v === null ? '—' : fmt(v, pn.digits)} ${pn.unit}`; })], hover!.x, hover!.y, this.canvas.clientWidth, this.canvas.clientHeight);
     }
+    this.markReplay(rects, t0, t1);
     this.plotF = { r: rects[0]!, kind: 'series', x0: t0, x1: t1, y0: 0, y1: 1, panels: rects };
-    if (trackR) this.drawTrack(trackR, hi >= 0 ? S[hi]!.t : null);
+    if (trackR) this.drawTrack(trackR, hi >= 0 ? S[hi]!.t : this.replayT);
   }
 
   /** Tracks of every storm (ground-relative), each in its own colour and named at its latest position; the selected
@@ -1303,8 +1408,7 @@ export class RegionalCharts {
     const t0 = Hv[0]!.t / 3600, t1 = Hv[Hv.length - 1]!.t / 3600;
     const r: Rect = { x: area.x + 56, y: area.y + 26, w: Math.max(40, area.w - 56 - 80), h: Math.max(40, area.h - 26 - 44) };
     const rows = Math.max(2, Math.min(600, Math.round(r.h)));
-    let vm = 0; for (const h of Hv) for (let i = 0; i < Math.min(nrs, h.vt.length); i++) vm = Math.max(vm, Math.abs(h.vt[i]!));
-    const sc: Scale = { kind: 'div', lo: -niceCeil(vm || 1), hi: niceCeil(vm || 1), gamma: 1, clear: null, reverse: false };
+    const sc = this.scale('vt', 'rz');
     let idx = 0;
     const rowOf = new Int32Array(rows);
     for (let y = 0; y < rows; y++) {
@@ -1313,6 +1417,9 @@ export class RegionalCharts {
       rowOf[y] = idx;
     }
     drawField(ctx, r, nrs, rows, (i, y) => { const h = Hv[rowOf[y]!]!; return i < h.vt.length ? h.vt[i]! : NaN; }, sc, () => [16, 22, 30]);
+    if (this.replayT !== null && this.replayT / 3600 >= t0 - 1e-9 && this.replayT / 3600 <= t1 + 1e-9) {
+      ctx.save(); ctx.fillStyle = SERIES[3]!; ctx.fillRect(r.x, r.y + r.h - (this.replayT / 3600 - t0) / ((t1 - t0) || 1) * r.h - 0.75, r.w, 1.5); ctx.restore();
+    }
     // radius of maximum wind (surface) on top
     const S = this.samples.filter((s) => s.rmw !== null && s.t / 3600 >= t0 - 1e-9);
     if (S.length > 1) {

@@ -8,7 +8,7 @@
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
-import { COL, WV_PATH, ETOP_DBZ, VIL_ZMAX, level500 } from '../regional/diagnostics.js';
+import { COL, WV_PATH, ETOP_DBZ, VIL_ZMAX, level500, levelNear } from '../regional/diagnostics.js';
 import { FORCING_TAU, MAX_FORCINGS, forcingTable, type WindForcing } from '../regional/forcing.js';
 import { CU_TAU, CU_RH, CU_MIN_DEPTH, CU_DETRAIN, CU_DETRAIN_DEPTH, cumulusScale } from '../regional/cumulus.js';
 import { EXT, EXT_MAX, subgridRHc } from '../regional/display.js';
@@ -754,7 +754,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!this.disp) {
       const code = `
 const NX: u32 = ${nx}u; const NY: u32 = ${ny}u; const NZ: u32 = ${nz}u; const HH: u32 = ${H}u; const SX: u32 = ${m.sx}u; const PL: u32 = ${PL}u; const SIZE: u32 = ${SIZE}u; const ICE: bool = ${this.nq === 6}; const MOIST: bool = ${this.nq > 0};
-const DX: f32 = ${dx}; const DY: f32 = ${dy}; const COL: u32 = ${COL}u; const K500: u32 = ${level500(m.pi0)}u;
+const DX: f32 = ${dx}; const DY: f32 = ${dy}; const COL: u32 = ${COL}u; const K500: u32 = ${level500(m.pi0)}u; const K850: u32 = ${levelNear(m.pi0, 85000)}u; const K200: u32 = ${levelNear(m.pi0, 20000)}u;
 @group(0) @binding(0) var<storage, read> S: array<f32>;
 @group(0) @binding(1) var<storage, read_write> D: array<u32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -901,6 +901,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   C[COL * t + 14u] = length(b1 - a0); C[COL * t + 15u] = srh1; C[COL * t + 16u] = srh3; C[COL * t + 17u] = zlcl;
   C[COL * t + 18u] = li; C[COL * t + 19u] = etop; C[COL * t + 20u] = vil;
+  // winds at the 850 and 200 hPa levels (cell-centred) and the 0-1 km shear
+  let q85 = K850 * PL + (j + HH) * SX + (i + HH); let q20 = K200 * PL + (j + HH) * SX + (i + HH);
+  C[COL * t + 21u] = 0.5 * (S[q85] + S[q85 + 1u]); C[COL * t + 22u] = 0.5 * (S[SIZE + q85] + S[SIZE + q85 + SX]);
+  C[COL * t + 23u] = 0.5 * (S[q20] + S[q20 + 1u]); C[COL * t + 24u] = 0.5 * (S[SIZE + q20] + S[SIZE + q20 + SX]);
+  C[COL * t + 25u] = length(uvAt(i, j, 1000.0) - a0);
 }`;
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
       const D = dev.createBuffer({ size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });

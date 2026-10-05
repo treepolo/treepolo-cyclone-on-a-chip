@@ -36,10 +36,10 @@ const zFactor = (rho: number, qr: number, qs: number, qg: number): number =>
 // ---------------------------------------------------------------- variables
 
 /** Values per column in the display composites (GPU readDisplay and columnDiagnostics). */
-export const COL = 21;
+export const COL = 26;
 /** Offsets in a column record. */
 export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 6, uh: 7, cape: 8, cin: 9, vis: 10, pw: 11, wvT: 12, visZ: 13,
-  shear: 14, srh1: 15, srh3: 16, lcl: 17, li: 18, etop: 19, vil: 20 } as const;
+  shear: 14, srh1: 15, srh3: 16, lcl: 17, li: 18, etop: 19, vil: 20, u850: 21, v850: 22, u200: 23, v200: 24, shear01: 25 } as const;
 /** Satellite-like column values: cloud albedo of the column optical depth (display.ts extinctions, sub-grid cloud
  *  included) and the height where the optical depth from the top reaches 1 (the visible image's cloud top, for its
  *  shading; the optical-depth-weighted mean height of thinner columns); the water-vapour channel as the temperature
@@ -53,7 +53,7 @@ export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh',
 export const SECTION_VARS = ['dbz', 'w', 'u', 'v', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'T', 'Td', 'p', 'qv', 'pp'] as const;
 /** Composite (column / surface) maps. */
 export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'visZ', 'wvT', 'pw', 'cuRain', 'sfcT', 'sfcTd',
-  'shear06', 'srh01', 'srh03', 'lcl', 'li', 'stp', 'scp', 'etop', 'vil', 'uhSwath', 'windSwath'] as const;
+  'shear06', 'srh01', 'srh03', 'lcl', 'li', 'stp', 'scp', 'etop', 'vil', 'uhSwath', 'windSwath', 'sst', 'shear850200', 'shear01'] as const;
 /** Azimuthal-mean (radius-height) fields. */
 export const RZ_VARS = ['vt', 'vr', 'w', 'thp', 'cond'] as const;
 export type SliceVar = (typeof SLICE_VARS)[number];
@@ -114,7 +114,7 @@ const BUNKERS_DZ = 500, SRH_DZ = 250;
  * the 0-500 m and 5.5-6 km means (cx, cy). SRH = sum of (u[n+1] - cx)(v[n] - cy) - (u[n] - cx)(v[n+1] - cy) over the samples.
  * The GPU display kernel (src/gpu/regionalGpu.ts) takes the same samples.
  */
-export function windIndices(uv: (h: number) => [number, number]): { shear: number; srh1: number; srh3: number; cx: number; cy: number } {
+export function windIndices(uv: (h: number) => [number, number]): { shear: number; shear1: number; srh1: number; srh3: number; cx: number; cy: number } {
   let mu = 0, mv = 0;
   const nb = Math.round(6000 / BUNKERS_DZ);
   for (let n = 0; n <= nb; n++) { const w = uv(n * BUNKERS_DZ); mu += w[0]; mv += w[1]; }
@@ -128,13 +128,16 @@ export function windIndices(uv: (h: number) => [number, number]): { shear: numbe
     srh3 += d; if (n * SRH_DZ <= 1000) srh1 = srh3;
     prev = w;
   }
-  return { shear: Math.hypot(b1[0] - a0[0], b1[1] - a0[1]), srh1, srh3, cx, cy };
+  const w1 = uv(1000);
+  return { shear: Math.hypot(b1[0] - a0[0], b1[1] - a0[1]), shear1: Math.hypot(w1[0] - a0[0], w1[1] - a0[1]), srh1, srh3, cx, cy };
 }
-/** Level whose base-state pressure is nearest 500 hPa (the lifted index). */
-export function level500(pi0: ArrayLike<number>): number {
-  let k5 = 0; for (let k = 0; k < pi0.length; k++) if (Math.abs(pressure(pi0[k]!) - 5e4) < Math.abs(pressure(pi0[k5]!) - 5e4)) k5 = k;
+/** Level whose base-state pressure is nearest P (Pa). */
+export function levelNear(pi0: ArrayLike<number>, P: number): number {
+  let k5 = 0; for (let k = 0; k < pi0.length; k++) if (Math.abs(pressure(pi0[k]!) - P) < Math.abs(pressure(pi0[k5]!) - P)) k5 = k;
   return k5;
 }
+/** Level nearest 500 hPa (the lifted index). */
+export const level500 = (pi0: ArrayLike<number>): number => levelNear(pi0, 5e4);
 /** Significant tornado parameter (fixed layer, surface-based parcel; Thompson et al. 2003): CAPE / 1500 x LCL term
  *  ((2000 - LCL) / 1000, 1 below 1 km, 0 above 2 km) x SRH(0-1 km) / 150 x shear term (0-6 km / 20 m/s, 0 below 12.5,
  *  1.5 above 30); not negative. */
@@ -174,7 +177,7 @@ export function columnDiagnostics(m: RegionalModel, subgrid = true): Float32Arra
   const { nx, ny, nz, dx, dy, dz } = m.c, sc = m.scalars, ns = sc.length, sx = m.sx, pl = m.plane;
   const out = new Float32Array(nx * ny * COL);
   const T = new Float64Array(nz), p = new Float64Array(nz), qv = new Float64Array(nz), bet = new Float64Array(nz), rhc = subgridRHc(dx), Tp = new Float64Array(nz);
-  const k500 = level500(m.pi0), zc0 = m.zc[0]!;
+  const k500 = level500(m.pi0), k850 = levelNear(m.pi0, 85000), k200 = levelNear(m.pi0, 20000), zc0 = m.zc[0]!;
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     let wmax = 0, wmin = 0, cmax = 0, pmax = 0, zmax = 0, ctz = 0, ctt = 0, uh = 0, pw = 0, tau = 0, etop = 0, vil = 0;
     for (let k = 0; k < nz; k++) {
@@ -222,6 +225,11 @@ export function columnDiagnostics(m: RegionalModel, subgrid = true): Float32Arra
     out[o + 5] = ctz; out[o + 6] = ctt; out[o + 7] = uh; out[o + 8] = pc.cape; out[o + 9] = pc.cin;
     out[o + 14] = wi.shear; out[o + 15] = wi.srh1; out[o + 16] = wi.srh3; out[o + 17] = pc.lcl >= 0 ? m.zc[pc.lcl]! : -1;
     out[o + 18] = ns > 0 ? T[k500]! - Tp[k500]! : 0; out[o + 19] = etop; out[o + 20] = vil;
+    // winds at the 850 and 200 hPa levels (cell-centred) for the deep-layer shear; 0-1 km shear
+    const q85 = m.idx(i, j, k850), q20 = m.idx(i, j, k200);
+    out[o + 21] = 0.5 * (m.u[q85]! + m.u[q85 + 1]!); out[o + 22] = 0.5 * (m.v[q85]! + m.v[q85 + sx]!);
+    out[o + 23] = 0.5 * (m.u[q20]! + m.u[q20 + 1]!); out[o + 24] = 0.5 * (m.v[q20]! + m.v[q20 + sx]!);
+    out[o + 25] = wi.shear1;
   }
   return out;
 }
@@ -310,7 +318,8 @@ export function sliceFields(m: RegionalModel, pl: LevelPlanes, k: number, vars: 
 /** Composite and surface maps ([j][i]) from the column records, the lowest-level planes and the
  *  precipitation accumulations (mm) and rates (mm/h). */
 export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPlanes,
-  acc: { rain: ArrayLike<number>; snow: ArrayLike<number>; rate: ArrayLike<number> | null; cu?: ArrayLike<number> | null; uhMax?: ArrayLike<number> | null; windMax?: ArrayLike<number> | null },
+  acc: { rain: ArrayLike<number>; snow: ArrayLike<number>; rate: ArrayLike<number> | null; cu?: ArrayLike<number> | null; uhMax?: ArrayLike<number> | null; windMax?: ArrayLike<number> | null;
+    /** sea-surface temperature (deg C) per column, NaN over land; null: no sea surface */ sst?: ArrayLike<number> | null },
   vars: readonly MapVar[], frame: { u: number; v: number }): Partial<Record<MapVar, Float32Array>> {
   const { nx, ny } = m.c, sx = m.sx, n = nx * ny, out: Partial<Record<MapVar, Float32Array>> = {};
   const th0 = m.th0[0]!, pi0 = m.pi0[0]!, z0 = m.zc[0]!;
@@ -354,6 +363,9 @@ export function compositeMaps(m: RegionalModel, col: Float32Array, pl0: LevelPla
         case 'scp': x = scpIndex(col[o + C.cape]!, col[o + C.srh3]!, col[o + C.shear]!); break;
         case 'etop': x = col[o + C.etop]! / 1000; break;
         case 'vil': x = col[o + C.vil]!; break;
+        case 'sst': x = acc.sst ? acc.sst[c]! : NaN; break;
+        case 'shear850200': x = Math.hypot(col[o + C.u200]! - col[o + C.u850]!, col[o + C.v200]! - col[o + C.v850]!); break;
+        case 'shear01': x = col[o + C.shear01]!; break;
         case 'uhSwath': x = acc.uhMax ? acc.uhMax[c]! : 0; break;
         case 'windSwath': x = acc.windMax ? acc.windMax[c]! : 0; break;
         case 'sfcTd': x = dewPoint(pl0.sc[0] ? pl0.sc[0][q]! : 0, pressure(pi0 + pl0.pp[q]!)); break;

@@ -16,9 +16,9 @@ body{display:grid;grid-template-columns:minmax(0,1fr) 380px}
 .flypad button{background:rgba(10,14,19,.82);height:40px;padding:0;font-size:14px;touch-action:none;user-select:none}
 .chartbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:6px 8px;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px}
 .chartbar select{width:auto;max-width:100%}.chartbar .chk{display:inline-flex;align-items:center;gap:3px;margin:0;color:var(--fg)}
-.chartbar .hint{color:var(--muted)}.chartbar .lvl{width:160px}
+.chartbar .hint{color:var(--muted)}.chartbar .lvl{width:160px}.chartbar input.sc{width:5.4em;padding:2px 4px}
 #view,#chart{flex:1;min-height:0;width:100%;display:block}
-#view{touch-action:none;cursor:grab}#chart{touch-action:none;cursor:crosshair}
+#view{touch-action:none;cursor:grab}#chart{touch-action:none;cursor:crosshair;margin-bottom:50px;width:100%;box-sizing:border-box}#stage.rpOn #chart{margin-bottom:96px}
 [hidden]{display:none!important}
 .panel{padding:14px 16px;border-left:1px solid var(--line);overflow:auto;background:var(--panel);font-size:13px}
 h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:16px 0 6px;color:#b8c6d4}
@@ -73,7 +73,7 @@ a{color:#8fc1ff}
 </head>
 <body>
 <div id="stage"><div id="chartBar" class="chartbar"></div><canvas id="view"></canvas><canvas id="chart" hidden></canvas>
-<div class="ov"><button id="ovRun" title="執行 / 暫停 (空白鍵) / run / pause (space)">▶</button><button id="ovStep" title="單步 / one step">⏭</button><button id="ovReplay" title="重播算過的 3D 畫面 / replay the 3-D view">重播</button><span class="t" id="ovTime">0 min</span></div>
+<div class="ov"><button id="ovRun" title="執行 / 暫停 (空白鍵) / run / pause (space)">▶</button><button id="ovStep" title="單步 / one step">⏭</button><button id="ovReplay" title="回放記錄下來的畫面（3D 和圖表都能看）/ replay the recorded frames (3-D and charts)">重播</button><span class="t" id="ovTime">0 min</span></div>
 <div class="rp" id="replayBar" hidden><button id="rpPlay" title="播放 / 暫停 / play / pause">▶</button><input id="rpSlider" type="range" min="0" max="0" value="0" /><span class="t" id="rpTime">—</span>
 <select id="rpSpeed" title="播放速度 / speed"><option value="4">慢 / slow</option><option value="10" selected>中 / normal</option><option value="25">快 / fast</option></select><button id="rpLive">回到即時 / Live</button></div>
 <button id="compass" class="compass" title="指北針：點一下轉回北方朝上 / compass: click for north up"><svg viewBox="-20 -20 40 40" width="40" height="40"><circle r="18" fill="rgba(10,14,19,.8)" stroke="#334354"/><g id="compassG"><polygon points="0,-14 4.5,0 -4.5,0" fill="#e66767"/><polygon points="0,14 4.5,0 -4.5,0" fill="#8da0b3"/><text y="-15.5" text-anchor="middle" font-size="7" fill="#dbe5ef" font-family="system-ui">N</text></g></svg></button>
@@ -131,6 +131,7 @@ a{color:#8fc1ff}
 <div class="row tcOnly"><span>中心氣壓降 / Pressure deficit</span><span id="dp">—</span></div>
 <div class="row tcOnly" title="七級風（≥ 13.9 m/s）與十級風（≥ 24.5 m/s）的範圍：16 個方向最外圈的平均，用最低層風 / extent of Beaufort 7 (≥ 13.9 m/s) and 10 (≥ 24.5 m/s) winds: mean over 16 directions, lowest-level wind"><span>暴風半徑 七級 · 十級 / Gale radii</span><span id="gale">—</span></div>
 <div class="row tcOnly"><span>眼牆 / Eyewalls</span><span id="eyewalls">—</span></div>
+<div class="row tcOnly" title="200 與 850 hPa 風的向量差，取離中心 200–800 km 圓環的平均（風暴自己的環流會平均掉）；括號是風切向量指向的方向 / vector difference of the 200 and 850 hPa winds averaged over the 200–800 km annulus (the storm's own circulation averages out); in brackets the direction the shear vector points toward"><span>環境垂直風切 / Environmental shear</span><span id="envShear">—</span></div>
 <div class="row tcOnly" title="上一個模式小時：核心 < 60 km、外圍 100–300 km 的平均雨率，與外圍 > 1 mm/h 的面積比 / last model hour: mean rain rate in the core (< 60 km) and the outer region (100–300 km), and the outer area above 1 mm/h"><span>雨量 核心 · 外圍 / Rain core · outer</span><span id="tcrain">—</span></div>
 <div class="row"><span>風暴 / Storms</span><span id="stormCount">—</span></div>
 <div id="stormList" class="stormlist"></div>
@@ -151,7 +152,10 @@ a{color:#8fc1ff}
 <label class="f"><span>目標速度 / Target speed</span><select id="pace"><option value="0">全速 / Full speed</option><option value="1">×1 真實時間 / real time</option><option value="10">×10</option><option value="60">×60</option><option value="600">×600</option><option value="3600">×3600</option></select></label>
 <label class="f"><span>畫面更新 / Display updates</span><select id="frames"><option value="wall">每 0.5 秒 / every 0.5 s</option><option value="model:60">每模式分鐘 / every model minute</option><option value="model:600">每 10 模式分鐘 / every 10 model minutes</option><option value="fast">快轉：每 5 秒 / every 5 s</option></select></label>
 <label class="f"><span>每輪計算量 / Work per tick</span><input id="speed" type="range" min="1" max="12" value="1" /></label>
-<label class="f chk"><input id="adaptive" type="checkbox" checked /><span>自動時間步長 / Adaptive Δt</span></label>
+<label class="f" title="自動：每次檢查依風速決定步長（目標庫朗數）；手動：固定你填的步長，太大造成數值不穩定時會自動還原到設定前 / automatic: the step follows the wind (target Courant number); manual: the step you enter, undone if it turns unstable"><span>步長 Δt / Step size</span><select id="dtMode"><option value="auto">自動 / Automatic</option><option value="manual">手動 / Manual</option></select></label>
+<label class="f" id="dtCflRow" title="自動步長的目標：平流庫朗數 Σ|u|Δt/Δx。預設 0.8；越大越快但越接近不穩定（RK3＋五階上風的極限約 1.4）/ target advective Courant number of the automatic step; default 0.8, the limit of RK3 with 5th-order upwind is about 1.4"><span>目標庫朗數 / Target Courant</span><input id="dtCfl" type="number" min="0.2" max="1.3" step="0.05" value="0.8" /></label>
+<div class="controls" id="dtManualRow"><input id="dtVal" type="number" min="0.05" step="0.1" style="width:6em" title="步長（秒）/ step size (s)" /><span style="align-self:center">s</span><button id="dtHalf" title="步長減半 / halve">÷2</button><button id="dtDouble" title="步長加倍 / double">×2</button></div>
+<div class="row" title="平流：Σ|u|Δt/Δx（約 1.4 以上不穩定）；聲波：聲速×Δt/(n·Δx)（0.45 以下安全）/ advective: sum |u|dt/dx (unstable above about 1.4); acoustic: c dt/(n dx) (safe below 0.45)"><span>庫朗數 / Courant</span><span id="dtInfo">—</span></div>
 <div class="controls"><input id="untilH" type="number" min="0" step="0.5" value="1" style="width:5em" /><button id="untilGo">跑這麼多模式小時後暫停 / Run for these model hours</button></div>
 </details>
 
@@ -167,6 +171,27 @@ a{color:#8fc1ff}
 <label class="f chk"><input id="runSave" type="checkbox" checked /><span>結束時存檔 / save at the end</span></label>
 <div class="controls"><button id="runStart">開始 / Start</button><button id="runStop" disabled>停止 / Stop</button><button id="runCopy" disabled>複製報告 / Copy report</button></div>
 <div class="row"><span>狀態 / Status</span><span id="runStatus">—</span></div>
+</details>
+
+<details id="secReplay"><summary>回放 / Replay</summary>
+<div class="muted">模擬進行時依「模式時間」記錄畫面，之後可以回放，也能用圖表分析。回放資料不會放進一般存檔，要保存請在下面匯出成檔案。/ Frames are recorded by model time while the run goes, to replay and to analyse with the charts. Replay data is not part of the saves: export it below.</div>
+<label class="f chk"><input id="rcOn" type="checkbox" checked /><span>記錄畫面 / Record frames</span></label>
+<label class="f"><span>記錄間隔（模式時間）/ Interval (model time)</span><input id="rcEvery" type="number" min="1" step="1" value="10" /></label>
+<label class="f"><span>間隔單位 / Unit</span><select id="rcUnit"><option value="1">秒 s</option><option value="60" selected>分鐘 min</option><option value="3600">小時 h</option></select></label>
+<label class="f" title="3D 畫面：只能重播 3D。合成圖：再加上所有合成／地面圖（雷達、衛星、降水、風切、海溫…），也可看時間序列。完整：再加上模式的完整狀態（16 位元），所有圖表（切片、剖面、探空、徑向－高度）都能對任一格分析 / 3-D only; + all composite and surface maps; + the full model state (16-bit) so every chart can analyse any frame"><span>記錄內容 / Content</span><select id="rcTier"><option value="view">3D 畫面 / 3-D</option><option value="maps" selected>+ 合成圖 / + maps</option><option value="full">完整 / Full</option></select></label>
+<label class="f"><span>記憶體上限 / Memory limit (MB)</span><input id="rcMem" type="number" min="50" max="8000" step="50" value="400" /></label>
+<label class="f" title="達到記憶體上限時：稀疏化＝丟掉每隔一格（整段時間都還在，只是變稀）；丟最舊的＝只留最近的；停止記錄＝不再記 / at the memory limit: thin out = drop every other frame (the whole run stays, sparser); drop oldest = keep the recent ones; stop = record no more"><span>滿了時 / When full</span><select id="rcFull"><option value="thin">稀疏化 / Thin out</option><option value="oldest">丟最舊的 / Drop oldest</option><option value="stop">停止記錄 / Stop</option></select></label>
+<div class="row"><span>已記錄 / Recorded</span><span id="rcStatus">—</span></div>
+<div class="muted" id="rcCost"></div>
+<div class="controls"><button id="rcNow" title="現在就記一格 / keep a frame now">現在記一格 / Record now</button><button id="rcOpen">開始回放 / Replay</button><button id="rcClear">清除 / Clear</button></div>
+<div class="muted" style="margin-top:8px">匯出與載入回放資料（和一般存檔分開）/ Export and load replay data (apart from the saves)</div>
+<div id="rxSegs"></div>
+<div class="controls"><button id="rxAdd">＋ 區段 / segment</button><button id="rxAll">全部 / all</button></div>
+<label class="f"><span>匯出內容 / Content</span><select id="rxTier"><option value="view">3D 畫面 / 3-D</option><option value="maps">+ 合成圖 / + maps</option><option value="full" selected>照記錄 / As recorded</option></select></label>
+<label class="f"><span>每幾格取一格 / Take every n-th frame</span><input id="rxStride" type="number" min="1" max="1000" step="1" value="1" /></label>
+<div class="muted" id="rxInfo"></div>
+<div class="controls"><button id="rxGo">匯出回放資料 / Export</button><label class="filebtn"><input id="rpFile" type="file" accept=".zip,.bin" hidden />載入回放資料 / Load replay data</label></div>
+<div class="muted" id="rxStatus" role="status" style="min-height:1.3em;color:#8fc1ff"></div>
 </details>
 
 <details id="secSaves"><summary>存檔 / Saves</summary><div id="saves"></div></details>
