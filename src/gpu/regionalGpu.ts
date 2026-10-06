@@ -6,6 +6,7 @@
 // microphysics, 8 qi, 9 qs, 10 qg.
 
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
+import { T_FLOOR } from '../core/constants.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
 import { COL, WV_PATH, ETOP_DBZ, VIL_ZMAX, level500, levelNear } from '../regional/diagnostics.js';
@@ -125,7 +126,7 @@ export class GpuRegional {
 const NX: u32 = ${nx}u; const NY: u32 = ${ny}u; const NZ: u32 = ${nz}u; const HH: u32 = ${H}u;
 const SX: u32 = ${m.sx}u; const SY: u32 = ${m.sy}u; const PL: u32 = ${m.plane}u; const SIZE: u32 = ${size}u; const L: u32 = ${L}u;
 const DX: f32 = ${dx}; const DY: f32 = ${dy}; const DZ: f32 = ${dz}; const FCOR: f32 = ${f}; const GEOB: f32 = ${m.c.geostrophic ? 1 : 0};
-const CP: f32 = ${cp}; const RD: f32 = ${rd}; const G: f32 = 9.80665; const XLV: f32 = 2.5e6;
+const CP: f32 = ${cp}; const RD: f32 = ${rd}; const G: f32 = 9.80665; const XLV: f32 = 2.5e6; const TFLOOR: f32 = ${T_FLOOR}.0;
 const BETA: f32 = ${beta}; const DIVD: f32 = ${divDamp};
 const MOIST: bool = ${opts.moist}; const PHYS: bool = ${!!ph}; const NQ: u32 = ${this.nq}u; const NFLD: u32 = ${NF}u;
 const OPEN: bool = ${open}; const NEST: bool = ${!!bnd}; const HASPP: bool = ${!!bnd?.pp};
@@ -247,7 +248,7 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
         seq.push(disp(pScaPD, bg(pScaPD, withCF(withFT([this.S, this.F, baseBuf, this.R!]))), nInt, 'scalar advection'));
       } else seq.push(disp(pSca, bg(pSca, withCF(withFT([this.S, this.F, baseBuf]))), nInt, 'scalar advection'));
       if (relax) seq.push(relax);
-      seq.push(disp(pStage, bg(pStage, withCF([this.S, this.S0, this.F, this.aux, prm])), size, 'RK stage'));
+      seq.push(disp(pStage, bg(pStage, [...withCF([this.S, this.S0, this.F, this.aux, prm]), baseBuf]), size, 'RK stage'));
       seq.push(haloThQ, thrho, haloTR);
       const ah = disp(pAh, bg(pAh, [this.S, this.F, this.aux, prm, this.TR]), nInt, 'acoustic horizontal');
       const av = disp(pAv, bg(pAv, [this.S, this.F, baseBuf, prm, this.aux, this.TR]), nCol, 'acoustic vertical (implicit)');
@@ -303,12 +304,18 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     stages.forEach(([dts, n], i) => this.device.queue.writeBuffer(this.params[i]!, 0, new Float32Array([dts / n, dts, dt, 0])));
   }
 
-  /** Largest advective Courant rate max(|u|/dx + |v|/dy + |w|/dz) over the domain (1/s), from a per-column
-   *  GPU reduction (one value per column read back). */
-  async maxCourantRate(): Promise<number> {
+  /** Largest advective Courant rate max(|u|/dx + |v|/dy + |w|/dz) over the domain (1/s). */
+  async maxCourantRate(): Promise<number> { return (await this.maxCourant()).rate; }
+
+  /** The largest advective Courant rate (1/s) and the speed of sound (m/s) of the hottest air, from a per-column GPU
+   *  reduction (two values per column read back). Not finite when the state is not. */
+  async maxCourant(): Promise<{ rate: number; cmax: number }> {
     const { nx, ny } = this.cpu.c, nCol = nx * ny, dev = this.device;
     if (!this.cflK) {
-      const code = this.consts + linearGid(`
+      const code = this.consts + `
+@group(0) @binding(2) var<storage, read> base: array<f32>;
+${BASE_FNS}
+` + linearGid(`
 @group(0) @binding(0) var<storage, read> S: array<f32>;
 @group(0) @binding(1) var<storage, read_write> O: array<f32>;
 @compute @workgroup_size(${WG})
@@ -316,29 +323,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
   if (t >= NX * NY) { return; }
   let j = t / NX; let i = t % NX;
-  var r = 0.0;
+  var r = 0.0; var c2 = 0.0;
   for (var k = 0u; k < NZ; k++) {
     let q = ix(i, j, k);
-    r = max(r, max(abs(S[q]), abs(S[q + 1u])) / DX + max(abs(S[SIZE + q]), abs(S[SIZE + q + SX])) / DY + max(abs(S[2u * SIZE + q]), abs(S[2u * SIZE + q + PL])) / DZ);
+    let a = max(abs(S[q]), abs(S[q + 1u])) / DX + max(abs(S[SIZE + q]), abs(S[SIZE + q + SX])) / DY + max(abs(S[2u * SIZE + q]), abs(S[2u * SIZE + q + PL])) / DZ;
+    // (a value that is not a number makes the whole reading one)
+    if (a != a) { r = a; } else { r = max(r, a); }
+    let th = S[3u * SIZE + q];
+    if (th != th) { c2 = th; } else { c2 = max(c2, th * (bpi0(k) + S[4u * SIZE + q])); }
   }
-  O[t] = r;
+  O[2u * t] = r;
+  O[2u * t + 1u] = sqrt(1.4 * RD * max(c2, 0.0));
 }`);
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
-      const out = dev.createBuffer({ size: nCol * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-      this.cflK = { pipe, out, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: out } }] }) };
+      const out = dev.createBuffer({ size: 2 * nCol * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      this.cflK = { pipe, out, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: out } }, { binding: 2, resource: { buffer: this.baseBuf } }] }) };
     }
-    const k = this.cflK, st = dev.createBuffer({ size: nCol * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const k = this.cflK, st = dev.createBuffer({ size: 2 * nCol * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
     const groups = Math.ceil(nCol / WG);
     pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.min(groups, GX), Math.ceil(groups / GX)); pass.end();
-    enc.copyBufferToBuffer(k.out, 0, st, 0, nCol * 4);
+    enc.copyBufferToBuffer(k.out, 0, st, 0, 2 * nCol * 4);
     dev.queue.submit([enc.finish()]);
     await st.mapAsync(GPUMapMode.READ);
     const a = new Float32Array(st.getMappedRange());
-    let r = 0;
-    for (let i = 0; i < nCol; i++) r = Math.max(r, a[i]!);
+    let r = 0, c = 0;
+    for (let i = 0; i < nCol; i++) { const x = a[2 * i]!, y = a[2 * i + 1]!; r = Number.isNaN(x) || Number.isNaN(r) ? NaN : Math.max(r, x); c = Number.isNaN(y) || Number.isNaN(c) ? NaN : Math.max(c, y); }
     st.unmap(); st.destroy();
-    return r;
+    return { rate: r, cmax: c };
   }
   private cflK: { pipe: GPUComputePipeline; out: GPUBuffer; bind: GPUBindGroup } | null = null;
 
@@ -562,11 +574,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   private editK: { pipe: GPUComputePipeline; E: GPUBuffer; bind: GPUBindGroup } | null = null;
   /**
    * Change the state in place (the interactions of the regional page; worker.ts does the same to a CPU model): a warm or
-   * cold bubble (theta, at most `cap` K from the base state), or water vapour multiplied by `fac` (capped at saturation) in
-   * a region. Positions in m; (ox, oy) is this model's origin in those coordinates (an inner grid's corner in the outer
-   * grid, else 0).
+   * cold bubble (theta changes by `amp` cos^2 inside the ellipsoid, nothing colder than the temperature `floorT` K), or
+   * water vapour multiplied by `fac` in a region (the excess over saturation condenses in the next step). Positions in m;
+   * (ox, oy) is this model's origin in those coordinates (an inner grid's corner in the outer grid, else 0).
    */
-  edit(e: { kind: 'bubble'; x: number; y: number; z: number; rh: number; rz: number; amp: number; cap: number; warm: boolean; ox: number; oy: number }
+  edit(e: { kind: 'bubble'; x: number; y: number; z: number; rh: number; rz: number; amp: number; floorT: number; warm: boolean; ox: number; oy: number }
     | { kind: 'moisture'; x: number; y: number; z: number; R: number; H: number; fac: number; ox: number; oy: number }): void {
     const dev = this.device, m = this.cpu, { nx, ny, nz } = m.c;
     if (!this.editK) {
@@ -589,18 +601,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let r = sqrt((ex / b.x) * (ex / b.x) + (ey / b.x) * (ey / b.x) + ((zc - a.w) / b.y) * ((zc - a.w) / b.y));
     if (r >= 1.0) { return; }
     let cc = cos(1.5707963 * r); let d = b.z * cc * cc;
-    let th = S[3u * SIZE + q]; let room = base[k] + b.w - th;
-    if (c.z > 0.5) { S[3u * SIZE + q] = th + max(0.0, min(d, room)); } else { S[3u * SIZE + q] = th + min(0.0, max(d, room)); }
+    let th = S[3u * SIZE + q]; let pk = max(base[L + k] + S[4u * SIZE + q], 0.05);
+    S[3u * SIZE + q] = max(th + d, b.w / pk);
     return;
   }
   if (!OPEN) { let lx = f32(NX) * DX; let ly = f32(NY) * DY; ex -= floor(ex / lx + 0.5) * lx; ey -= floor(ey / ly + 0.5) * ly; }
   let rh = sqrt(ex * ex + ey * ey) / b.x; let rz = abs(zc - a.w) / b.y;
   if (rh >= 1.0 || rz >= 1.0) { return; }
   let ch = cos(1.5707963 * rh); let cz = cos(1.5707963 * rz); let e = ch * ch * cz * cz;
-  let pk = base[L + k] + S[4u * SIZE + q]; let T = S[3u * SIZE + q] * pk; let p = 1e5 * pow(pk, 1004.5 / 287.05);
-  let es = 611.2 * exp(17.67 * (T - 273.15) / (T - 29.65));
   let qv = S[5u * SIZE + q];
-  S[5u * SIZE + q] = max(0.0, min(qv * (1.0 + (b.z - 1.0) * e), max(qv, 0.622 * es / max(p - es, 1.0))));
+  S[5u * SIZE + q] = max(0.0, qv * (1.0 + (b.z - 1.0) * e));
 }`;
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
       const E = dev.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -608,7 +618,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       dev.queue.writeBuffer(LZ, 0, Float32Array.from(m.zc.subarray(0, nz)));
       this.editK = { pipe, E, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: this.baseBuf } }, { binding: 2, resource: { buffer: E } }, { binding: 3, resource: { buffer: LZ } }] }) };
     }
-    const E = e.kind === 'bubble' ? [0, e.x, e.y, e.z, e.rh, e.rz, e.amp, e.cap, e.ox, e.oy, e.warm ? 1 : 0, 0]
+    const E = e.kind === 'bubble' ? [0, e.x, e.y, e.z, e.rh, e.rz, e.amp, e.floorT, e.ox, e.oy, e.warm ? 1 : 0, 0]
       : [1, e.x, e.y, e.z, e.R, e.H, e.fac, 0, e.ox, e.oy, 0, 0];
     dev.queue.writeBuffer(this.editK.E, 0, new Float32Array(E));
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
@@ -1576,11 +1586,15 @@ const stageWgsl = (cf: boolean): string => /* wgsl */`
 @group(0) @binding(3) var<storage, read_write> A: array<f32>;
 @group(0) @binding(4) var<uniform> p: P;
 ${cf ? '@group(0) @binding(5) var<storage, read> CF: array<u32>;' : ''}
+@group(0) @binding(${cf ? 6 : 5}) var<storage, read> base: array<f32>;
+${BASE_FNS}
 @compute @workgroup_size(${WG})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let q = gid.x;
   if (q >= SIZE) { return; }
   S[3u * SIZE + q] = S0[3u * SIZE + q] + p.dtStage * F[3u * SIZE + q];
+  // the temperature floor (T_FLOOR in core/constants.ts): only an interaction asking for more cold than there is gets here
+  { let kk = q / PL; if (kk < NZ) { S[3u * SIZE + q] = max(S[3u * SIZE + q], TFLOOR / bpi0(kk)); } }
   // hydrometeors of clear-air columns stay exactly 0 (S0 = F = 0 there): no update needed
   var fEnd = NFLD;
   ${cf ? `{
@@ -1768,9 +1782,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let qrprod = cc - (cc - dt * max(0.001 * (cc - 0.001), 0.0)) * factorn;
     cc = max(cc - qrprod, 0.0);
     rr += qrprod;
-    let pi = bpi0(k) + S[4u * SIZE + q];
+    let pi = max(bpi0(k) + S[4u * SIZE + q], 0.05);
     let pr = 1.0e5 * pow(pi, CP / RD);
-    let T = S[3u * SIZE + q] * pi;
+    let T = max(S[3u * SIZE + q] * pi, TFLOOR);
     let qvs = 380.0 / pr * exp(17.27 * (T - 273.15) / (T - 35.86));
     let f5c = 237.3 * 17.27 * XLV / CP;
     let prod = (vv - qvs) / (1.0 + qvs * f5c / ((T - 35.86) * (T - 35.86)));
@@ -1872,18 +1886,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var k = 0u; k < NZ; k++) {
     let q = ix(i, j, k);
     let rho = brho0(k);
-    let pi = bpi0(k) + S[4u * SIZE + q];
+    let pi = max(bpi0(k) + S[4u * SIZE + q], 0.05);
     let pr = 1.0e5 * pow(pi, CP / RD);
     let hv = LVI / (CP * pi); let hs = LSI / (CP * pi); let hf = LFI / (CP * pi);
     var th = S[3u * SIZE + q];
     var qv = S[5u * SIZE + q]; var qc = S[6u * SIZE + q]; var qr = S[7u * SIZE + q];
     var qi = S[8u * SIZE + q]; var qs = S[9u * SIZE + q]; var qg = S[10u * SIZE + q];
-    var T = th * pi;
-    if (T > T0 && qi > 0.0) { qc += qi; th -= hf * qi; qi = 0.0; T = th * pi; }
+    var T = max(th * pi, TFLOOR);
+    if (T > T0 && qi > 0.0) { qc += qi; th -= hf * qi; qi = 0.0; T = max(th * pi, TFLOOR); }
     if (T < T0 - 40.0) {
       if (qc > 0.0) { qi += qc; th += hf * qc; qc = 0.0; }
       if (qr > 0.0) { qg += qr; th += hf * qr; qr = 0.0; }
-      T = th * pi;
+      T = max(th * pi, TFLOOR);
     }
     let dens = sqrt(rhoS / rho); let dens4 = sqrt(dens);
     let psi = 2.26e-5 * pow(T / T0, 1.81) * (1e5 / pr);
@@ -1952,7 +1966,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     th += hs * (t_vi - t_iv + t_vs - t_sv + t_vg - t_gv) + hf * (cf * (t_cs + t_cg) + t_rg - t_sr - t_gr);
     qv = max(qv, 0.0); qi = max(qi, 0.0); qs = max(qs, 0.0); qg = max(qg, 0.0); qc = max(qc, 0.0); qr = max(qr, 0.0);
     // warm rain + saturation adjustment (Kessler)
-    T = th * pi;
+    T = max(th * pi, TFLOOR);
     var factorn = 1.0;
     if (qr > 0.0) { factorn = 1.0 / (1.0 + 2.2 * dt * pow(qr, 0.875)); }
     let qrprod = qc - (qc - dt * max(0.001 * (qc - 0.001), 0.0)) * factorn;
@@ -1973,7 +1987,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     qc = qc + product;
     qr = max(qr - ern, 0.0);
     if (T < T0 - 40.0) {
-      let Tn = th * pi; let qsi2 = qvsi(Tn, pr);
+      let Tn = max(th * pi, TFLOOR); let qsi2 = qvsi(Tn, pr);
       if (qv > qsi2) { let d = (qv - qsi2) / (1.0 + LSI * LSI * qsi2 / (CP * RV * Tn * Tn)); qv -= d; qi += d; th += hs * d; }
     }
     S[3u * SIZE + q] = th;

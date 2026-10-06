@@ -20,6 +20,8 @@ import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcin
 import { volumeBytes } from '../../regional/display.js';
 import { EyeNest, syncModel } from './eyeNest.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
+import { nextDt, soundSpeed, bubbleDt, CFL_DEFAULT } from '../../regional/stepControl.js';
+import { T_FLOOR } from '../../core/constants.js';
 import { quant, metaOf, modelFromMeta, loadState, packState, type Q16, type ReplayAux, type ReplayMeta, type ReplayRec, type ReplayTier } from '../../regional/replayData.js';
 import { C, COL as NCOL, SECTION_VARS, MAP_VARS, pressure, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
@@ -223,13 +225,14 @@ const EXP_LABEL: Record<RegionalExperiment, string> = {
 // Adaptive time step (GPU): dt = min(acoustic limit, CFL_TARGET / max(|u|/dx + |v|/dy + |w|/dz)),
 // between the configured dt0 and 3 dt0; shrinks at once, grows by at most 10 % per check. The
 // acoustic limit keeps the horizontal sound Courant number of the split steps c_s dt / (n_s dx) <= 0.45.
-const CFL_DEFAULT = 0.8;
-/** the target Courant number of the automatic step size (the user can change it) and the overshoot that cuts the step back */
+/** the target Courant number of the automatic step size (the user can change it); the rule itself is in stepControl.ts */
 let cflTarget = CFL_DEFAULT;
-const cflMax = (): number => 1.375 * cflTarget;
 let adaptive = true, dt0 = 0;
-/** the last advective Courant rate max(|u|/dx + |v|/dy + |w|/dz) (1/s): the display of the step size control */
-let lastCourantRate = 0, stepSeq = 0;
+/** the last advective Courant rate max(|u|/dx + |v|/dy + |w|/dz) (1/s): the display of the step size control; its growth
+ *  per model second (1/s^2) sets how many steps a batch may take before the Courant number is looked at again */
+let lastCourantRate = 0, rateGrowth = 0, rateAt = -1, stepSeq = 0;
+/** the Courant check found a state that is not numbers: handled right after the batch (blowUp) */
+let stateLost = false;
 // Safety net for interactions: the state just before the last change (float32 copies, models up to 4 M cells) and the
 // model time of the change; a blow-up within a model hour of it restores this state and pauses.
 let undo: { t: number; arrays: Float32Array[]; rain: Float32Array; snow: Float32Array; ub: Float64Array; vb: Float64Array; bu: Float64Array | null; bqv: Float64Array | null; envDu: number;
@@ -237,30 +240,42 @@ let undo: { t: number; arrays: Float32Array[]; rain: Float32Array; snow: Float32
   gpu: GpuRegional | null } | null = null;
 /** what the kept state was taken for: an interaction, or a manual step size */
 let undoNote: 'interaction' | 'dt' = 'interaction';
-/** accumulated wind change of 'environment' interactions at 6 km (bounded to +-ENV_DU_MAX) */
+/** accumulated wind change of 'environment' interactions at 6 km (m/s) */
 let envDu = 0;
-const ENV_DU_MAX = 30;
-/** largest plausible |w| (m/s): beyond it the state is treated as numerically unstable */
-const W_BLOWUP = 200;
-/** CPU adaptive time step: the same Courant rule as the GPU, checked every tick */
+/** |w| (m/s) beyond which the state is taken for numerically lost (the fastest flow an interaction has made: about 14 km/s from a
+ *  bubble heated by a million K): a large wind is not a failure, a number that is not one is */
+const W_BLOWUP = 1e5;
+/** CPU adaptive time step: the same rule as the GPU (stepControl.ts), checked every tick */
 function cpuAdaptDt(): void {
   if (!m || gpu) return;
   const { nx, ny, nz, dx, dy, dz } = m.c;
-  let rate = 0;
+  let rate = 0, cmax = 0;
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const q = m.idx(i, j, k);
     rate = Math.max(rate, Math.abs(m.u[q]!) / dx + Math.abs(m.v[q]!) / dy + Math.abs(m.w[q]!) / dz);
+    cmax = Math.max(cmax, soundSpeed(m.th[q]!, m.pi0[k]! + m.pp[q]!));
   }
-  if (!Number.isFinite(rate)) return;
-  lastCourantRate = rate;
+  if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { stateLost = true; return; }
+  noteRate(rate);
   if (!adaptive) return;
-  // the CPU never goes above the configured step (its acoustic sub-steps are sized for it)
-  const cur = m.c.dt, lo = 0.25 * dt0;
-  let next = Math.min(dt0, cflTarget / Math.max(rate, 1e-9));
-  if (rate * cur > cflMax()) next = Math.min(next, 0.875 * cflTarget / rate);
-  else if (next > cur) next = Math.min(next, 1.1 * cur);
-  next = Math.max(lo, next);
-  if (Math.abs(next - cur) > 0.02 * cur) m.c.dt = next;
+  const next = nextDt({ cur: m.c.dt, dt0, rate, cmax, cfl: cflTarget, dxMin: Math.min(dx, dy), nsound: m.c.nsound, gpu: false });
+  if (Math.abs(next - m.c.dt) > 0.02 * m.c.dt) m.c.dt = next;
+}
+/** Remember the Courant rate and how fast it grows (per model second). */
+function noteRate(rate: number): void {
+  const t = modelNow();
+  if (rateAt >= 0 && t > rateAt + 1e-9) rateGrowth = Math.max(0, (rate - lastCourantRate) / (t - rateAt));
+  else if (t < rateAt) rateGrowth = 0;
+  lastCourantRate = rate; rateAt = t;
+}
+/** Steps of size dt a batch may take: at most n, and few enough that the Courant number cannot pass the hard limit before it
+ *  is looked at again, at the rate it has been growing. */
+function batchLimit(n: number, dt: number): number {
+  if (!(rateGrowth > 0)) return n;
+  // (up to the Courant number that cuts the step back hard, not the target: a flow that keeps the step at the target all the
+  // time would otherwise never be left more than one step)
+  const room = 1.375 * cflTarget / dt - lastCourantRate;
+  return Math.max(1, Math.min(n, Math.floor(room / (rateGrowth * dt))));
 }
 /** The eye nest's sub-steps for the outer step now (CPU: its Courant number computed here; GPU: read back). */
 async function nestFit(): Promise<void> {
@@ -332,27 +347,43 @@ async function blowUp(): Promise<void> {
     if (why === 'dt') { adaptive = true; post({ type: 'paused', reason: '數值不穩定：手動步長太大，已還原到設定前、改回自動步長並暫停 / numerical instability after the manual step size: the state before it was restored, the step size is automatic again, and the run paused' }); }
     else {
     clearForcings();
-    post({ type: 'paused', reason: '數值不穩定：上一個互動太強，已自動還原到互動前並暫停 / numerical instability right after the last change: the state before it was restored and the run paused' });
+    post({ type: 'paused', reason: '模式的數值失效（出現不是數字的值）。這個互動超出了目前網格和公式能算的範圍，已還原到互動前並暫停；請把它調小一些，或先用較細的網格 / the model lost its numbers (not-a-number values) right after the last change: it asks for more than these grid and equations can integrate. The state before it was restored and the run paused; try less, or a finer grid' });
     }
     await sendFrame();
   } else post({ type: 'error', message: '數值發散 / numerical blow-up' });
 }
-function dtLimits(): { lo: number; hi: number } {
-  const c = m!.c;
-  const ac = c.nsound * 0.45 * Math.min(c.dx, c.dy) / 350;
-  return { lo: 0.25 * dt0, hi: Math.max(dt0, Math.min(3 * dt0, ac)) };
-}
 async function adaptDt(): Promise<void> {
   if (!gpu || !m) return;
-  const rate = await gpu.maxCourantRate();
-  if (Number.isFinite(rate)) lastCourantRate = rate;
-  if (!adaptive || !Number.isFinite(rate)) { await nestFit(); return; }
-  const { lo, hi } = dtLimits(), cur = gpu.dt;
-  let next = Math.min(hi, cflTarget / Math.max(rate, 1e-9));
-  if (rate * cur > cflMax()) next = Math.min(next, 0.875 * cflTarget / rate);          // overshoot: cut back hard
-  else if (next > cur) next = Math.min(next, 1.1 * cur);
-  next = Math.max(lo, next);
-  if (Math.abs(next - cur) > 0.02 * cur) gpu.setDt(next);
+  const { rate, cmax } = await gpu.maxCourant();
+  if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { stateLost = true; return; }
+  noteRate(rate);
+  if (!adaptive) { await nestFit(); return; }
+  const c = m.c, next = nextDt({ cur: gpu.dt, dt0, rate, cmax, cfl: cflTarget, dxMin: Math.min(c.dx, c.dy), nsound: c.nsound, gpu: true });
+  if (Math.abs(next - gpu.dt) > 0.02 * gpu.dt) gpu.setDt(next);
+  await nestFit();
+}
+/**
+ * After a change of the state (an interaction): the step the next batch takes must suit the new state, not the old one. The
+ * Courant numbers and the sound speed of the new state, and for a bubble the acceleration its heat gives in the first step
+ * (before any wind exists to measure), set it; it only gets smaller (and only in the automatic mode: a manual step is the user's).
+ */
+async function stepAfterChange(bubbleK = 0): Promise<void> {
+  if (!m || !adaptive) return;
+  const c = m.c;
+  let rate = 0, cmax = 0;
+  if (gpu) ({ rate, cmax } = await gpu.maxCourant());
+  else for (let k = 0; k < c.nz; k++) for (let j = 0; j < c.ny; j++) for (let i = 0; i < c.nx; i++) {
+    const q = m.idx(i, j, k);
+    rate = Math.max(rate, Math.abs(m.u[q]!) / c.dx + Math.abs(m.v[q]!) / c.dy + Math.abs(m.w[q]!) / c.dz);
+    cmax = Math.max(cmax, soundSpeed(m.th[q]!, m.pi0[k]! + m.pp[q]!));
+  }
+  if (!Number.isFinite(rate) || !Number.isFinite(cmax)) return;
+  const cur = gpu ? gpu.dt : c.dt;
+  let next = nextDt({ cur: Infinity, dt0, rate, cmax, cfl: cflTarget, dxMin: Math.min(c.dx, c.dy), nsound: c.nsound, gpu: !!gpu });
+  if (bubbleK > 0) next = Math.min(next, bubbleDt(bubbleK, m.th0[Math.min(c.nz - 1, 3)]!, c.dz));
+  next = Math.min(next, cur);
+  noteRate(rate); rateGrowth = 0;
+  if (next < cur) { if (gpu) gpu.setDt(next); else c.dt = next; }
   await nestFit();
 }
 
@@ -879,7 +910,7 @@ async function loop(): Promise<void> {
           // adaptive batch: about 60 ms x speed setting of GPU work between checks
           const t0 = performance.now();
           // with adaptive stepping, re-check the Courant number at least every 300 model seconds
-          const nb0 = adaptive ? Math.max(1, Math.min(gpuBatch, Math.ceil(300 / gpu.dt))) : gpuBatch;
+          const nb0 = adaptive ? batchLimit(Math.max(1, Math.min(gpuBatch, Math.ceil(300 / gpu.dt))), gpu.dt) : gpuBatch;
           const nb = pacer.allow(gpu.time, gpu.dt, recClamp(nb0, gpu.dt));
           if (nb === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
           const dtb = gpu.dt;
@@ -888,18 +919,20 @@ async function loop(): Promise<void> {
           // while the GPU works through the batch, changes from the page are queued right behind it (stepping)
           stepping = true;
           try { await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); } finally { stepping = false; }
+          if (stateLost) { stateLost = false; await blowUp(); busy = false; continue; }
           const el = performance.now() - t0, target = 60 * stepsPerTick;
           if (DEBUG) console.log(`DBG batch ${gpuBatch} steps ${el.toFixed(0)} ms`);
           const perStep = Math.max(el, 1) / nb;
           gpuBatch = Math.max(1, Math.min(2000, Math.round(Math.min(2 * gpuBatch, Math.max(0.5 * gpuBatch, target / perStep)))));
         }
         else {
-          const ns = pacer.allow(m.time, m.c.dt, recClamp(stepsPerTick, m.c.dt));
+          const ns = pacer.allow(m.time, m.c.dt, recClamp(adaptive ? batchLimit(stepsPerTick, m.c.dt) : stepsPerTick, m.c.dt));
           if (ns === 0) { busy = false; await new Promise((r) => setTimeout(r, 15)); continue; }
           const dtb = m.c.dt;
           for (let s = 0; s < ns; s++) { stepCpu(); rateSteps++; }
           advectTracers(ns * dtb, ns);
           cpuAdaptDt();
+          if (stateLost) { stateLost = false; await blowUp(); busy = false; continue; }
           await nestFit();
         }
         advanceOrigin();
@@ -1054,17 +1087,31 @@ async function startNest(R: number, dx: number, dz: number, recentre: boolean): 
 }
 
 /** Interaction: change the conditions (never the outcome). Returns a log line. */
+/** The sea cannot be colder than it freezes, and nothing at the surface can be hotter than boiling water (the saturation formula
+ *  of the surface fluxes turns over there). */
+const SEA_MIN = 271.35, SURFACE_MAX = 372;
+/** A number for the log: as given up to 4 digits, in exponent form when very large or small. */
+const fmtNum = (x: number): string => (Math.abs(x) >= 1e5 || (x !== 0 && Math.abs(x) < 0.01) ? x.toExponential(2) : String(+x.toPrecision(4)));
+
+/**
+ * Interactions change the model's conditions and nothing else; they are applied with the strength the user asks for, whatever
+ * it is (no limit of ours): the model stays finite through any of them (the temperature floor T_FLOOR, the microphysics, a step
+ * that shrinks with the flow and the sound speed: see stepControl.ts). Where something the user asked for cannot be done
+ * (a region larger than the domain, a cold pool colder than T_FLOOR, a sea colder than ice or hotter than boiling), the
+ * answer says what was done instead.
+ */
 async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'paint' | 'environment' | 'moisture' | 'wind' }>): Promise<string> {
   const mm = m!, { nx, ny, nz, dx, dy } = mm.c, L = Math.min(nx * dx, ny * dy);
   if (msg.type === 'paint') {
     const sf = phys?.surface;
     if (!sf || !physCfg) return '這個實驗沒有地面通量，不能塗海溫或陸地 / this experiment has no surface fluxes to paint';
+    const dT = Math.abs(Number.isFinite(msg.amount) ? msg.amount! : 2);
+    let tooCold = 0, tooHot = 0;
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       if (Math.hypot((i + 0.5) * dx - msg.x, (j + 0.5) * dy - msg.y) > msg.radius) continue;
       const c = j * nx + i;
-      const dT = Math.max(0.1, Math.min(5, msg.amount ?? 2));
-      if (msg.kind === 'warmer') sf.tsk[c] = Math.min(310, sf.tsk[c]! + dT);
-      else if (msg.kind === 'cooler') sf.tsk[c] = Math.max(271.35, sf.tsk[c]! - dT);
+      if (msg.kind === 'warmer') { const v = sf.tsk[c]! + dT; sf.tsk[c] = Math.min(SURFACE_MAX, v); if (v > SURFACE_MAX) tooHot++; }
+      else if (msg.kind === 'cooler') { const lo = sf.wet[c]! >= 0.99 ? SEA_MIN : T_FLOOR, v = sf.tsk[c]! - dT; sf.tsk[c] = Math.max(lo, v); if (v < lo) tooCold++; }
       else if (msg.kind === 'land') { if (sf.wet[c]! >= 0.99) sf.tsk[c] = mm.th0[0]! * mm.pi0[0]!; sf.wet[c] = 0.3; }
       else { if (sf.wet[c]! < 0.99) sf.tsk[c] = (setup?.sst ?? 28) + 273.15; sf.wet[c] = 1; }
     }
@@ -1073,40 +1120,52 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     physCfg.surface = { tsk: sf.tsk, wet: sf.wet };
     gpu?.setSurface(sf.tsk, sf.wet);
     eye?.surfaceFrom(mm, sf);
-    return '';
+    return tooCold ? `${tooCold} 格已到下限（海水 ${SEA_MIN} K 結冰，陸地 ${T_FLOOR} K）/ ${tooCold} cells reached the lower limit (sea freezes at ${SEA_MIN} K)`
+      : tooHot ? `${tooHot} 格已到上限 ${SURFACE_MAX} K（水沸騰，地面通量的飽和公式到此為止）/ ${tooHot} cells reached ${SURFACE_MAX} K (boiling)` : '';
   }
   // on the GPU the change is made there by small kernels (no read-back of the state, which takes long on large grids),
   // with a GPU copy of the state kept for the undo; the environment change rebuilds the models from the CPU state
   const onGpu = !!gpu && msg.type !== 'environment';
   if (onGpu) takeUndoGpu(); else { await syncFromGpu(); takeUndo(); }
   gpuBatch = 1;
-  const top = nz * mm.c.dz;
-  const clampR = (r: number | undefined, d: number): number => Math.max(2 * dx, Math.min(0.45 * L, Number.isFinite(r) ? r! : d));
+  const top = nz * mm.c.dz, notes: string[] = [];
+  const done = (what: string): string => `${what}${notes.length ? `（${notes.join('；')}）` : ''}`;
+  // sizes: at least two cells across, at most the whole domain; the depth at most the whole model height
+  const clampR = (r: number | undefined, d: number): number => {
+    const v = Number.isFinite(r) ? r! : d, c = Math.max(2 * dx, Math.min(L, v));
+    if (c !== v) notes.push(`半徑 ${(v / 1000).toFixed(1)} km 改成 ${(c / 1000).toFixed(1)} km：至少 2 格、至多整個網域 / radius made ${(c / 1000).toFixed(1)} km: 2 cells to the whole domain`);
+    return c;
+  };
+  const clampH = (depth: number | undefined): number => {
+    const d = Number.isFinite(depth) ? depth! : 3000, c = Math.max(mm.c.dz, Math.min(top, d));
+    if (c !== d) notes.push(`深度 ${(d / 1000).toFixed(1)} km 改成 ${(c / 1000).toFixed(1)} km：至少 1 層、至多整個模式高度 / depth made ${(c / 1000).toFixed(1)} km`);
+    return 0.5 * c;
+  };
   if (msg.type === 'wind') {
-    // a wind once (added now) or a lasting forcing; the push's vertical part is at most 15 m/s
-    const R = clampR(msg.radius, 20 * dx), H = Math.max(mm.c.dz, Math.min(top / 2, 0.5 * (Number.isFinite(msg.depth) ? msg.depth : 3000)));
+    // a wind once (added now) or a lasting forcing
+    const R = clampR(msg.radius, 20 * dx), H = clampH(msg.depth);
     const az = (msg.az || 0) * Math.PI / 180, el = Math.max(-90, Math.min(90, msg.el || 0)) * Math.PI / 180;
-    let speed = Math.max(0, Math.min(40, msg.speed || 0));
+    const speed = Math.max(0, msg.speed || 0);
     const dir: [number, number, number] = [Math.cos(el) * Math.sin(az), Math.cos(el) * Math.cos(az), Math.sin(el)];
-    if (msg.form === 'push' && Math.abs(dir[2]) * speed > 15) speed = 15 / Math.abs(dir[2]);
     const f: WindForcing = { x: msg.x, y: msg.y, z: Math.max(0, Math.min(top, msg.z || 0)), R, H, speed, dir, form: msg.form, sign: msg.sign === -1 ? -1 : 1 };
-    const what = `${msg.form === 'push' ? '推送 / push' : msg.form === 'rotate' ? (f.sign > 0 ? '逆時針旋轉 / counter-clockwise' : '順時針旋轉 / clockwise') : (f.sign > 0 ? '輻合 / converging' : '輻散 / diverging')} ${speed.toFixed(0)} m/s`;
+    const what = `${msg.form === 'push' ? '推送 / push' : msg.form === 'rotate' ? (f.sign > 0 ? '逆時針旋轉 / counter-clockwise' : '順時針旋轉 / clockwise') : (f.sign > 0 ? '輻合 / converging' : '輻散 / diverging')} ${fmtNum(speed)} m/s`;
     if (msg.minutes === 0) {
       const fe = eye ? { ...f, x: f.x - eye.x0, y: f.y - eye.y0 } : f;
       if (onGpu) { gpu!.windOnce(f); eye?.gpu?.windOnce(fe); }
       else { applyWind(mm, [f], 'once'); if (eye) applyWind(eye.m, [fe], 'once'); }
-      return `一次風 / wind once: ${what} at (${(f.x / 1000).toFixed(0)}, ${(f.y / 1000).toFixed(0)}) km, ${(f.z / 1000).toFixed(1)} km high`;
+      await stepAfterChange();
+      return done(`一次風 / wind once: ${what} at (${(f.x / 1000).toFixed(0)}, ${(f.y / 1000).toFixed(0)}) km, ${(f.z / 1000).toFixed(1)} km high`);
     }
     if (forcings.length >= MAX_FORCINGS) forcings.shift();
     const until = msg.minutes > 0 ? modelNow() + msg.minutes * 60 : null;
     forcings.push({ f, info: { id: forcingId++, x: f.x, y: f.y, z: f.z, radius: R, depth: 2 * H, speed, az: msg.az || 0, el: msg.el || 0, form: msg.form, sign: f.sign, until } });
     syncForcings();
-    return `持續風 / lasting wind: ${what}${until === null ? '，直到清除 / until cleared' : `，${msg.minutes} 模式分鐘 / model minutes`}`;
+    return done(`持續風 / lasting wind: ${what}${until === null ? '，直到清除 / until cleared' : `，${msg.minutes} 模式分鐘 / model minutes`}`);
   }
   if (msg.type === 'moisture') {
-    // multiply the vapour in the region (cos^2 envelope), capped at saturation
-    const R = clampR(msg.radius, 20 * dx), H = Math.max(mm.c.dz, Math.min(top / 2, 0.5 * (Number.isFinite(msg.depth) ? msg.depth : 3000)));
-    const fac = Math.max(0.3, Math.min(2, msg.factor || 1));
+    // multiply the vapour in the region (cos^2 envelope); what is more than the air can hold condenses in the next step
+    const R = clampR(msg.radius, 20 * dx), H = clampH(msg.depth);
+    const fac = Math.max(0, Number.isFinite(msg.factor) ? msg.factor : 1);
     // the outer grid and the eye nest (its origin at ox, oy in the outer coordinates)
     const moisten = (md: RegionalModel, ox: number, oy: number): void => {
       const { nx, ny, nz, dx, dy } = md.c, qv = md.scalars[QV]!, open = md.c.lateral === 'open';
@@ -1116,47 +1175,48 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
         const rh = Math.hypot(ex, ey) / R, rz = Math.abs(md.zc[k]! - msg.z) / H;
         if (rh >= 1 || rz >= 1) continue;
         const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = md.idx(i, j, k);
-        const pi = md.pi0[k]! + md.pp[q]!, T = md.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
-        qv[q] = Math.max(0, Math.min(qv[q]! * (1 + (fac - 1) * e), Math.max(qv[q]!, 0.622 * es / Math.max(p - es, 1))));
+        qv[q] = Math.max(0, qv[q]! * (1 + (fac - 1) * e));
       }
     };
     if (onGpu) {
       gpu!.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, fac, ox: 0, oy: 0 });
       if (eye) eye.gpu?.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, fac, ox: eye.x0, oy: eye.y0 });
     } else { moisten(mm, 0, 0); if (eye) moisten(eye.m, eye.x0, eye.y0); }
-    return `${fac >= 1 ? '增濕 / moistened' : '變乾 / dried'} ×${fac} at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km, ${(msg.z / 1000).toFixed(1)} km high`;
+    await stepAfterChange();
+    return done(`${fac >= 1 ? '增濕 / moistened' : '變乾 / dried'} ×${fmtNum(fac)} at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km, ${(msg.z / 1000).toFixed(1)} km high`);
   }
   if (msg.type === 'perturb') {
     // warm bubble (+3 K, centred at 1.5 km unless given) or cold pool (-6 K at the ground unless given), horizontal radius 10 km
-    // (at least 4 cells, at most L/8) and vertical radius 1.5 km unless given; amplitude up to 15 K. Repeated clicks add up
-    // only to twice the amplitude (at least 6 K warm / 10 K cold, at most 20 K) relative to the base state (they never
-    // weaken an existing anomaly).
+    // (at least 4 cells, at most the domain) and vertical radius 1.5 km unless given; the amplitude is what the user asks. Repeated
+    // clicks add up. Nothing gets colder than T_FLOOR.
     const warm = msg.kind === 'warm', rh = msg.radius ? clampR(msg.radius, 10000) : Math.max(4 * dx, Math.min(10000, L / 8));
     const zc = msg.z !== undefined && Number.isFinite(msg.z) ? Math.max(0, Math.min(top, msg.z)) : warm ? 1500 : 0;
     const rz = msg.depth && Number.isFinite(msg.depth) ? Math.max(mm.c.dz, Math.min(top / 2, msg.depth / 2)) : 1500;
-    const a0 = msg.amp !== undefined && Number.isFinite(msg.amp) ? Math.min(15, Math.abs(msg.amp)) : warm ? 3 : 6;
-    const amp = warm ? a0 : -a0, cap = warm ? Math.min(20, Math.max(6, 2 * a0)) : -Math.min(20, Math.max(10, 2 * a0));
+    const a0 = msg.amp !== undefined && Number.isFinite(msg.amp) ? Math.abs(msg.amp) : warm ? 3 : 6;
+    const amp = warm ? a0 : -a0;
     const bubble = (md: RegionalModel, ox: number, oy: number): void => {
       const { nx, ny, nz, dx, dy } = md.c;
       for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const r = Math.sqrt(((ox + (i + 0.5) * dx - msg.x) / rh) ** 2 + ((oy + (j + 0.5) * dy - msg.y) / rh) ** 2 + ((md.zc[k]! - zc) / rz) ** 2);
         if (r >= 1) continue;
-        const q = md.idx(i, j, k), d = amp * Math.cos(0.5 * Math.PI * r) ** 2, room = md.th0[k]! + cap - md.th[q]!;
-        md.th[q] = md.th[q]! + (warm ? Math.max(0, Math.min(d, room)) : Math.min(0, Math.max(d, room)));
+        const q = md.idx(i, j, k), d = amp * Math.cos(0.5 * Math.PI * r) ** 2;
+        md.th[q] = Math.max(md.th[q]! + d, T_FLOOR / (md.pi0[k]! + md.pp[q]!));
       }
     };
     if (onGpu) {
-      gpu!.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, cap, warm, ox: 0, oy: 0 });
-      if (eye) eye.gpu?.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, cap, warm, ox: eye.x0, oy: eye.y0 });
+      gpu!.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, floorT: T_FLOOR, warm, ox: 0, oy: 0 });
+      if (eye) eye.gpu?.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, floorT: T_FLOOR, warm, ox: eye.x0, oy: eye.y0 });
     } else { bubble(mm, 0, 0); if (eye) bubble(eye.m, eye.x0, eye.y0); }
-    return `${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} ${amp >= 0 ? '+' : ''}${amp.toFixed(1)} K at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km, ${(zc / 1000).toFixed(1)} km high`;
+    const kc = Math.max(0, Math.min(nz - 1, Math.floor(zc / mm.c.dz)));
+    if (!warm && (mm.th0[kc]! + amp) * mm.pi0[kc]! < T_FLOOR) notes.push(`最冷處到了下限 ${T_FLOOR} K（−173 °C），不能再冷 / the coldest air reached ${T_FLOOR} K, the floor`);
+    await stepAfterChange(Math.abs(amp));
+    return done(`${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} ${amp >= 0 ? '+' : '−'}${fmtNum(Math.abs(amp))} K at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km, ${(zc / 1000).toFixed(1)} km high`);
   }
-  // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km;
-  // the accumulated change at 6 km stays within +-ENV_DU_MAX
-  const du6 = Math.max(-ENV_DU_MAX - envDu, Math.min(ENV_DU_MAX - envDu, msg.du6));
+  // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km, as asked
+  const du6 = Number.isFinite(msg.du6) ? msg.du6 : 0, humidity = Math.max(0, Number.isFinite(msg.humidity) ? msg.humidity : 1);
   envDu += du6;
   const du = (z: number): number => du6 * Math.min(1, z / 6000);
-  const hf = (z: number): number => 1 + (msg.humidity - 1) * Math.max(0, Math.min(1, (z - 500) / 500, (8500 - z) / 500));
+  const hf = (z: number): number => 1 + (humidity - 1) * Math.max(0, Math.min(1, (z - 500) / 500, (8500 - z) / 500));
   // the outer grid (and its boundary targets) and the eye nest (its targets come from the outer grid)
   const change = (md: RegionalModel, targets: boolean): void => {
     const qv = md.scalars[QV]!, { nx, ny, nz } = md.c;
@@ -1166,10 +1226,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const q = md.idx(i, j, k);
         md.u[q] = md.u[q]! + d;
-        if (f !== 1) {
-          const pi = md.pi0[k]! + md.pp[q]!, T = md.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
-          qv[q] = Math.min(qv[q]! * f, 0.622 * es / Math.max(p - es, 1));
-        }
+        if (f !== 1) qv[q] = qv[q]! * f;
         const b = md.boundary;
         if (targets && b) { b.u[q] = b.u[q]! + d; if (b.qv) b.qv[q] = b.qv[q]! * f; }
       }
@@ -1188,7 +1245,8 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (tp) gpu.initTracers(tp);
     await nestGpuUp();
   }
-  return `改變環境 / environment changed: ${du6 >= 0 ? '+' : ''}${du6.toFixed(0)} m/s westerly at 6 km (total ${envDu >= 0 ? '+' : ''}${envDu.toFixed(0)}, limit ±${ENV_DU_MAX}), 1-8 km humidity x${msg.humidity}`;
+  await stepAfterChange();
+  return done(`改變環境 / environment changed: ${du6 >= 0 ? '+' : ''}${fmtNum(du6)} m/s westerly at 6 km (total ${envDu >= 0 ? '+' : ''}${fmtNum(envDu)}), 1-8 km humidity x${fmtNum(humidity)}`);
 }
 
 /** Copy the GPU state into the CPU model arrays (display and diagnostics reuse the CPU code), the eye nest's too. */

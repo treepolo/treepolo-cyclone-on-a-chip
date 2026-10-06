@@ -20,7 +20,7 @@
 // Latent heating uses Lv (vapour/liquid), Ls (vapour/ice) and Lf = Ls - Lv (liquid/ice). All transfers
 // are between species, limited so that no species goes negative: total water is conserved exactly.
 
-import { DRY_AIR } from '../core/constants.js';
+import { DRY_AIR, T_FLOOR } from '../core/constants.js';
 import type { RegionalModel } from './core.js';
 
 /** The model members the microphysics uses (the 3-D regional model and the axisymmetric model both have them). */
@@ -130,7 +130,7 @@ export class IceMicrophysics {
       // ---------------- local processes
       for (let k = 0; k < nz; k++) {
         const q = m.idx(i, j, k);
-        const pi = pi0[k]! + m.pp[q]!;
+        const pi = Math.max(pi0[k]! + m.pp[q]!, 0.05);
         const st = { th: m.th[q]!, qv: S[QV]![q]!, qc: S[QC]![q]!, qr: S[QR]![q]!, qi: S[QI]![q]!, qs: S[QS]![q]!, qg: S[QG]![q]! };
         cellProcesses(st, rho[k]!, rhoSfc, pi, DRY_AIR.pRef * Math.pow(pi, cp / rd), dt);
         m.th[q] = st.th; S[QV]![q] = st.qv; S[QC]![q] = st.qc; S[QR]![q] = st.qr; S[QI]![q] = st.qi; S[QS]![q] = st.qs; S[QG]![q] = st.qg;
@@ -167,13 +167,13 @@ interface CellState { th: number; qv: number; qc: number; qr: number; qi: number
  */
 export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: number, p: number, dt: number): void {
   const cp = DRY_AIR.cp, T0 = ICE.T0, hv = ICE.LV / (cp * pi), hs = ICE.LS / (cp * pi), hf = LF / (cp * pi);
-  let T = s.th * pi;
+  let T = Math.max(T_FLOOR, s.th * pi);
   // ---- temperature-forced phase changes
-  if (T > T0 && s.qi > 0) { s.qc += s.qi; s.th -= hf * s.qi; s.qi = 0; T = s.th * pi; }                   // instant melting of cloud ice
+  if (T > T0 && s.qi > 0) { s.qc += s.qi; s.th -= hf * s.qi; s.qi = 0; T = Math.max(T_FLOOR, s.th * pi); }                   // instant melting of cloud ice
   if (T < T0 - 40) {                                                                                  // homogeneous freezing
     if (s.qc > 0) { s.qi += s.qc; s.th += hf * s.qc; s.qc = 0; }
     if (s.qr > 0) { s.qg += s.qr; s.th += hf * s.qr; s.qr = 0; }
-    T = s.th * pi;
+    T = Math.max(T_FLOOR, s.th * pi);
   }
   // ---- ice-process rates (kg/kg/s)
   const dens = Math.sqrt(rhoSfc / rho), dens4 = Math.sqrt(dens);
@@ -258,7 +258,7 @@ export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: num
   s.th += hs * (t_vi - t_iv + t_vs - t_sv + t_vg - t_gv) + hf * ((cold ? t_cs + t_cg : 0) + t_rg - t_sr - t_gr);
   s.qv = Math.max(s.qv, 0); s.qi = Math.max(s.qi, 0); s.qs = Math.max(s.qs, 0); s.qg = Math.max(s.qg, 0); s.qc = Math.max(s.qc, 0); s.qr = Math.max(s.qr, 0);
   // ---- warm rain and saturation adjustment over water (identical to the Kessler scheme)
-  T = s.th * pi;
+  T = Math.max(T_FLOOR, s.th * pi);
   let vv = s.qv, cc = s.qc, rr = s.qr;
   const factorn = 1 / (1 + 2.2 * dt * Math.pow(Math.max(0, rr), 0.875));
   const qrprod = cc - (cc - dt * Math.max(0.001 * (cc - 0.001), 0)) * factorn;
@@ -277,7 +277,7 @@ export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: num
   s.qv = vv; s.qc = cc + product; s.qr = Math.max(rr - ern, 0);
   // below -40 °C vapour in excess of ice saturation deposits directly (fast adjustment)
   if (T < T0 - 40) {
-    const Tn = s.th * pi, qsi2 = qvsIce(Tn, p);
+    const Tn = Math.max(T_FLOOR, s.th * pi), qsi2 = qvsIce(Tn, p);
     if (s.qv > qsi2) {
       const d = (s.qv - qsi2) / (1 + ICE.LS * ICE.LS * qsi2 / (cp * ICE.RV * Tn * Tn));
       s.qv -= d; s.qi += d; s.th += hs * d;

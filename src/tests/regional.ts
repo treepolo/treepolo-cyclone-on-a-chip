@@ -582,4 +582,70 @@ void DRY_AIR;
     `w inner ${wIn.toFixed(2)} outer ${wOut.toFixed(2)} m/s, centre ${(q2.th[pc]! - q2.th0[2]! - mean).toExponential(1)}, times ${c2.time} ${q2.time}`);
 }
 
+// Interactions of any strength: an uncapped bubble, wind or vapour change leaves the model finite, with the step that
+// stepControl.ts picks (a bubble of a million K gives winds of kilometres per second; the temperature never goes below the floor)
+{
+  const { buildModel } = await import('../app/regional/build.js');
+  const { setupOf } = await import('../app/regional/setup.js');
+  const { RegionalPhysics } = await import('../regional/physics.js');
+  const { nextDt, soundSpeed, bubbleDt } = await import('../regional/stepControl.js');
+  const { T_FLOOR } = await import('../core/constants.js');
+  const run = (label: string, apply: (m: RegionalModel) => number, seconds: number): { ok: boolean; text: string } => {
+    const sp = setupOf('supercell'); sp.L = 32000;
+    const b = buildModel(sp, false), mm = b.model, mpx = new IceMicrophysics(mm);
+    if (b.physics) new RegionalPhysics(mm, b.physics);
+    const dt0 = mm.c.dt, { nx, ny, nz, dx, dy, dz } = mm.c;
+    mm.step(); mpx.apply(mm.c.dt);
+    const bubbleK = apply(mm);
+    if (bubbleK > 0) mm.c.dt = Math.min(mm.c.dt, bubbleDt(bubbleK, 300, dz));
+    let wmax = 0, steps = 0, dtMin = Infinity, finite = true;
+    const t0 = mm.time;
+    while (mm.time - t0 < seconds && steps < 4000) {
+      let rate = 0, cmax = 0;
+      for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const q = mm.idx(i, j, k);
+        rate = Math.max(rate, Math.abs(mm.u[q]!) / dx + Math.abs(mm.v[q]!) / dy + Math.abs(mm.w[q]!) / dz);
+        cmax = Math.max(cmax, soundSpeed(mm.th[q]!, mm.pi0[k]! + mm.pp[q]!));
+      }
+      mm.c.dt = Math.min(mm.c.dt, nextDt({ cur: Infinity, dt0, rate, cmax, cfl: 0.8, dxMin: Math.min(dx, dy), nsound: mm.c.nsound, gpu: false }));
+      dtMin = Math.min(dtMin, mm.c.dt);
+      mm.step(); mpx.apply(mm.c.dt); steps++;
+      for (let q = 0; q < mm.size; q += 5) wmax = Math.max(wmax, Math.abs(mm.w[q]!));
+      if (![mm.u, mm.v, mm.w, mm.th, mm.pp, ...mm.scalars].every((a) => a.every(Number.isFinite))) { finite = false; break; }
+    }
+    let tmin = Infinity;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = mm.idx(i, j, k); tmin = Math.min(tmin, mm.th[q]! * (mm.pi0[k]! + mm.pp[q]!)); }
+    return { ok: finite && mm.time - t0 >= seconds && tmin >= 50, text: `${label}: ${finite ? 'finite' : 'NOT FINITE'}, ${steps} steps, max |w| ${wmax.toFixed(0)} m/s, min dt ${dtMin.toFixed(3)} s, coldest ${tmin.toFixed(0)} K` };
+  };
+  const bubble = (a: number) => (mm: RegionalModel): number => {
+    const L = mm.c.nx * mm.c.dx;
+    for (let k = 0; k < mm.c.nz; k++) for (let j = 0; j < mm.c.ny; j++) for (let i = 0; i < mm.c.nx; i++) {
+      const r = Math.sqrt((((i + 0.5) * mm.c.dx - L / 2) / 8000) ** 2 + (((j + 0.5) * mm.c.dy - L / 2) / 8000) ** 2 + ((mm.zc[k]! - 1500) / 1500) ** 2);
+      if (r >= 1) continue;
+      const q = mm.idx(i, j, k); mm.th[q] = Math.max(mm.th[q]! + a * Math.cos(0.5 * Math.PI * r) ** 2, T_FLOOR / (mm.pi0[k]! + mm.pp[q]!));
+    }
+    return Math.abs(a);
+  };
+  const { applyWind } = await import('../regional/forcing.js');
+  const wind = (speed: number, up: boolean) => (mm: RegionalModel): number => {
+    const L = mm.c.nx * mm.c.dx;
+    applyWind(mm, [{ x: L / 2, y: L / 2, z: 1500, R: 10000, H: 3000, speed, dir: up ? [0, 0, 1] : [1, 0, 0], form: 'push', sign: 1 }], 'once');
+    return 0;
+  };
+  const vapour = (fac: number) => (mm: RegionalModel): number => {
+    const L = mm.c.nx * mm.c.dx, qv = mm.scalars[QV]!;
+    for (let k = 0; k < mm.c.nz; k++) for (let j = 0; j < mm.c.ny; j++) for (let i = 0; i < mm.c.nx; i++) {
+      const rh = Math.hypot(((i + 0.5) * mm.c.dx - L / 2), ((j + 0.5) * mm.c.dy - L / 2)) / 10000, rz = Math.abs(mm.zc[k]! - 1000) / 2000;
+      if (rh >= 1 || rz >= 1) continue;
+      const q = mm.idx(i, j, k); qv[q] = Math.max(0, qv[q]! * (1 + (fac - 1) * Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2));
+    }
+    return 0;
+  };
+  const cases: [string, (m: RegionalModel) => number, number][] = [['warm bubble +10^4 K', bubble(1e4), 120], ['warm bubble +10^6 K', bubble(1e6), 60], ['cold pool -500 K (floor)', bubble(-500), 120],
+    ['wind once 3000 m/s', wind(3000, false), 120], ['updraft once 1000 m/s', wind(1000, true), 120], ['vapour x50', vapour(50), 120]];
+  const res = cases.map(([l, f, t]) => run(l, f, t));
+  check('extreme interactions (CPU): +10^4 and +10^6 K bubbles, a -500 K cold pool, 3000 m/s wind, 1000 m/s updraft and vapour x50 leave the model finite, the air stays above the pole of the saturation formulas (36 K)',
+    res.every((r) => r.ok), res.map((r) => r.text).join(' | '));
+}
+
 summary('regional');

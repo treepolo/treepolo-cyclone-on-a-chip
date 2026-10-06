@@ -281,8 +281,8 @@ form.onNest = startNest;
 const init = (): void => { if (form.isNest) startNest(); else start(form.value()); };
 $('envApply').onclick = (): void => {
   const du6 = Number($<HTMLInputElement>('envDu').value), humidity = Number($<HTMLInputElement>('envRh').value);
-  if (!Number.isFinite(du6) || !(humidity > 0)) return;
-  send({ type: 'environment', du6: Math.max(-30, Math.min(30, du6)), humidity: Math.max(0.3, Math.min(2, humidity)) });
+  if (!Number.isFinite(du6) || !(humidity >= 0)) return;
+  send({ type: 'environment', du6, humidity });
 };
 // remember which sections are open (per-viewer convenience)
 document.querySelectorAll<HTMLDetailsElement>('details[id]').forEach((d) => {

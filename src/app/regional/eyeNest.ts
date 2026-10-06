@@ -5,6 +5,7 @@
 // the domain is re-centred.
 
 import type { RegionalModel } from '../../regional/core.js';
+import { CFL_DEFAULT, DT_MIN_FRAC } from '../../regional/stepControl.js';
 import { IceMicrophysics } from '../../regional/ice.js';
 import { RegionalPhysics, type RegionalPhysicsConfig } from '../../regional/physics.js';
 import { refineInto, type Accumulations } from '../../regional/refine.js';
@@ -20,7 +21,7 @@ import type { RegionalSetup } from './setup.js';
 /** largest inner grid (cells) */
 export const NEST_MAX_CELLS = 30e6;
 /** Courant number the adaptive inner step aims at (as the outer model's) */
-const CFL_TARGET = 0.8;
+const CFL_TARGET = CFL_DEFAULT;
 
 /** Copy a GPU model's state (and surface accumulations) into its CPU model. */
 export async function syncModel(g: GpuRegional, m: RegionalModel, mp: IceMicrophysics): Promise<void> {
@@ -96,7 +97,7 @@ export class EyeNest {
       const hi = this.gpu ? Math.max(this.dt0, Math.min(3 * this.dt0, ac)) : this.dt0;
       let next = Math.min(hi, cfl / Math.max(rate, 1e-9));
       if (next > cur) next = Math.min(next, 1.1 * cur);
-      dtc = Math.max(0.25 * this.dt0, next);
+      dtc = Math.max(DT_MIN_FRAC * this.dt0, next);
     }
     this.nsub = Math.max(1, Math.min(64, Math.ceil(dt / dtc - 1e-6)));
     this.m.c.dt = dt / this.nsub;

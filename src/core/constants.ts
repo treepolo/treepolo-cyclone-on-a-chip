@@ -24,3 +24,9 @@ const cp = 1004.5;
 export const DRY_AIR: DryAir = { rd, cp, kappa: rd / cp, pRef: 1.0e5 };
 
 export const DAY = 86400;
+
+/** Lowest air temperature (K) the regional model keeps: the advection scheme can undershoot beside a very steep
+ *  temperature jump (a bubble of thousands of K), and the saturation formulas have a pole near 36 K. Real air
+ *  does not get colder than about 180 K; nothing in a run gets near this floor but an interaction that asks for
+ *  more cold than there is. */
+export const T_FLOOR = 100;

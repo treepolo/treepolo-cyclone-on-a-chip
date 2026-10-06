@@ -8,7 +8,7 @@ const TOOLS: { t: Tool; label: string; tip: string }[] = [
   { t: 'view', label: '視角', tip: '轉動相機（不互動）/ camera only' },
   { t: 'warm', label: '暖泡', tip: '點地面：在設定高度放暖泡 +3 K / tap: warm bubble at the set height' },
   { t: 'cold', label: '冷池', tip: '點地面：放冷空氣 −6 K / tap: cold air' },
-  { t: 'moist', label: '增濕', tip: '點地面：水氣 ×1.3（最多到飽和）/ tap: vapour ×1.3 (up to saturation)' },
+  { t: 'moist', label: '增濕', tip: '點地面：水氣 ×1.3（倍數自訂；超過飽和的水氣會凝結）/ tap: vapour ×1.3 (any factor; what the air cannot hold condenses)' },
   { t: 'dry', label: '變乾', tip: '點地面：水氣 ×0.7 / tap: vapour ×0.7' },
   { t: 'wind', label: '風', tip: '點地面：加一陣風或持續的風（方向、仰角、形式、範圍可選）/ tap: a wind once or lasting' },
   { t: 'land', label: '陸地', tip: '拖曳塗陸地 / drag: paint land' },
@@ -166,7 +166,7 @@ export class Tools3D {
     const p = this.ground(cx, cy); if (!p) return false;
     const R = 1000 * this.val('r', 10), z = 1000 * this.val('z', 1.5), depth = 1000 * this.val('depth', 3);
     if (t === 'warm' || t === 'cold') this.send({ type: 'perturb', kind: t, x: p.x, y: p.y, z, radius: R, depth, amp: this.bubble().amp });
-    else if (t === 'moist' || t === 'dry') this.send({ type: 'moisture', x: p.x, y: p.y, z, radius: R, depth, factor: Math.max(0.3, Math.min(2, this.val('fac', t === 'moist' ? 1.3 : 0.7))) });
+    else if (t === 'moist' || t === 'dry') this.send({ type: 'moisture', x: p.x, y: p.y, z, radius: R, depth, factor: Math.max(0, this.val('fac', t === 'moist' ? 1.3 : 0.7)) });
     else {
       const f = (this.el.form as HTMLSelectElement).value, form = f === 'push' ? 'push' : f === 'in' || f === 'out' ? 'converge' : 'rotate';
       this.send({ type: 'wind', x: p.x, y: p.y, z, radius: R, depth, speed: this.val('speed', 15), az: this.val('az', 90), el: this.val('el', 0), form, sign: f === 'cw' || f === 'out' ? -1 : 1, minutes: this.val('min', 30) });

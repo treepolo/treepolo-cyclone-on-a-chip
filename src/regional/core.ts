@@ -12,7 +12,7 @@
 // Advection: 5th-order upwind-biased flux form (Wicker & Skamarock 2002), lower order near the lid/ground.
 // Lateral boundaries: doubly periodic. Rigid lid with a Rayleigh damping layer; free-slip lower boundary.
 
-import { DRY_AIR, EARTH } from '../core/constants.js';
+import { DRY_AIR, EARTH, T_FLOOR } from '../core/constants.js';
 
 export const H = 3; // halo width
 const EMPTY = new Float64Array(0);
@@ -536,6 +536,11 @@ export class RegionalModel {
       this.slowTendencies(dts === dt ? dt : 0, st);
       // theta and scalars: slow only (from time n)
       for (let i = 0; i < this.size; i++) this.th[i] = this.th0s[i]! + dts * this.fth[i]!;
+      // the temperature floor (see T_FLOOR): only an interaction that asks for more cold than there is gets here
+      for (let k = 0; k < nz; k++) {
+        const fl = T_FLOOR / this.pi0[k]!, o = k * this.plane;
+        for (let i = o; i < o + this.plane; i++) if (this.th[i]! < fl) this.th[i] = fl;
+      }
       for (let s = 0; s < this.scalars.length; s++) {
         const a = this.scalars[s]!, a0 = this.sc0[s]!, fa = this.fsc[s]!;
         for (let i = 0; i < this.size; i++) a[i] = a0[i]! + dts * fa[i]!;

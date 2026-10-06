@@ -10,6 +10,8 @@ import { IceMicrophysics, QI, QS, QG } from '../../regional/ice.js';
 import { C, columnDiagnostics, columnProfiles, azimuthalMeans } from '../../regional/diagnostics.js';
 import { Tracers } from '../../regional/tracers.js';
 import { applyWind, type WindForcing } from '../../regional/forcing.js';
+import { nextDt, bubbleDt } from '../../regional/stepControl.js';
+import { T_FLOOR } from '../../core/constants.js';
 import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
 
 function cmp(m: RegionalModel, g: Float32Array, f: number, a: Float64Array, nk: number): number {
@@ -584,14 +586,14 @@ export async function regionalEditTest(): Promise<void> {
   const g = new GpuRegional(device, m, { moist: true, physics: null });
   g.uploadFrom(m);
   const before = await g.readState();
-  // the CPU changes (as worker.ts interact): a warm bubble seen from an origin offset (ox, oy), drying capped at
-  // saturation across the periodic edge, a one-time rotating wind
-  const bub = { x: 40000, y: 30000, z: 1800, rh: 12000, rz: 1500, amp: 3, cap: 6, ox: -4000, oy: 2000 };
+  // the CPU changes (as worker.ts interact): a warm bubble seen from an origin offset (ox, oy), drying across the
+  // periodic edge, a one-time rotating wind
+  const bub = { x: 40000, y: 30000, z: 1800, rh: 12000, rz: 1500, amp: 3, floorT: 100, ox: -4000, oy: 2000 };
   for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {
     const r = Math.sqrt(((bub.ox + (i + 0.5) * 3000 - bub.x) / bub.rh) ** 2 + ((bub.oy + (j + 0.5) * 3000 - bub.y) / bub.rh) ** 2 + ((m.zc[k]! - bub.z) / bub.rz) ** 2);
     if (r >= 1) continue;
-    const q = m.idx(i, j, k), d = bub.amp * Math.cos(0.5 * Math.PI * r) ** 2, room = m.th0[k]! + bub.cap - m.th[q]!;
-    m.th[q] = m.th[q]! + Math.max(0, Math.min(d, room));
+    const q = m.idx(i, j, k), d = bub.amp * Math.cos(0.5 * Math.PI * r) ** 2;
+    m.th[q] = Math.max(m.th[q]! + d, bub.floorT / (m.pi0[k]! + m.pp[q]!));
   }
   const mo = { x: 70000, y: 5000, z: 2500, R: 15000, H: 2000, fac: 0.6 }, qv = m.scalars[QV]!;
   for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {
@@ -600,8 +602,7 @@ export async function regionalEditTest(): Promise<void> {
     const rh = Math.hypot(ex, ey) / mo.R, rz = Math.abs(m.zc[k]! - mo.z) / mo.H;
     if (rh >= 1 || rz >= 1) continue;
     const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = m.idx(i, j, k);
-    const pi = m.pi0[k]! + m.pp[q]!, T = m.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05), es = 611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65));
-    qv[q] = Math.max(0, Math.min(qv[q]! * (1 + (mo.fac - 1) * e), Math.max(qv[q]!, 0.622 * es / Math.max(p - es, 1))));
+    qv[q] = Math.max(0, qv[q]! * (1 + (mo.fac - 1) * e));
   }
   const wf: WindForcing = { x: 30000, y: 40000, z: 2000, R: 15000, H: 1500, speed: 8, dir: [0, 0, 0], form: 'rotate', sign: 1 };
   applyWind(m, [wf], 'once');
@@ -624,9 +625,60 @@ export async function regionalEditTest(): Promise<void> {
   // undo: a copy on the GPU, restored exactly with the model time
   g.snapshot();
   const t0 = g.time, snap = await g.readState();
-  g.step(3); g.edit({ kind: 'bubble', ...bub, warm: false, amp: -5, cap: -10 });
+  g.step(3); g.edit({ kind: 'bubble', ...bub, warm: false, amp: -5 });
   const ok = g.restoreSnapshot(), back = await g.readState();
   let eBack = 0; for (let q = 0; q < back.length; q++) eBack = Math.max(eBack, Math.abs(back[q]! - snap[q]!));
   gcheck('interactions on the GPU: the copy of the state is restored exactly (and the time)', ok && eBack === 0 && g.time === t0, `max diff ${eBack}, time ${g.time} vs ${t0}`);
   g.destroy();
+}
+
+// Interactions of any strength on the GPU: a bubble of 10^4 and 10^6 K, a cold pool colder than there is, a wind of 3000 m/s, an
+// updraft of 1000 m/s and fifty times the vapour leave the state finite and never colder than the floor, stepped with the
+// worker's rule (stepControl.ts, the Courant numbers and the sound speed read back from the GPU)
+export async function regionalExtremeTest(): Promise<void> {
+  const device = await getDevice();
+  const mk = (): { m: RegionalModel; mp: IceMicrophysics } => {
+    const cfg = { nx: 16, ny: 16, nz: 24, dx: 2000, dy: 2000, dz: 500, dt: 6, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 3000, dampRate: 1 / 300, kdiff2: 0, lateral: 'periodic' as const };
+    const m = new RegionalModel(cfg, weismanKlemp, 6);
+    for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 16; j++) for (let i = 0; i < 16; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+    return { m, mp: new IceMicrophysics(m) };
+  };
+  const cases: { label: string; seconds: number; apply: (g: GpuRegional, m: RegionalModel) => number }[] = [
+    { label: 'warm bubble +10^4 K', seconds: 60, apply: (g) => { g.edit({ kind: 'bubble', x: 16000, y: 16000, z: 1500, rh: 8000, rz: 1500, amp: 1e4, floorT: T_FLOOR, warm: true, ox: 0, oy: 0 }); return 1e4; } },
+    { label: 'warm bubble +10^6 K', seconds: 20, apply: (g) => { g.edit({ kind: 'bubble', x: 16000, y: 16000, z: 1500, rh: 8000, rz: 1500, amp: 1e6, floorT: T_FLOOR, warm: true, ox: 0, oy: 0 }); return 1e6; } },
+    { label: 'cold pool -500 K', seconds: 60, apply: (g) => { g.edit({ kind: 'bubble', x: 16000, y: 16000, z: 0, rh: 8000, rz: 1500, amp: -500, floorT: T_FLOOR, warm: false, ox: 0, oy: 0 }); return 500; } },
+    { label: 'wind once 3000 m/s', seconds: 60, apply: (g) => { g.windOnce({ x: 16000, y: 16000, z: 1500, R: 10000, H: 3000, speed: 3000, dir: [1, 0, 0], form: 'push', sign: 1 }); return 0; } },
+    { label: 'updraft once 1000 m/s', seconds: 60, apply: (g) => { g.windOnce({ x: 16000, y: 16000, z: 1500, R: 10000, H: 3000, speed: 1000, dir: [0, 0, 1], form: 'push', sign: 1 }); return 0; } },
+    { label: 'vapour x50', seconds: 60, apply: (g) => { g.edit({ kind: 'moisture', x: 16000, y: 16000, z: 1000, R: 10000, H: 2000, fac: 50, ox: 0, oy: 0 }); return 0; } },
+  ];
+  const out: string[] = []; let ok = true;
+  for (const c of cases) {
+    const { m } = mk();
+    const g = new GpuRegional(device, m, { moist: true, physics: null, ice: true });
+    g.uploadFrom(m);
+    g.step(2);
+    const bubbleK = c.apply(g, m);
+    let dt = 6, steps = 0, finite = true, dtMin = Infinity;
+    if (bubbleK > 0) dt = Math.min(dt, bubbleDt(bubbleK, 300, 500));
+    g.setDt(dt);
+    const t0 = g.time;
+    while (g.time - t0 < c.seconds && steps < 3000) {
+      const { rate, cmax } = await g.maxCourant();
+      if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { finite = false; break; }
+      dt = Math.min(dt, nextDt({ cur: Infinity, dt0: 6, rate, cmax, cfl: 0.8, dxMin: 2000, nsound: 6, gpu: true }));
+      g.setDt(dt); dtMin = Math.min(dtMin, dt);
+      g.step(1); steps++;
+    }
+    const st = await g.readState();
+    let wmax = 0, tmin = Infinity;
+    for (let q = 0; q < st.length; q++) if (!Number.isFinite(st[q]!)) { finite = false; break; }
+    if (finite) for (let k = 0; k < m.c.nz; k++) for (let j = 0; j < 16; j++) for (let i = 0; i < 16; i++) {
+      const q = m.idx(i, j, k); wmax = Math.max(wmax, Math.abs(st[2 * m.size + q]!)); tmin = Math.min(tmin, st[3 * m.size + q]! * (m.pi0[k]! + st[4 * m.size + q]!));
+    }
+    const good = finite && g.time - t0 >= c.seconds && tmin >= 50;
+    ok = ok && good;
+    out.push(`${c.label}: ${finite ? 'finite' : 'NOT FINITE'}, ${steps} steps, max |w| ${wmax.toFixed(0)} m/s, min dt ${dtMin.toFixed(3)} s, coldest ${tmin.toFixed(0)} K`);
+    g.destroy();
+  }
+  gcheck('extreme interactions on the GPU: bubbles of 10^4 and 10^6 K, a cold pool colder than the floor, 3000 m/s wind, 1000 m/s updraft and vapour x50 leave the state finite, never colder than the floor', ok, out.join(' | '));
 }
