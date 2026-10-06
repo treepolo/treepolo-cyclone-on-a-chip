@@ -82,13 +82,16 @@ export const setupCells = (s: RegionalSetup): number => Math.round(s.L / s.dx) *
 /** A tropical-cyclone-like run: surface pressure, radius of maximum wind and eyewall diagnostics apply. */
 export const tcLike = (s: RegionalSetup): boolean => s.init === 'vortex';
 
+/** Sea temperature (°C) of a set-up: from 1 K (the surface of a run can be any temperature above absolute zero; the sounding and the fluxes follow) to the
+ *  boiling point of water at 1000 hPa, which a sea cannot pass (above it the surface air would be steam). Real seas are -2 to 36 °C. */
+export const SST_MIN = -272, SST_MAX = 99;
 /** Keep a set-up within what the model can handle (cell counts, spacings, ranges). */
 export function sanitize(s: RegionalSetup): RegionalSetup {
   const c = (x: number, lo: number, hi: number, d: number): number => (Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : d);
   // at most 1024 columns across and 200 levels; a configured time step at most twice the default (larger ones blow up)
   const dx = c(s.dx, 100, 50000, 15000), dz = c(s.dz, 50, 2000, 500);
   const L = c(Math.round(s.L / dx) * dx, 16 * dx, 1024 * dx, 1200000), top = c(Math.round(Math.min(s.top, 200 * dz) / dz) * dz, 8 * dz, 40000, 25000);
-  return { ...s, dx, dz, L, top, dt: c(s.dt, 0, 2 * defaultDt({ dx, dz }), 0), lat: c(s.lat, -80, 80, 20), sst: c(s.sst, -2, 36, 28), qvBL: c(s.qvBL, 8, 20, 14),
+  return { ...s, dx, dz, L, top, dt: c(s.dt, 0, 2 * defaultDt({ dx, dz }), 0), lat: c(s.lat, -80, 80, 20), sst: c(s.sst, SST_MIN, SST_MAX, 28), qvBL: c(s.qvBL, 8, 20, 14),
     windU: c(s.windU, -60, 60, 5), windR: c(s.windR, 0, 40, 12), windDepth: c(s.windDepth, 250, 5500, 1000), radRate: c(s.radRate, 0, 5, 1.5),
     vmin: c(s.vmin, 0, 10, 1), blNoise: c(s.blNoise, 0, 1, 0.1), cumulus: !!s.cumulus, initAmp: c(s.initAmp, 0, s.init === 'vortex' ? 60 : 10, s.init === 'vortex' ? 15 : 2) };
 }

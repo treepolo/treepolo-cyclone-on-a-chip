@@ -6,7 +6,7 @@
 // microphysics, 8 qi, 9 qs, 10 qg.
 
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
-import { T_FLOOR } from '../core/constants.js';
+import { T_FLOOR, VT_MAX } from '../core/constants.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
 import { COL, WV_PATH, ETOP_DBZ, VIL_ZMAX, level500, levelNear } from '../regional/diagnostics.js';
@@ -24,8 +24,17 @@ type Pass = ((pass: GPUComputePassEncoder) => void) & { label: string };
 /** values per column in the display readback (see readDisplay and columnDiagnostics) */
 export { COL } from '../regional/diagnostics.js';
 export interface DisplayPlanes { u: Float32Array; v: Float32Array; w: Float32Array; wTop: Float32Array; th: Float32Array; pp: Float32Array; sc: Float32Array[] }
+/** the ways the vapour of a region is changed (worker.ts interact, edit below) */
+export type MoistMode = 'mul' | 'add' | 'rh';
+const MOIST_KIND: Record<MoistMode, number> = { mul: 1, add: 2, rh: 3 };
 export const linearGid = (code: string): string => code.replace(/fn main\(@builtin\(global_invocation_id\) gid: vec3<u32>\) \{/g,
   `fn main(@builtin(global_invocation_id) gid3: vec3<u32>) { let gid = vec3<u32>(gid3.x + gid3.y * ${GX * WG}u, 0u, 0u);`);
+
+/** Dispatch n invocations in groups of WG, over two dimensions when there are more groups than one dimension allows (65535); pair with linearGid. */
+export const dispatchLinear = (pass: GPUComputePassEncoder, n: number): void => {
+  const groups = Math.max(1, Math.ceil(n / WG));
+  pass.dispatchWorkgroups(Math.min(groups, GX), Math.ceil(groups / GX));
+};
 
 /** Base-state accessors (only for shaders that bind `base`). */
 const BASE_FNS = `
@@ -126,7 +135,7 @@ export class GpuRegional {
 const NX: u32 = ${nx}u; const NY: u32 = ${ny}u; const NZ: u32 = ${nz}u; const HH: u32 = ${H}u;
 const SX: u32 = ${m.sx}u; const SY: u32 = ${m.sy}u; const PL: u32 = ${m.plane}u; const SIZE: u32 = ${size}u; const L: u32 = ${L}u;
 const DX: f32 = ${dx}; const DY: f32 = ${dy}; const DZ: f32 = ${dz}; const FCOR: f32 = ${f}; const GEOB: f32 = ${m.c.geostrophic ? 1 : 0};
-const CP: f32 = ${cp}; const RD: f32 = ${rd}; const G: f32 = 9.80665; const XLV: f32 = 2.5e6; const TFLOOR: f32 = ${T_FLOOR}.0;
+const CP: f32 = ${cp}; const RD: f32 = ${rd}; const G: f32 = 9.80665; const XLV: f32 = 2.5e6; const TFLOOR: f32 = ${T_FLOOR}.0; const VTMAX: f32 = ${VT_MAX}.0;
 const BETA: f32 = ${beta}; const DIVD: f32 = ${divDamp};
 const MOIST: bool = ${opts.moist}; const PHYS: bool = ${!!ph}; const NQ: u32 = ${this.nq}u; const NFLD: u32 = ${NF}u;
 const OPEN: bool = ${open}; const NEST: bool = ${!!bnd}; const HASPP: bool = ${!!bnd?.pp};
@@ -507,7 +516,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   private ensureForce(): void {
     const dev = this.device, m = this.cpu, { nz } = m.c;
     if (!this.forceK) {
-      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code: this.consts + `
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code: this.consts + linearGid(`
 @group(0) @binding(0) var<storage, read_write> S: array<f32>;
 @group(0) @binding(1) var<uniform> FT: array<vec4<f32>, ${3 * MAX_FORCINGS}>;
 @group(0) @binding(2) var<uniform> FP: vec4<f32>;
@@ -547,7 +556,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (fw.x > 0.0) { S[2u * SIZE + q] = S[2u * SIZE + q] + select(al * fw.x * (fw.w - S[2u * SIZE + q]), fw.x * fw.w, once); }
     }
   }
-}` }), entryPoint: 'main' } });
+}`) }), entryPoint: 'main' } });
       const T = dev.createBuffer({ size: 48 * MAX_FORCINGS, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const FP = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const lv = new Float32Array(4 * nz + 1);
@@ -565,7 +574,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dev.queue.writeBuffer(k.T, 0, forcingTable([f]));
     dev.queue.writeBuffer(k.FP, 0, new Float32Array([1, 0, 1, 0]));
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny * (nz + 1) / 64)); pass.end();
+    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); dispatchLinear(pass, nx * ny * (nz + 1)); pass.end();
     dev.queue.submit([enc.finish()]);
     dev.queue.writeBuffer(k.T, 0, forcingTable(this.forcings));
   }
@@ -575,19 +584,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   /**
    * Change the state in place (the interactions of the regional page; worker.ts does the same to a CPU model): a warm or
    * cold bubble (theta changes by `amp` cos^2 inside the ellipsoid, nothing colder than the temperature `floorT` K), or
-   * water vapour multiplied by `fac` in a region (the excess over saturation condenses in the next step). Positions in m;
+   * the water vapour of a region multiplied by `amount` (mode 'mul'), added `amount` kg/kg ('add'; never below zero) or
+   * moved towards the relative humidity `amount` (fraction, over water: 'rh'), each by the cos^2 envelope (the excess over
+   * saturation condenses in the next step). Positions in m;
    * (ox, oy) is this model's origin in those coordinates (an inner grid's corner in the outer grid, else 0).
    */
   edit(e: { kind: 'bubble'; x: number; y: number; z: number; rh: number; rz: number; amp: number; floorT: number; warm: boolean; ox: number; oy: number }
-    | { kind: 'moisture'; x: number; y: number; z: number; R: number; H: number; fac: number; ox: number; oy: number }): void {
+    | { kind: 'moisture'; x: number; y: number; z: number; R: number; H: number; mode: MoistMode; amount: number; ox: number; oy: number }): void {
     const dev = this.device, m = this.cpu, { nx, ny, nz } = m.c;
     if (!this.editK) {
-      const code = this.consts + `
+      const code = this.consts + linearGid(`
 @group(0) @binding(0) var<storage, read_write> S: array<f32>;
 @group(0) @binding(1) var<storage, read> base: array<f32>;
 @group(0) @binding(2) var<uniform> E: array<vec4<f32>, 3>;
 @group(0) @binding(3) var<storage, read> LZ: array<f32>;
-// E[0]: kind (0 bubble, 1 moisture), centre x, y, z; E[1]: radius, vertical radius / half depth, amplitude or factor,
+// E[0]: kind (0 bubble, 1 vapour times b.z, 2 vapour plus b.z kg/kg, 3 vapour towards the relative humidity b.z), centre x, y, z; E[1]: radius, vertical radius / half depth, amplitude or factor,
 // cap; E[2]: origin ox, oy, warm
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -610,8 +621,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (rh >= 1.0 || rz >= 1.0) { return; }
   let ch = cos(1.5707963 * rh); let cz = cos(1.5707963 * rz); let e = ch * ch * cz * cz;
   let qv = S[5u * SIZE + q];
-  S[5u * SIZE + q] = max(0.0, qv * (1.0 + (b.z - 1.0) * e));
-}`;
+  var nq = qv * (1.0 + (b.z - 1.0) * e);
+  if (a.x > 1.5 && a.x < 2.5) { nq = qv + b.z * e; }
+  if (a.x > 2.5) {
+    // towards the relative humidity b.z (over water, as the charts show it): qv + e (b.z qsat - qv)
+    let pk = max(base[L + k] + S[4u * SIZE + q], 0.05); let T = max(S[3u * SIZE + q] * pk, TFLOOR);
+    let es = 611.2 * exp(17.67 * (T - 273.15) / (T - 29.65)); let p = 1.0e5 * pow(pk, CP / RD);
+    nq = qv + e * (b.z * 0.622 * es / max(p - es, 1.0) - qv);
+  }
+  S[5u * SIZE + q] = max(0.0, nq);
+}`);
       const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
       const E = dev.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const LZ = dev.createBuffer({ size: 4 * nz, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -619,10 +638,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       this.editK = { pipe, E, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: this.baseBuf } }, { binding: 2, resource: { buffer: E } }, { binding: 3, resource: { buffer: LZ } }] }) };
     }
     const E = e.kind === 'bubble' ? [0, e.x, e.y, e.z, e.rh, e.rz, e.amp, e.floorT, e.ox, e.oy, e.warm ? 1 : 0, 0]
-      : [1, e.x, e.y, e.z, e.R, e.H, e.fac, 0, e.ox, e.oy, 0, 0];
+      : [MOIST_KIND[e.mode], e.x, e.y, e.z, e.R, e.H, e.amount, 0, e.ox, e.oy, 0, 0];
     dev.queue.writeBuffer(this.editK.E, 0, new Float32Array(E));
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-    pass.setPipeline(this.editK.pipe); pass.setBindGroup(0, this.editK.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny * nz / 64)); pass.end();
+    pass.setPipeline(this.editK.pipe); pass.setBindGroup(0, this.editK.bind); dispatchLinear(pass, nx * ny * nz); pass.end();
     dev.queue.submit([enc.finish()]);
   }
 
@@ -648,7 +667,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const k = this.forceK!, dev = this.device, { nx, ny, nz } = this.cpu.c;
     dev.queue.writeBuffer(k.FP, 0, new Float32Array([this.nForce, this.dt / FORCING_TAU, 0, 0]));
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.ceil(nx * ny * (nz + 1) / 64)); pass.end();
+    pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); dispatchLinear(pass, nx * ny * (nz + 1)); pass.end();
     dev.queue.submit([enc.finish()]);
   }
 
@@ -1766,7 +1785,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let q = ix(i, j, k);
     for (var f = 5u; f < 8u; f++) { S[f * SIZE + q] = max(S[f * SIZE + q], 0.0); }
     col[k] = S[7u * SIZE + q];
-    vt[k] = select(0.0, 36.34 * pow(0.001 * brho0(k) * col[k], 0.1364) * sqrt(rhoS / brho0(k)), col[k] > 1e-12);
+    vt[k] = select(0.0, min(36.34 * pow(0.001 * brho0(k) * col[k], 0.1364) * sqrt(rhoS / brho0(k)), VTMAX), col[k] > 1e-12);
     vmax = max(vmax, vt[k]);
   }
   let nsub = max(1u, u32(ceil(vmax * dt / (0.8 * DZ))));
@@ -1872,7 +1891,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var k = 0u; k < NZ; k++) {
       let q = ix(i, j, k);
       col[k] = S[sp * SIZE + q];
-      vt[k] = vfall(sp, col[k], brho0(k), rhoS, S[3u * SIZE + q] * (bpi0(k) + S[4u * SIZE + q]));
+      vt[k] = min(vfall(sp, col[k], brho0(k), rhoS, S[3u * SIZE + q] * (bpi0(k) + S[4u * SIZE + q])), VTMAX);
       vmax = max(vmax, vt[k]);
     }
     if (vmax == 0.0) { continue; }

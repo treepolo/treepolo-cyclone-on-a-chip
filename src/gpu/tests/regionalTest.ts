@@ -7,7 +7,7 @@ import { GpuRegional, COL } from '../regionalGpu.js';
 import { gcheck, getDevice } from './harness.js';
 import { nestFromGlobal, GlobalSnapshot } from '../../regional/nest.js';
 import { IceMicrophysics, QI, QS, QG } from '../../regional/ice.js';
-import { C, columnDiagnostics, columnProfiles, azimuthalMeans } from '../../regional/diagnostics.js';
+import { C, columnDiagnostics, columnProfiles, azimuthalMeans, pressure } from '../../regional/diagnostics.js';
 import { Tracers } from '../../regional/tracers.js';
 import { applyWind, type WindForcing } from '../../regional/forcing.js';
 import { nextDt, bubbleDt } from '../../regional/stepControl.js';
@@ -607,7 +607,7 @@ export async function regionalEditTest(): Promise<void> {
   const wf: WindForcing = { x: 30000, y: 40000, z: 2000, R: 15000, H: 1500, speed: 8, dir: [0, 0, 0], form: 'rotate', sign: 1 };
   applyWind(m, [wf], 'once');
   g.edit({ kind: 'bubble', ...bub, warm: true });
-  g.edit({ kind: 'moisture', ...mo, ox: 0, oy: 0 });
+  g.edit({ kind: 'moisture', ...mo, mode: 'mul', amount: mo.fac, ox: 0, oy: 0 });
   g.windOnce(wf);
   const st = await g.readState();
   const eTh = cmp(m, st, 3, m.th, cfg.nz), eQv = cmp(m, st, 5, qv, cfg.nz), eU = cmp(m, st, 0, m.u, cfg.nz), eV = cmp(m, st, 1, m.v, cfg.nz);
@@ -622,6 +622,33 @@ export async function regionalEditTest(): Promise<void> {
   // (WGSL's sin and cos may err by 2^-11 absolute: the envelope, so each change, by about 5e-4 of itself)
   gcheck('interactions on the GPU: warm bubble (offset origin), drying across the periodic edge and a one-time rotating wind match the CPU changes (theta rel L2 < 1e-5, qv, u, v < 1e-4)',
     eTh < 1e-5 && eQv < 1e-4 && eU < 1e-4 && eV < 1e-4 && dTh > 1 && dQv > 1e-4, `theta ${eTh.toExponential(1)}, qv ${eQv.toExponential(1)}, u ${eU.toExponential(1)}, v ${eV.toExponential(1)}; changes ${dTh.toFixed(2)} K, ${(dQv * 1000).toFixed(2)} g/kg; ${detail}`);
+  // the vapour added (g/kg) and moved towards a relative humidity over water, as worker.ts does on the CPU
+  {
+    const ad = { x: 20000, y: 30000, z: 3000, R: 18000, H: 2500 }, rh2 = { x: 50000, y: 12000, z: 4000, R: 15000, H: 3000 };
+    const env = (md: RegionalModel, i: number, j: number, k: number, r: { x: number; y: number; z: number; R: number; H: number }): number => {
+      let ex = (i + 0.5) * 3000 - r.x, ey = (j + 0.5) * 3000 - r.y;
+      ex -= Math.round(ex / 72000) * 72000; ey -= Math.round(ey / 72000) * 72000;
+      const a = Math.hypot(ex, ey) / r.R, b = Math.abs(md.zc[k]! - r.z) / r.H;
+      return a >= 1 || b >= 1 ? 0 : Math.cos(0.5 * Math.PI * a) ** 2 * Math.cos(0.5 * Math.PI * b) ** 2;
+    };
+    const q0 = Float64Array.from(qv);
+    for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {
+      const q = m.idx(i, j, k);
+      qv[q] = Math.max(0, qv[q]! + 0.002 * env(m, i, j, k, ad));
+      const pi = m.pi0[k]! + m.pp[q]!;
+      qv[q] = Math.max(0, qv[q]! + env(m, i, j, k, rh2) * (0.9 * qsatW(m.th[q]! * pi, pressure(pi)) - qv[q]!));
+    }
+    g.edit({ kind: 'moisture', ...ad, mode: 'add', amount: 0.002, ox: 0, oy: 0 });
+    g.edit({ kind: 'moisture', ...rh2, mode: 'rh', amount: 0.9, ox: 0, oy: 0 });
+    const s2 = await g.readState(), e2 = cmp(m, s2, 5, qv, cfg.nz);
+    let dAdd = 0, dRh = 0;
+    for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {
+      const q = m.idx(i, j, k);
+      if (env(m, i, j, k, ad) > 0.9) dAdd = Math.max(dAdd, qv[q]! - q0[q]!);
+      if (env(m, i, j, k, rh2) > 0.9) dRh = Math.max(dRh, Math.abs(qv[q]! - q0[q]!));
+    }
+    gcheck('interactions on the GPU: vapour added (g/kg) and set towards a relative humidity match the CPU formulas (qv rel L2 < 1e-4)', e2 < 1e-4 && dAdd > 1.5e-3 && dRh > 1e-4, `qv ${e2.toExponential(1)}; added up to ${(dAdd * 1000).toFixed(2)} g/kg, humidity change up to ${(dRh * 1000).toFixed(2)} g/kg`);
+  }
   // undo: a copy on the GPU, restored exactly with the model time
   g.snapshot();
   const t0 = g.time, snap = await g.readState();
@@ -649,7 +676,7 @@ export async function regionalExtremeTest(): Promise<void> {
     { label: 'cold pool -500 K', seconds: 60, apply: (g) => { g.edit({ kind: 'bubble', x: 16000, y: 16000, z: 0, rh: 8000, rz: 1500, amp: -500, floorT: T_FLOOR, warm: false, ox: 0, oy: 0 }); return 500; } },
     { label: 'wind once 3000 m/s', seconds: 60, apply: (g) => { g.windOnce({ x: 16000, y: 16000, z: 1500, R: 10000, H: 3000, speed: 3000, dir: [1, 0, 0], form: 'push', sign: 1 }); return 0; } },
     { label: 'updraft once 1000 m/s', seconds: 60, apply: (g) => { g.windOnce({ x: 16000, y: 16000, z: 1500, R: 10000, H: 3000, speed: 1000, dir: [0, 0, 1], form: 'push', sign: 1 }); return 0; } },
-    { label: 'vapour x50', seconds: 60, apply: (g) => { g.edit({ kind: 'moisture', x: 16000, y: 16000, z: 1000, R: 10000, H: 2000, fac: 50, ox: 0, oy: 0 }); return 0; } },
+    { label: 'vapour x50', seconds: 60, apply: (g) => { g.edit({ kind: 'moisture', x: 16000, y: 16000, z: 1000, R: 10000, H: 2000, mode: 'mul', amount: 50, ox: 0, oy: 0 }); return 0; } },
   ];
   const out: string[] = []; let ok = true;
   for (const c of cases) {
@@ -702,4 +729,27 @@ export async function regionalExtremeTest(): Promise<void> {
     g.destroy();
   }
   gcheck('extreme interactions on the GPU: bubbles of 10^4 and 10^6 K, a cold pool colder than the floor, 3000 m/s wind, 1000 m/s updraft and vapour x50 leave the state finite, never colder than the floor', ok, out.join(' | '));
+}
+
+// Interactions on a grid with more than 65535 x 64 cells (a 3 km typhoon has 8 M): one dispatch dimension cannot hold the groups,
+// so the edit and wind kernels are dispatched over two dimensions. The changes reach the cells with the highest index.
+export async function regionalBigEditTest(): Promise<void> {
+  const device = await getDevice();
+  const nx = 64, ny = 64, nz = 1100, cells = nx * ny * nz;   // 4.5 M cells: 70 k groups of 64
+  const cfg = { nx, ny, nz, dx: 2000, dy: 2000, dz: 20, dt: 2, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 3000, dampRate: 1 / 300, kdiff2: 0, lateral: 'periodic' as const };
+  const m = new RegionalModel(cfg, weismanKlemp, 6);
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+  const g = new GpuRegional(device, m, { moist: true, physics: null });
+  g.uploadFrom(m);
+  const before = await g.readState();
+  const zTop = m.zc[nz - 2]!;
+  g.edit({ kind: 'bubble', x: 64000, y: 64000, z: zTop, rh: 50000, rz: 200, amp: 5, floorT: T_FLOOR, warm: true, ox: 0, oy: 0 });
+  g.edit({ kind: 'moisture', x: 64000, y: 64000, z: zTop, R: 50000, H: 200, mode: 'add', amount: 0.002, ox: 0, oy: 0 });
+  g.windOnce({ x: 64000, y: 64000, z: zTop, R: 50000, H: 200, speed: 10, dir: [1, 0, 0], form: 'push', sign: 1 });
+  const st = await g.readState();
+  const q = m.idx(nx / 2, ny / 2, nz - 2);
+  const dTh = st[3 * m.size + q]! - before[3 * m.size + q]!, dQv = st[5 * m.size + q]! - before[5 * m.size + q]!, dU = st[q]! - before[q]!;
+  gcheck(`interactions on a grid of ${(cells / 1e6).toFixed(1)} M cells (more than 65535 workgroups): the bubble, the added vapour and the wind reach the top levels`,
+    dTh > 4 && Math.abs(dQv - 0.002) < 2e-4 && dU > 5, `at level ${nz - 2}: theta +${dTh.toFixed(2)} K (want ~5), qv +${(dQv * 1000).toFixed(2)} g/kg (want ~2), u +${dU.toFixed(2)} m/s (want ~10)`);
+  g.destroy();
 }

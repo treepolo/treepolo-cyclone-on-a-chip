@@ -20,7 +20,7 @@
 // Latent heating uses Lv (vapour/liquid), Ls (vapour/ice) and Lf = Ls - Lv (liquid/ice). All transfers
 // are between species, limited so that no species goes negative: total water is conserved exactly.
 
-import { DRY_AIR, T_FLOOR } from '../core/constants.js';
+import { DRY_AIR, T_FLOOR, VT_MAX } from '../core/constants.js';
 import type { RegionalModel } from './core.js';
 
 /** The model members the microphysics uses (the 3-D regional model and the axisymmetric model both have them). */
@@ -113,7 +113,7 @@ export class IceMicrophysics {
         for (let k = 0; k < nz; k++) {
           const q = m.idx(i, j, k), qq = a[q]!;
           col[k] = qq;
-          vt[k] = fallSpeed(sp, qq, rho[k]!, rhoSfc, m.th[q]! * (pi0[k]! + m.pp[q]!));
+          vt[k] = Math.min(fallSpeed(sp, qq, rho[k]!, rhoSfc, m.th[q]! * (pi0[k]! + m.pp[q]!)), VT_MAX);
           vmax = Math.max(vmax, vt[k]!);
         }
         if (vmax === 0) continue;

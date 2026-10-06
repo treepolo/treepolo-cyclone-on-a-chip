@@ -72,8 +72,9 @@ export type ToRegionalWorker =
    *  at height z (m; default 1.5 km warm, the ground cold) with horizontal radius and full depth (m) and theta amplitude
    *  amp (K; default +3 warm, -6 cold) */
   | { type: 'perturb'; kind: 'warm' | 'cold'; x: number; y: number; z?: number; radius?: number; depth?: number; amp?: number }
-  /** multiply the water vapour in a region (centre x, y, z, radius, full depth, m) by factor (capped at saturation) */
-  | { type: 'moisture'; x: number; y: number; z: number; radius: number; depth: number; factor: number }
+  /** change the water vapour in a region (centre x, y, z, radius, full depth, m): multiply it by `amount`, add `amount` g/kg (negative removes), or
+   *  move it towards the relative humidity `amount` % (over water); the cos^2 envelope of the region weights the change */
+  | { type: 'moisture'; x: number; y: number; z: number; radius: number; depth: number; mode: 'mul' | 'add' | 'rh'; amount: number }
   /** wind in a region (forcing.ts): speed (m/s), direction the push blows toward (az degrees clockwise from north,
    *  el degrees above the horizontal), form, sign (rotate: +1 counter-clockwise; converge: +1 inward); minutes 0: once,
    *  > 0: lasting that many model minutes, < 0: lasting until cleared */

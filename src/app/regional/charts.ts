@@ -37,6 +37,7 @@ const VI: Record<string, VarInfo> = {
   thp: { label: '位溫擾動 / θ′', unit: 'K', scale: 'div', digits: 2 },
   thetaE: { label: '相當位溫 / Equivalent potential temperature θe', unit: 'K', scale: 'seq', digits: 1 },
   rh: { label: '相對濕度（對水）/ Relative humidity (water)', unit: '%', scale: 'seq', lo: 0, hi: 100, digits: 0 },
+  rhi: { label: '相對濕度（0 °C 以下對冰）/ Relative humidity (over ice below 0 °C)', unit: '%', scale: 'seq', lo: 0, hi: 100, digits: 0 },
   zeta: { label: '垂直渦度 / Vertical vorticity ζ', unit: 's⁻¹', scale: 'div', digits: 4 },
   pp: { label: '氣壓擾動 / Pressure perturbation p′', unit: 'hPa', scale: 'div', digits: 2 },
   qv: { label: '水氣混合比 / Water-vapour mixing ratio', unit: 'g/kg', scale: 'seq', lo: 0, digits: 1 },
@@ -81,7 +82,7 @@ const VI: Record<string, VarInfo> = {
   uhSwath: { label: '上升氣流螺旋度軌跡（開始以來最大值）/ Updraft-helicity swath (maximum so far)', unit: 'm²/s²', scale: 'seq', lo: 0, clear: 5, gamma: 0.6, digits: 0 },
   windSwath: { label: '地面最大風速軌跡（開始以來最大值）/ Surface wind swath (maximum so far)', unit: 'm/s', scale: 'seq', lo: 0, digits: 1 },
 };
-const SLICE_CHOICES: SliceVar[] = ['dbz', 'w', 'speed', 'T', 'zeta', 'div', 'thp', 'thetaE', 'rh', 'pp', 'qv', 'cloud', 'precip', 'u', 'v'];
+const SLICE_CHOICES: SliceVar[] = ['dbz', 'w', 'speed', 'T', 'zeta', 'div', 'thp', 'thetaE', 'rh', 'rhi', 'pp', 'qv', 'cloud', 'precip', 'u', 'v'];
 /** composite and surface maps by group (the variable menu's sections) */
 const MAP_GROUPS: { label: string; vars: MapVar[] }[] = [
   { label: '環境 / Environment', vars: ['sst', 'shear850200', 'shear06', 'shear01', 'pw', 'sfcT', 'sfcTd'] },
@@ -92,7 +93,7 @@ const MAP_GROUPS: { label: string; vars: MapVar[] }[] = [
 ];
 /** standard pressure levels of the slices (hPa): the model level nearest each (height levels) */
 const P_LEVELS = [925, 850, 700, 500, 300, 200];
-const SECTION_CHOICES: SecVar[] = ['dbz', 'w', 'along', 'normal', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'qv', 'pp', 'T'];
+const SECTION_CHOICES: SecVar[] = ['dbz', 'w', 'along', 'normal', 'thp', 'thetaE', 'rh', 'rhi', 'cloud', 'precip', 'qv', 'pp', 'T'];
 const RZ_CHOICES: RzVar[] = ['vt', 'vr', 'w', 'thp', 'cond'];
 
 interface Sample { t: number; shear: number | null; dp: number | null; vmax: number; rmw: number | null; wmax: number; zeta: number; uh: number; dbz: number; vg: number; rain: number; cape: number; storm: { x: number; y: number } | null; ew: { r: number; v: number }[] | null; tcRain: TcRain | null }

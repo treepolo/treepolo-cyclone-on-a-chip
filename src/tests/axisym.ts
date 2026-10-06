@@ -59,4 +59,20 @@ const dry = (z: number): { theta: number; qv: number } => ({ theta: 300 * Math.e
   check('axisym: no radial flow through the axis', ua === 0, ua);
 }
 
+// The driver's step shortens where the flow needs it: a sea of 99 °C (the hottest the set-up takes) and one of 1 K stay finite for an hour,
+// an ordinary run keeps the set-up's step
+{
+  const { AxiDriver, AXI_DEFAULTS } = await import('../app/regional/axiDriver.js');
+  const out: string[] = []; let ok = true;
+  for (const sstC of [28, 99, -100]) {
+    const d = new AxiDriver({ ...AXI_DEFAULTS, sst: sstC + 273.15, dr: 4000 });
+    let steps = 0;
+    while (d.time < 3600 && steps < 20000) { d.step(10); steps += 10; }
+    const finite = [d.ax.th, d.ax.u, d.ax.w, d.ax.pp].every((a) => a.every(Number.isFinite));
+    ok = ok && finite && d.time >= 3600 && (sstC !== 28 || steps === 180);
+    out.push(`${sstC} °C ${finite ? 'finite' : 'NOT FINITE'} ${steps} steps`);
+  }
+  check('axisym: a sea of 99 °C or -100 °C stays finite for an hour (the step shortens where needed); an ordinary run keeps its set-up step (180 steps for an hour)', ok, out.join(', '));
+}
+
 summary('axisym');

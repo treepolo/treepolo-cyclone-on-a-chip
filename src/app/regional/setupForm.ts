@@ -1,5 +1,5 @@
 // Set-up form of the regional page: presets and every condition of a run (setup.ts), generated from one field table.
-import { PRESETS, autoDt, presetById, sanitize, setupCells, type RegionalSetup } from './setup.js';
+import { PRESETS, SST_MAX, autoDt, presetById, sanitize, setupCells, type RegionalSetup } from './setup.js';
 import { tcSounding } from '../../regional/tropical.js';
 import { weismanKlempQ } from '../../regional/kessler.js';
 import { quarterCircleWind, bunkersRightMover } from '../../regional/supercell.js';
@@ -144,6 +144,9 @@ export class SetupForm {
       else if (cells > 10e6) parts.push('⚠ 可能超過顯示卡記憶體 / may exceed the GPU memory');
       else if (cells > 1.5e6) parts.push('CPU 會很慢，需要 WebGPU / slow on the CPU, needs WebGPU');
     }
+    const sstRaw = Number(this.rows.get('sst')?.input.value), sstShown = s.surface === 'sea' || presetById(s.preset)?.axi;
+    if (sstShown && Number.isFinite(sstRaw) && Math.abs(sstRaw - s.sst) > 1e-9) parts.push(`⚠ 海溫 ${sstRaw} °C 改成 ${s.sst} °C：${sstRaw > SST_MAX ? '海水在 1000 hPa 約 100 °C 沸騰，不可能更熱' : '不可能低於絕對零度'} / sea temperature made ${s.sst} °C: ${sstRaw > SST_MAX ? 'sea water boils near 100 °C at 1000 hPa' : 'nothing is colder than absolute zero'}`);
+    else if (sstShown && (s.sst < -2 || s.sst > 36)) parts.push('海溫超出現實海面（約 −2 到 36 °C）：模式照物理公式算 / outside real seas (about -2 to 36 °C): the physics runs as it is');
     if (edited) parts.push('按「套用」才會生效 / press Apply to use');
     this.info.textContent = parts.filter(Boolean).join(' · ');
     this.applyBtn.disabled = cells > MAX_CELLS && !presetById(s.preset)?.axi;

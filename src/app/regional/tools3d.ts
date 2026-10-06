@@ -8,8 +8,8 @@ const TOOLS: { t: Tool; label: string; tip: string }[] = [
   { t: 'view', label: '視角', tip: '轉動相機（不互動）/ camera only' },
   { t: 'warm', label: '暖泡', tip: '點地面：在設定高度放暖泡 +3 K / tap: warm bubble at the set height' },
   { t: 'cold', label: '冷池', tip: '點地面：放冷空氣 −6 K / tap: cold air' },
-  { t: 'moist', label: '增濕', tip: '點地面：水氣 ×1.3（倍數自訂；超過飽和的水氣會凝結）/ tap: vapour ×1.3 (any factor; what the air cannot hold condenses)' },
-  { t: 'dry', label: '變乾', tip: '點地面：水氣 ×0.7 / tap: vapour ×0.7' },
+  { t: 'moist', label: '增濕', tip: '點地面：水氣 ×1.3（可改成「加 g/kg」或「調到相對濕度」；超過飽和的水氣會凝結）/ tap: vapour ×1.3, or add g/kg, or set towards a relative humidity (what the air cannot hold condenses)' },
+  { t: 'dry', label: '變乾', tip: '點地面：水氣 ×0.7（也可減 g/kg 或調到相對濕度）/ tap: vapour ×0.7 (or remove g/kg, or set towards a relative humidity)' },
   { t: 'wind', label: '風', tip: '點地面：加一陣風或持續的風（方向、仰角、形式、範圍可選）/ tap: a wind once or lasting' },
   { t: 'land', label: '陸地', tip: '拖曳塗陸地 / drag: paint land' },
   { t: 'sea', label: '海洋', tip: '拖曳塗海洋 / drag: paint sea' },
@@ -59,15 +59,21 @@ export class Tools3D {
     // strength: temperature change (or heat content) of bubbles, factor of the vapour change, sea-temperature change
     const heat = document.createElement('div'); heat.className = 'hv bubbleOnly';
     this.heatEl = heat;
+    const cover = document.createElement('div'); cover.className = 'hv coverOnly';
+    this.coverEl = cover;
     this.opts.append(
       hRow,
       row('半徑 / Radius (km)', num(10, 1), 'r'),
       row('深度 / Depth (km)', num(3, 0.5), 'depth', 'vol'),
+      cover,
       row('指定 / Set by', sel([['amp', '溫度幅度 / amplitude'], ['heat', '熱含量 / heat content']], 'amp'), 'by', 'bubbleOnly'),
       row('溫度幅度 / Amplitude (K)', num(3, 0.5), 'amp', 'bubbleOnly byAmp'),
       row('熱含量 / Heat (×10¹⁵ J)', num(10, 1), 'heat', 'bubbleOnly byHeat'),
       heat,
-      row('水氣倍數 / Vapour ×', num(1.3, 0.05), 'fac', 'moistOnly'),
+      row('方式 / Mode', sel([['mul', '乘倍數 / ×'], ['add', '加減 g/kg / ±'], ['rh', '設相對濕度 / RH']], 'mul'), 'mmode', 'moistOnly'),
+      row('水氣倍數 / Vapour ×', num(1.3, 0.05), 'fac', 'moistOnly moistMul'),
+      row('水氣量 / Vapour (g/kg)', num(1, 0.5), 'addq', 'moistOnly moistAdd'),
+      row('相對濕度 / RH (%)', num(100, 5), 'rhT', 'moistOnly moistRh'),
       row('海溫變化 / Sea change (°C)', num(2, 0.5), 'dsst', 'sstOnly'),
       row('形式 / Form', sel([['push', '推送 / push'], ['ccw', '逆時針旋轉 / counter-clockwise'], ['cw', '順時針旋轉 / clockwise'], ['in', '輻合 / converge'], ['out', '輻散 / diverge']], 'push'), 'form', 'windOnly'),
       row('吹向 / Toward', sel(DIRS.map((d, n) => [String(n * 45), d]), '90'), 'az', 'windOnly pushOnly'),
@@ -78,7 +84,8 @@ export class Tools3D {
     );
     this.el.form!.addEventListener('change', () => this.showOpts());
     this.el.by!.addEventListener('change', () => this.showOpts());
-    for (const k of ['amp', 'heat', 'r', 'depth', 'z']) this.el[k]!.addEventListener('input', () => this.showHeat());
+    this.el.mmode!.addEventListener('change', () => this.showOpts());
+    for (const k of ['amp', 'heat', 'r', 'depth', 'z']) this.el[k]!.addEventListener('input', () => { this.showHeat(); this.showCover(); });
     view.onTap = (x, y): boolean => this.tap(x, y);
     view.onToolDrag = (x, y, phase): void => this.drag(x, y, phase);
     view.onHover = (x, y): void => { const p = this.ground(x, y); this.hover = p; };
@@ -126,7 +133,7 @@ export class Tools3D {
     this.tool = t;
     // defaults of the strength per tool
     if (t === 'warm' || t === 'cold') { (this.el.amp as HTMLInputElement).value = t === 'warm' ? '3' : '6'; }
-    if (t === 'moist' || t === 'dry') { (this.el.fac as HTMLInputElement).value = t === 'moist' ? '1.3' : '0.7'; }
+    if (t === 'moist' || t === 'dry') { (this.el.fac as HTMLInputElement).value = t === 'moist' ? '1.3' : '0.7'; (this.el.rhT as HTMLInputElement).value = t === 'moist' ? '100' : '20'; }
     if (t === 'warmer' || t === 'cooler') { (this.el.dsst as HTMLInputElement).value = '2'; }
     this.view.toolActive = t !== 'view';
     this.opts.parentElement!.querySelectorAll<HTMLButtonElement>('.tbtns button').forEach((b) => { b.className = b.dataset.t === t ? 'on' : ''; });
@@ -146,11 +153,29 @@ export class Tools3D {
     this.opts.querySelectorAll<HTMLElement>('.bubbleOnly').forEach((e) => { e.hidden = !bubble; });
     this.opts.querySelectorAll<HTMLElement>('.byAmp').forEach((e) => { e.hidden = !bubble || byHeat; });
     this.opts.querySelectorAll<HTMLElement>('.byHeat').forEach((e) => { e.hidden = !bubble || !byHeat; });
-    this.opts.querySelectorAll<HTMLElement>('.moistOnly').forEach((e) => { e.hidden = t !== 'moist' && t !== 'dry'; });
+    const moist = t === 'moist' || t === 'dry', mmode = (this.el.mmode as HTMLSelectElement).value;
+    this.opts.querySelectorAll<HTMLElement>('.moistOnly').forEach((e) => { e.hidden = !moist; });
+    this.opts.querySelectorAll<HTMLElement>('.moistMul').forEach((e) => { e.hidden = !moist || mmode !== 'mul'; });
+    this.opts.querySelectorAll<HTMLElement>('.moistAdd').forEach((e) => { e.hidden = !moist || mmode !== 'add'; });
+    this.opts.querySelectorAll<HTMLElement>('.moistRh').forEach((e) => { e.hidden = !moist || mmode !== 'rh'; });
     this.opts.querySelectorAll<HTMLElement>('.sstOnly').forEach((e) => { e.hidden = t !== 'warmer' && t !== 'cooler'; });
     // bubbles use the depth too (their vertical size)
     if (bubble) this.opts.querySelectorAll<HTMLElement>('.vol').forEach((e) => { e.hidden = false; });
     this.showHeat();
+    this.showCover();
+  }
+  private coverEl: HTMLElement | null = null;
+  /** The heights and radius a change reaches: the region is an ellipsoid centred at the height, as deep as the depth, weighted by cos^2 (1 at the centre, 0 at its edge). */
+  private showCover(): void {
+    const g = this.grid, t = this.tool, el = this.coverEl;
+    if (!el) return;
+    const on = !!g && (t === 'warm' || t === 'cold' || t === 'moist' || t === 'dry' || t === 'wind');
+    el.hidden = !on;
+    if (!on || !g) return;
+    const z = 1000 * this.val('z', 1.5), H = 500 * this.val('depth', 3), R = this.val('r', 10);
+    const lo = Math.max(0, z - H) / 1000, hi = Math.min(g.top, z + H) / 1000;
+    el.textContent = `影響範圍：半徑 ${+R.toFixed(1)} km、高度 ${+lo.toFixed(1)}–${+hi.toFixed(1)} km（中心最強，往邊緣按 cos² 減弱；要涵蓋整個高度，高度設為深度的一半）`
+      + ` / radius ${+R.toFixed(1)} km, heights ${+lo.toFixed(1)}–${+hi.toFixed(1)} km (strongest at the centre, fading as cos²; to cover the whole height set the height to half the depth)`;
   }
 
   private val(k: string, d: number): number { const v = Number(this.el[k]!.value); return Number.isFinite(v) ? v : d; }
@@ -166,7 +191,11 @@ export class Tools3D {
     const p = this.ground(cx, cy); if (!p) return false;
     const R = 1000 * this.val('r', 10), z = 1000 * this.val('z', 1.5), depth = 1000 * this.val('depth', 3);
     if (t === 'warm' || t === 'cold') this.send({ type: 'perturb', kind: t, x: p.x, y: p.y, z, radius: R, depth, amp: this.bubble().amp });
-    else if (t === 'moist' || t === 'dry') this.send({ type: 'moisture', x: p.x, y: p.y, z, radius: R, depth, factor: Math.max(0, this.val('fac', t === 'moist' ? 1.3 : 0.7)) });
+    else if (t === 'moist' || t === 'dry') {
+      const mode = (this.el.mmode as HTMLSelectElement).value as 'mul' | 'add' | 'rh';
+      const amount = mode === 'mul' ? Math.max(0, this.val('fac', t === 'moist' ? 1.3 : 0.7)) : mode === 'add' ? (t === 'moist' ? 1 : -1) * Math.abs(this.val('addq', 1)) : Math.max(0, this.val('rhT', 100));
+      this.send({ type: 'moisture', x: p.x, y: p.y, z, radius: R, depth, mode, amount });
+    }
     else {
       const f = (this.el.form as HTMLSelectElement).value, form = f === 'push' ? 'push' : f === 'in' || f === 'out' ? 'converge' : 'rotate';
       this.send({ type: 'wind', x: p.x, y: p.y, z, radius: R, depth, speed: this.val('speed', 15), az: this.val('az', 90), el: this.val('el', 0), form, sign: f === 'cw' || f === 'out' ? -1 : 1, minutes: this.val('min', 30) });

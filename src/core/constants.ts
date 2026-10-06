@@ -30,3 +30,6 @@ export const DAY = 86400;
  *  does not get colder than about 180 K; nothing in a run gets near this floor but an interaction that asks for
  *  more cold than there is. */
 export const T_FLOOR = 100;
+/** Fastest fall speed (m/s) of rain, snow, graupel and ice in the sedimentation: nothing in the air falls faster (hail about 50 m/s). The bound keeps the sub-stepping
+ *  finite for a state that is not numbers any more (an infinite fall speed would make the loop endless; on the GPU, trip the watchdog). */
+export const VT_MAX = 100;

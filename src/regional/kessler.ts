@@ -3,7 +3,7 @@
 // evaporation of rain in subsaturated air, and rain sedimentation with the KW78 terminal velocity.
 // Species are mixing ratios (kg/kg) in RegionalModel.scalars: [qv, qc, qr].
 
-import { DRY_AIR } from '../core/constants.js';
+import { DRY_AIR, VT_MAX } from '../core/constants.js';
 import { RegionalModel } from './core.js';
 
 export const QV = 0, QC = 1, QR = 2;
@@ -39,7 +39,7 @@ export class KesslerMicrophysics {
       for (let k = 0; k < nz; k++) {
         const q = m.idx(i, j, k);
         col[k] = qr[q]!;
-        vt[k] = qr[q]! > 1e-12 ? 36.34 * Math.pow(0.001 * rho[k]! * qr[q]!, 0.1364) * Math.sqrt(rhoSfc / rho[k]!) : 0;
+        vt[k] = qr[q]! > 1e-12 ? Math.min(36.34 * Math.pow(0.001 * rho[k]! * qr[q]!, 0.1364) * Math.sqrt(rhoSfc / rho[k]!), VT_MAX) : 0;
         vmax = Math.max(vmax, vt[k]!);
       }
       const nsub = Math.max(1, Math.ceil(vmax * dt / (0.8 * dz)));

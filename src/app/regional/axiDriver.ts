@@ -4,6 +4,7 @@
 // fields. Display only: the model itself stays axisymmetric.
 
 import { AxisymModel, HA, type AxisymConfig } from '../../regional/axisym.js';
+import { nextDt, soundSpeed } from '../../regional/stepControl.js';
 import { IceMicrophysics, QC, QR, QI, QS, QG } from '../../regional/ice.js';
 import { tcSounding, eyewallPeaks, type TcSounding } from '../../regional/tropical.js';
 import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, albedo } from '../../regional/display.js';
@@ -74,7 +75,28 @@ export class AxiDriver {
       `/ Δr ${p.dr / 1000} km, 800 km radius, 25 km deep; ${e.en}; mixing lengths ${p.lh} / ${p.lv} m, Ck ${p.ck.toExponential(1)}. 顯示時繞軸旋轉成 3D / revolved about the axis for display`;
   }
 
-  step(n: number): void { for (let s = 0; s < n; s++) { this.ax.step(); this.mp.apply(this.ax.a.dt); } }
+  /** the step this driver was set up with (s) */
+  private dt0 = 0;
+  step(n: number): void {
+    for (let s = 0; s < n; s++) { this.adaptDt(); this.ax.step(); this.mp.apply(this.ax.a.dt); }
+  }
+  /**
+   * Shorten the step where the flow needs it (the same rule as the 3-D model, stepControl.ts, with the Courant number 1.0 that
+   * RK3 takes: an ordinary run never gets there, so its step stays as set up): a sea of 99 °C, say, heats the air by hundreds of
+   * K and drives winds that the set-up's step cannot follow.
+   */
+  private adaptDt(): void {
+    const ax = this.ax, a = ax.a;
+    if (!this.dt0) this.dt0 = a.dt;
+    let rate = 0, cmax = 0;
+    for (let k = 0; k < a.nz; k++) for (let i = 0; i < a.nr; i++) {
+      const q = ax.idx(i, 0, k);
+      rate = Math.max(rate, Math.abs(ax.u[q]!) / a.dr + Math.abs(ax.w[q]!) / a.dz);
+      cmax = Math.max(cmax, soundSpeed(ax.th[q]!, ax.pi0[k]! + ax.pp[q]!));
+    }
+    if (!Number.isFinite(rate) || !Number.isFinite(cmax)) return;
+    a.dt = nextDt({ cur: a.dt, dt0: this.dt0, rate, cmax, cfl: 1, dxMin: a.dr, nsound: a.nsound, gpu: false });
+  }
 
   // ---------------------------------------------------------------- per-radius diagnostics
 

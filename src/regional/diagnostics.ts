@@ -17,6 +17,13 @@ export function qsatW(T: number, p: number): number {
   const es = esatW(T);
   return 0.622 * es / Math.max(p - es, 1);
 }
+/** Saturation mixing ratio over ice (kg/kg), the model's own (ice.ts qvsIce). */
+export function qsatI(T: number, p: number): number {
+  const es = 611.2 * Math.exp(21.875 * (T - 273.15) / (T - 7.66));
+  return 0.622 * es / Math.max(p - es, 1);
+}
+/** Relative humidity (%) over ice below 0 °C, over water above: the model holds the cold air at ice saturation (ice.ts), so this reads 100 % where the air is saturated. */
+export const rhIce = (qv: number, T: number, p: number): number => 100 * qv / (T < 273.15 ? qsatI(T, p) : qsatW(T, p));
 /** Equivalent potential temperature (K), simplified Bolton form. */
 export const thetaE = (T: number, p: number, qv: number): number => T * Math.pow(P0 / p, RD / CP) * Math.exp(LV * qv / (CP * T));
 /** Dew point (deg C) from the mixing ratio and pressure. */
@@ -48,9 +55,9 @@ export const C = { wmax: 0, wmin: 1, cmax: 2, pmax: 3, dbz: 4, ctopZ: 5, ctopT: 
 export const WV_PATH = 0.3;
 
 /** Fields of a horizontal slice. */
-export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh', 'zeta', 'div', 'pp', 'qv', 'cloud', 'precip', 'T'] as const;
+export const SLICE_VARS = ['dbz', 'w', 'speed', 'u', 'v', 'thp', 'thetaE', 'rh', 'zeta', 'div', 'pp', 'qv', 'cloud', 'precip', 'T', 'rhi'] as const;
 /** Fields of a cross-section or sounding (per level). */
-export const SECTION_VARS = ['dbz', 'w', 'u', 'v', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'T', 'Td', 'p', 'qv', 'pp'] as const;
+export const SECTION_VARS = ['dbz', 'w', 'u', 'v', 'thp', 'thetaE', 'rh', 'cloud', 'precip', 'T', 'Td', 'p', 'qv', 'pp', 'rhi'] as const;
 /** Composite (column / surface) maps. */
 export const MAP_VARS = ['dbzMax', 'ctopT', 'ctopZ', 'uh', 'wMax', 'rainRate', 'rain', 'snow', 'slp', 'sfcWind', 'sfcU', 'sfcV', 'sfcThp', 'sfcThetaE', 'cape', 'cin', 'vis', 'visZ', 'wvT', 'pw', 'cuRain', 'sfcT', 'sfcTd',
   'shear06', 'srh01', 'srh03', 'lcl', 'li', 'stp', 'scp', 'etop', 'vil', 'uhSwath', 'windSwath', 'sst', 'shear850200', 'shear01'] as const;
@@ -164,7 +171,7 @@ export function sectionValues(c: CellState, b: LevelBase, out: Float32Array, o: 
   out[o] = dbz(b.rho0, qr, qs, qg); out[o + 1] = c.w; out[o + 2] = c.u; out[o + 3] = c.v; out[o + 4] = c.th - b.th0;
   out[o + 5] = thetaE(T, p, qv); out[o + 6] = 100 * qv / qsatW(T, p); out[o + 7] = 1e3 * Math.max(0, qc + qi); out[o + 8] = 1e3 * Math.max(0, qr + qs + qg);
   out[o + 9] = T - 273.15; out[o + 10] = dewPoint(qv, p); out[o + 11] = p / 100; out[o + 12] = 1e3 * Math.max(0, qv);
-  out[o + 13] = (p - pressure(b.pi0)) / 100;
+  out[o + 13] = (p - pressure(b.pi0)) / 100; out[o + 14] = rhIce(qv, T, p);
 }
 
 // ---------------------------------------------------------------- columns
@@ -298,6 +305,7 @@ export function sliceFields(m: RegionalModel, pl: LevelPlanes, k: number, vars: 
         case 'thp': x = pl.th[q]! - th0; break;
         case 'thetaE': x = thetaE(T, p, qv); break;
         case 'rh': x = 100 * qv / qsatW(T, p); break;
+        case 'rhi': x = rhIce(qv, T, p); break;
         case 'zeta': x = 0.25 * ((pl.v[q + 1]! + pl.v[q + 1 + sx]!) - (pl.v[q - 1]! + pl.v[q - 1 + sx]!)) / dx
           - 0.25 * ((pl.u[q + sx]! + pl.u[q + sx + 1]!) - (pl.u[q - sx]! + pl.u[q - sx + 1]!)) / dy; break;
         case 'div': x = 1e5 * ((pl.u[q + 1]! - pl.u[q]!) / dx + (pl.v[q + sx]! - pl.v[q]!) / dy); break;

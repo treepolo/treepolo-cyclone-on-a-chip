@@ -12,7 +12,7 @@ const pm = (a: number): Range => [-a, a];
 export const SCALES: Record<string, { tc: Range; storm: Range }> = {
   // horizontal slices and cross-sections (section 'along' and 'normal' wind like u, v)
   w: R(pm(6), pm(30)), speed: R([0, 80], [0, 50]), u: R(pm(80), pm(40)), v: R(pm(80), pm(40)), along: R(pm(80), pm(40)), normal: R(pm(80), pm(40)),
-  thp: R(pm(12), pm(10)), thetaE: R([320, 380]), rh: R([0, 100]), zeta: R(pm(3e-3), pm(0.03)), div: R(pm(100), pm(400)), pp: R(pm(30), pm(8)),
+  thp: R(pm(12), pm(10)), thetaE: R([320, 380]), rh: R([0, 100]), rhi: R([0, 100]), zeta: R(pm(3e-3), pm(0.03)), div: R(pm(100), pm(400)), pp: R(pm(30), pm(8)),
   qv: R([0, 20]), cloud: R([0, 3], [0, 5]), precip: R([0, 8], [0, 15]), T: R([-80, 40]),
   // radius-height means
   'rz:vt': R(pm(80), pm(40)), 'rz:vr': R(pm(30), pm(20)), 'rz:w': R(pm(3), pm(15)), 'rz:thp': R(pm(12), pm(10)), 'rz:cond': R([0, 2], [0, 4]),

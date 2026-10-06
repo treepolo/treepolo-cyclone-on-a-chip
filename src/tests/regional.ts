@@ -677,4 +677,56 @@ void DRY_AIR;
     finite && qsOk && mm.time >= 90, `qs ${qs.map((x) => x.toExponential(2)).join(' ')}; ${steps} steps, max |w| ${wmax.toFixed(0)} m/s, hottest air ${tmax.toFixed(0)} K`);
 }
 
+// A set-up at any sea temperature (1 K to the boiling point): the sounding and the first model hour are finite with the worker's step rule;
+// the form's range keeps 99 °C at most and a sea above it is made 99 °C
+{
+  const { buildModel } = await import('../app/regional/build.js');
+  const { setupOf, sanitize, SST_MIN, SST_MAX } = await import('../app/regional/setup.js');
+  const { nextDt, soundSpeed } = await import('../regional/stepControl.js');
+  const out: string[] = []; let ok = true;
+  for (const sst of [SST_MIN, -100, -2, 36, 70, SST_MAX]) {
+    const b = buildModel({ ...setupOf('tc'), L: 240000, top: 20000, dz: 1000, sst }, false), m = b.model, mp = new IceMicrophysics(m);
+    if (b.physics) new (await import('../regional/physics.js')).RegionalPhysics(m, b.physics);
+    const { nx, ny, nz, dx, dy, dz } = m.c, dt0 = m.c.dt;
+    let steps = 0, finite = true;
+    while (m.time < 3600 && steps < 20000) {
+      let rate = 0, cmax = 0;
+      for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const q = m.idx(i, j, k);
+        rate = Math.max(rate, Math.abs(m.u[q]!) / dx + Math.abs(m.v[q]!) / dy + Math.abs(m.w[q]!) / dz);
+        cmax = Math.max(cmax, soundSpeed(m.th[q]!, m.pi0[k]! + m.pp[q]!));
+      }
+      if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { finite = false; break; }
+      m.c.dt = nextDt({ cur: m.c.dt, dt0, rate, cmax, cfl: 0.8, dxMin: Math.min(dx, dy), nsound: m.c.nsound, gpu: false });
+      m.step(); mp.apply(m.c.dt); steps++;
+    }
+    if (finite) finite = [m.u, m.v, m.w, m.th, m.pp, ...m.scalars].every((a) => a.every(Number.isFinite));
+    ok = ok && finite && m.time >= 3600;
+    out.push(`${sst} °C ${finite ? 'ok' : 'NOT FINITE'} (${steps} steps)`);
+  }
+  const clamp = sanitize({ ...setupOf('tc'), sst: 150 }).sst === SST_MAX && sanitize({ ...setupOf('tc'), sst: -400 }).sst === SST_MIN && sanitize({ ...setupOf('tc'), sst: 45 }).sst === 45 && sanitize({ ...setupOf('tc'), sst: -20 }).sst === -20;
+  check('set-up sea temperature: any value from 1 K to 99 °C builds a sounding and runs an hour finite (CPU, the worker\'s step rule); beyond it is made 99 °C / 1 K', ok && clamp, out.join(', '));
+}
+
+// Fall speeds are bounded (VT_MAX), so a state that is not numbers any more cannot make the sedimentation sub-stepping endless
+{
+  const { VT_MAX } = await import('../core/constants.js');
+  const cfg1 = { ...base, nx: 4, ny: 4, nz: 12, dx: 2000, dy: 2000, dz: 500, dt: 6, f: 0 };
+  const mm = new RegionalModel(cfg1, weismanKlemp, 6), mp1 = new IceMicrophysics(mm);
+  for (const sp of [QR, QS, QG, QI]) { mm.scalars[sp]![mm.idx(1, 1, 5)] = Infinity; mm.scalars[sp]![mm.idx(2, 2, 3)] = 1e300; }
+  const t0 = Date.now();
+  mp1.apply(60);
+  check(`sedimentation: infinite and astronomically large water contents do not make the sub-stepping endless (fall speed bounded to ${VT_MAX} m/s)`, Date.now() - t0 < 5000, `${Date.now() - t0} ms`);
+}
+
+// Relative humidity over ice: 100 % where the air is saturated over ice (the model's own saturation, ice.ts), over water above 0 °C
+{
+  const { rhIce, qsatI, qsatW } = await import('../regional/diagnostics.js');
+  const { qvsIce } = await import('../regional/ice.js');
+  const p = 30000, T = 233.15, qi = qsatI(T, p), r = rhIce(qi, T, p), rw = 100 * qi / qsatW(T, p);
+  const warm = rhIce(0.5 * qsatW(290, 90000), 290, 90000);
+  check('relative humidity over ice: 100 % at ice saturation, which is about 68 % over water at -40 °C (the model holds cold air at ice saturation); over water above 0 °C',
+    Math.abs(r - 100) < 1e-9 && rw > 62 && rw < 74 && Math.abs(warm - 50) < 1e-9 && Math.abs(qi / qvsIce(T, p) - 1) < 5e-3, `over ice ${r.toFixed(1)} %, over water ${rw.toFixed(1)} %, warm ${warm.toFixed(1)} %, qsatI/qvsIce ${(qi / qvsIce(T, p)).toFixed(4)}`);
+}
+
 summary('regional');

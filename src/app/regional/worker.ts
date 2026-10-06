@@ -1,7 +1,7 @@
 // Regional-model worker: builds an experiment, steps it, and streams 3-D cloud / rain volumes.
 
 import { RegionalModel, type RegionalConfig } from '../../regional/core.js';
-import { IceMicrophysics, QV } from '../../regional/ice.js';
+import { IceMicrophysics, QV, qvsIce, qvsWater } from '../../regional/ice.js';
 import { RegionalPhysics } from '../../regional/physics.js';
 import { tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
@@ -23,7 +23,7 @@ import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalW
 import { nextDt, soundSpeed, bubbleDt, CFL_DEFAULT } from '../../regional/stepControl.js';
 import { T_FLOOR } from '../../core/constants.js';
 import { quant, metaOf, modelFromMeta, loadState, packState, type Q16, type ReplayAux, type ReplayMeta, type ReplayRec, type ReplayTier } from '../../regional/replayData.js';
-import { C, COL as NCOL, SECTION_VARS, MAP_VARS, pressure, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
+import { C, COL as NCOL, SECTION_VARS, MAP_VARS, pressure, qsatW, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
 let m: RegionalModel | null = null;
 let mp: IceMicrophysics | null = null;
@@ -398,6 +398,14 @@ async function getGpu(): Promise<GPUDevice | null> {
     requiredFeatures: ad.features.has('timestamp-query') ? ['timestamp-query'] : [],
   });
   const dev = gpuDevice;
+  // a GPU command the browser refused is never silent: say so in the log (a few lines at most, each message once)
+  const told = new Set<string>();
+  dev.addEventListener('uncapturederror', (e) => {
+    const msg = (e as GPUUncapturedErrorEvent).error.message.slice(0, 240);
+    if (told.size >= 6 || told.has(msg)) return;
+    told.add(msg);
+    post({ type: 'log', text: `GPU 錯誤（這個動作可能沒有生效）/ GPU error (the last action may not have taken effect): ${msg}` });
+  });
   dev.lost.then((info) => {
     if (gpuDevice === dev) gpuDevice = null;
     running = false;
@@ -1138,6 +1146,10 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (c !== d) notes.push(`深度 ${(d / 1000).toFixed(1)} km 改成 ${(c / 1000).toFixed(1)} km：至少 1 層、至多整個模式高度 / depth made ${(c / 1000).toFixed(1)} km`);
     return 0.5 * c;
   };
+  // where the change is: the radius and the heights it reaches (the cos^2 weight is 1 at the centre and 0 at these edges, so most of
+  // the change is near the centre; a layer centred low and thin does not reach the top of the model)
+  const reach = (R: number, H: number, zc: number): string => `半徑 ${fmtNum(R / 1000)} km、高度 ${fmtNum(Math.max(0, zc - H) / 1000)}–${fmtNum(Math.min(top, zc + H) / 1000)} km` +
+    ` / radius ${fmtNum(R / 1000)} km, heights ${fmtNum(Math.max(0, zc - H) / 1000)}–${fmtNum(Math.min(top, zc + H) / 1000)} km`;
   if (msg.type === 'wind') {
     // a wind once (added now) or a lasting forcing
     const R = clampR(msg.radius, 20 * dx), H = clampH(msg.depth);
@@ -1151,7 +1163,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
       if (onGpu) { gpu!.windOnce(f); eye?.gpu?.windOnce(fe); }
       else { applyWind(mm, [f], 'once'); if (eye) applyWind(eye.m, [fe], 'once'); }
       await stepAfterChange();
-      return done(`一次風 / wind once: ${what} at (${(f.x / 1000).toFixed(0)}, ${(f.y / 1000).toFixed(0)}) km, ${(f.z / 1000).toFixed(1)} km high`);
+      return done(`一次風 / wind once: ${what} at (${(f.x / 1000).toFixed(0)}, ${(f.y / 1000).toFixed(0)}) km, ${(f.z / 1000).toFixed(1)} km high; ${reach(R, H, f.z)}`);
     }
     if (forcings.length >= MAX_FORCINGS) forcings.shift();
     const until = msg.minutes > 0 ? modelNow() + msg.minutes * 60 : null;
@@ -1160,9 +1172,11 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     return done(`持續風 / lasting wind: ${what}${until === null ? '，直到清除 / until cleared' : `，${msg.minutes} 模式分鐘 / model minutes`}`);
   }
   if (msg.type === 'moisture') {
-    // multiply the vapour in the region (cos^2 envelope); what is more than the air can hold condenses in the next step
+    // change the vapour in the region by the cos^2 envelope: multiplied (mul), added (add, g/kg; negative dries) or moved towards a
+    // relative humidity over water (rh, %); what is more than the air can hold condenses in the next step
     const R = clampR(msg.radius, 20 * dx), H = clampH(msg.depth);
-    const fac = Math.max(0, Number.isFinite(msg.factor) ? msg.factor : 1);
+    const mode = msg.mode ?? 'mul', raw = Number.isFinite(msg.amount) ? msg.amount : mode === 'mul' ? 1 : 0;
+    const amount = mode === 'mul' ? Math.max(0, raw) : mode === 'add' ? raw * 1e-3 : Math.max(0, raw) / 100;
     // the outer grid and the eye nest (its origin at ox, oy in the outer coordinates)
     const moisten = (md: RegionalModel, ox: number, oy: number): void => {
       const { nx, ny, nz, dx, dy } = md.c, qv = md.scalars[QV]!, open = md.c.lateral === 'open';
@@ -1172,15 +1186,30 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
         const rh = Math.hypot(ex, ey) / R, rz = Math.abs(md.zc[k]! - msg.z) / H;
         if (rh >= 1 || rz >= 1) continue;
         const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = md.idx(i, j, k);
-        qv[q] = Math.max(0, qv[q]! * (1 + (fac - 1) * e));
+        let nq: number;
+        if (mode === 'mul') nq = qv[q]! * (1 + (amount - 1) * e);
+        else if (mode === 'add') nq = qv[q]! + amount * e;
+        else { const pi = Math.max(md.pi0[k]! + md.pp[q]!, 0.05); nq = qv[q]! + e * (amount * qsatW(Math.max(T_FLOOR, md.th[q]! * pi), pressure(pi)) - qv[q]!); }
+        qv[q] = Math.max(0, nq);
       }
     };
     if (onGpu) {
-      gpu!.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, fac, ox: 0, oy: 0 });
-      if (eye) eye.gpu?.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, fac, ox: eye.x0, oy: eye.y0 });
+      gpu!.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, mode, amount, ox: 0, oy: 0 });
+      if (eye) eye.gpu?.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, mode, amount, ox: eye.x0, oy: eye.y0 });
     } else { moisten(mm, 0, 0); if (eye) moisten(eye.m, eye.x0, eye.y0); }
+    // what the model does with vapour beyond ice saturation in the cold (ice.ts): the relative humidity over water stays below
+    // the ratio of the two saturations, so a chart of it cannot show 100 % there
+    const kc = Math.max(0, Math.min(nz - 1, Math.floor(msg.z / mm.c.dz))), Tc = mm.th0[kc]! * mm.pi0[kc]!;
+    const pc = pressure(mm.pi0[kc]!), cap = 100 * qvsIce(Tc, pc) / qvsWater(Tc, pc);
+    if (Tc < 233.15 && (mode === 'mul' ? amount > 1 : mode === 'add' ? raw > 0 : raw > cap)) {
+      notes.push(`這個高度約 ${(Tc - 273.15).toFixed(0)} °C，低於 −40 °C：超過冰飽和的水氣會在一步內凝華成冰，所以對水的相對濕度最高只有約 ${cap.toFixed(0)}%（對冰的相對濕度圖可到 100%）`
+        + ` / about ${(Tc - 273.15).toFixed(0)} °C here, below −40 °C: vapour beyond ice saturation deposits as ice within a step, so the relative humidity over water stays under about ${cap.toFixed(0)}% (over ice it reaches 100%)`);
+    }
     await stepAfterChange();
-    return done(`${fac >= 1 ? '增濕 / moistened' : '變乾 / dried'} ×${fmtNum(fac)} at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km, ${(msg.z / 1000).toFixed(1)} km high`);
+    const where = `at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km, ${(msg.z / 1000).toFixed(1)} km high; ${reach(R, H, msg.z)}`;
+    if (mode === 'add') return done(`${raw >= 0 ? '加水氣 / vapour added' : '減水氣 / vapour removed'} ${raw >= 0 ? '+' : '−'}${fmtNum(Math.abs(raw))} g/kg ${where}`);
+    if (mode === 'rh') return done(`水氣調向相對濕度 / vapour set towards RH ${fmtNum(raw)}% ${where}`);
+    return done(`${amount >= 1 ? '增濕 / moistened' : '變乾 / dried'} ×${fmtNum(amount)} ${where}`);
   }
   if (msg.type === 'perturb') {
     // warm bubble (+3 K, centred at 1.5 km unless given) or cold pool (-6 K at the ground unless given), horizontal radius 10 km
@@ -1207,7 +1236,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const kc = Math.max(0, Math.min(nz - 1, Math.floor(zc / mm.c.dz)));
     if (!warm && (mm.th0[kc]! + amp) * mm.pi0[kc]! < T_FLOOR) notes.push(`最冷處到了下限 ${T_FLOOR} K（−173 °C），不能再冷 / the coldest air reached ${T_FLOOR} K, the floor`);
     await stepAfterChange(Math.abs(amp));
-    return done(`${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} ${amp >= 0 ? '+' : '−'}${fmtNum(Math.abs(amp))} K at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km, ${(zc / 1000).toFixed(1)} km high`);
+    return done(`${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} ${amp >= 0 ? '+' : '−'}${fmtNum(Math.abs(amp))} K at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km, ${(zc / 1000).toFixed(1)} km high; ${reach(rh, rz, zc)}`);
   }
   // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km, as asked
   const du6 = Number.isFinite(msg.du6) ? msg.du6 : 0, humidity = Math.max(0, Number.isFinite(msg.humidity) ? msg.humidity : 1);
