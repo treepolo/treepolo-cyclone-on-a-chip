@@ -1489,6 +1489,11 @@ const surfaceWgsl = (logDrag: boolean): string => /* wgsl */`
 @group(0) @binding(0) var<storage, read> S: array<f32>;
 @group(0) @binding(1) var<storage, read_write> F: array<f32>;
 @group(0) @binding(2) var<storage, read> SF: array<f32>;   // skin temperature, wetness (per column)
+// saturation vapour pressure at the skin temperature: surfaceQs() in src/regional/physics.ts (any temperature gives a number)
+fn esurf(tsk: f32) -> f32 {
+  let T = max(tsk, TFLOOR);
+  return min(611.2 * exp(17.67 * (T - 273.15) / (T - 29.65)), 0.9 * PSFC);
+}
 fn cdrag(spd: f32) -> f32 {
   ${logDrag ? 'let l = 0.4 / log(0.5 * DZ / Z0); return l * l;' : 'return min(2.4e-3, 1.0e-3 * (1.0 + 0.07 * spd));'}
 }
@@ -1497,7 +1502,7 @@ fn effspd(qq: u32, c: u32, ua: f32, va: f32) -> f32 {
   let s = sqrt(ua * ua + va * va);
   if (!GUST) { return max(s, VMIN); }
   let tsk = SF[c]; let th = S[3u * SIZE + qq];
-  let es = 611.2 * exp(17.67 * (tsk - 273.15) / (tsk - 29.65));
+  let es = esurf(tsk);
   var dq = 0.0; var qr = 0.0;
   if (MOIST) { dq = (0.622 * es / (PSFC - 0.378 * es) - S[5u * SIZE + qq]) * SF[NX * NY + c]; qr = max(S[7u * SIZE + qq], 0.0); }
   let b = CK * max(s, VMIN) * (tsk / PIS - th + 0.61 * th * dq);
@@ -1532,7 +1537,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   F[q] -= 0.5 * (taux + shw) / DZ;
   F[SIZE + q] -= 0.5 * (tauy + shs) / DZ;
   let tsk = SF[t];
-  let esS = 611.2 * exp(17.67 * (tsk - 273.15) / (tsk - 29.65));
+  let esS = esurf(tsk);
   let qsS = 0.622 * esS / (PSFC - 0.378 * esS);
   F[3u * SIZE + q] += CK * spd * (tsk / PIS - S[3u * SIZE + q]) / DZ;
   if (MOIST) {

@@ -8,7 +8,7 @@
 //   * Newtonian radiative relaxation of theta toward the base state, capped at 2 K/day of cooling
 // Everything is applied as a slow tendency of the regional core through its `physicsTend` hook.
 
-import { DRY_AIR } from '../core/constants.js';
+import { DRY_AIR, T_FLOOR } from '../core/constants.js';
 import { RegionalModel } from './core.js';
 import { QV, QR } from './kessler.js';
 import { pcg, rnd } from './tracers.js';
@@ -57,6 +57,16 @@ export function gustSpeed(spd: number, vmin: number, ck: number, dth: number, dq
   const rq = Math.max(0, rho * qr), rcd = rq > 0 ? Math.min(7, rq * 36.34 * Math.pow(1e-3 * rq, 0.1364) * 3600 * 2.4) : 0;
   const ug = Math.log(1 + 6.69 * rcd - 0.476 * rcd * rcd);
   return Math.max(vmin, Math.sqrt(spd * spd + 1.44 * ws * ws + ug * ug));
+}
+
+/**
+ * Saturation mixing ratio (kg/kg) of the air at the surface, from the skin temperature (K) and the surface pressure (Pa). Any skin
+ * temperature gives a number: below T_FLOOR the formula says nothing but zero (the vapour pressure there is 1e-17 Pa), and above the
+ * boiling point the vapour pressure would pass the pressure of the air, so it stops at 0.9 of it (air of nearly pure vapour).
+ */
+export function surfaceQs(tsk: number, psfc: number): number {
+  const T = Math.max(tsk, T_FLOOR), es = Math.min(611.2 * Math.exp(17.67 * (T - 273.15) / (T - 29.65)), 0.9 * psfc);
+  return 0.622 * es / (psfc - 0.378 * es);
 }
 
 export const BL_NOISE_PERIOD = 600, BL_NOISE_DEPTH = 1000;
@@ -200,8 +210,7 @@ export class RegionalPhysics {
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const q = m.idx(i, j, 0), c2 = j * nx + i;
         const tsk = sf.tsk[c2]!;
-        const esS = 611.2 * Math.exp(17.67 * (tsk - 273.15) / (tsk - 29.65));
-        const qsS = 0.622 * esS / (sf.psfc - 0.378 * esS);
+        const qsS = surfaceQs(tsk, sf.psfc);
         const thS = tsk / sf.pis;
         // ground-relative wind (the model frame may translate with a storm at frameVel)
         const ua = 0.5 * (u[q]! + u[q + 1]!) + (c.frameVel?.u ?? 0), va = 0.5 * (v[q]! + v[q + sx]!) + (c.frameVel?.v ?? 0);

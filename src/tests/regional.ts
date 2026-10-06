@@ -648,4 +648,33 @@ void DRY_AIR;
     res.every((r) => r.ok), res.map((r) => r.text).join(' | '));
 }
 
+// A surface of any temperature: ground at 1500 K and at 50 K, sea at 400 K (above boiling): the fluxes are finite numbers, the model
+// stays finite (surfaceQs in physics.ts; the surface temperature is not limited)
+{
+  const { RegionalPhysics, surfaceQs } = await import('../regional/physics.js');
+  const { nextDt, soundSpeed } = await import('../regional/stepControl.js');
+  const cfg0 = { ...base, nx: 12, ny: 12, nz: 24, dx: 2000, dy: 2000, dz: 500, dt: 6, f: 0, dampDepth: 3000, dampRate: 1 / 300 };
+  const mm = new RegionalModel(cfg0, weismanKlemp, 6), mpx = new IceMicrophysics(mm);
+  const n2 = 144, tsk = Float64Array.from({ length: n2 }, (_, c) => (c % 12 < 4 ? 1500 : c % 12 < 8 ? 50 : 400)), wet = Float64Array.from({ length: n2 }, (_, c) => (c < 72 ? 1 : 0.3));
+  new RegionalPhysics(mm, { lh: 400, lv: 100, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface: { tsk, wet }, z0: 0.1, gust: true, vmin: 1 });
+  for (let k = 0; k < cfg0.nz; k++) for (let j = 0; j < 12; j++) for (let i = 0; i < 12; i++) mm.scalars[QV]![mm.idx(i, j, k)] = mm.qv0[k]!;
+  let finite = true, steps = 0, wmax = 0, tmax = 0;
+  while (mm.time < 90 && steps < 3000) {
+    let rate = 0, cmax = 0;
+    for (let k = 0; k < cfg0.nz; k++) for (let j = 0; j < 12; j++) for (let i = 0; i < 12; i++) {
+      const q = mm.idx(i, j, k);
+      rate = Math.max(rate, Math.abs(mm.u[q]!) / 2000 + Math.abs(mm.v[q]!) / 2000 + Math.abs(mm.w[q]!) / 500);
+      cmax = Math.max(cmax, soundSpeed(mm.th[q]!, mm.pi0[k]! + mm.pp[q]!));
+    }
+    mm.c.dt = Math.min(mm.c.dt, nextDt({ cur: Infinity, dt0: 6, rate, cmax, cfl: 0.8, dxMin: 2000, nsound: 6, gpu: false }));
+    mm.step(); mpx.apply(mm.c.dt); steps++;
+    for (let q = 0; q < mm.size; q += 5) wmax = Math.max(wmax, Math.abs(mm.w[q]!));
+    if (![mm.u, mm.v, mm.w, mm.th, mm.pp, ...mm.scalars].every((a) => a.every(Number.isFinite))) { finite = false; break; }
+  }
+  for (let k = 0; k < cfg0.nz; k++) for (let c = 0; c < n2; c++) tmax = Math.max(tmax, mm.th[mm.idx(c % 12, Math.floor(c / 12), k)]! * mm.pi0[k]!);
+  const qs = [50, 300, 373, 400, 1500].map((t) => surfaceQs(t, 1e5)), qsOk = qs.every((x) => Number.isFinite(x) && x >= 0 && x <= 1) && qs[0]! < 1e-12 && Math.abs(qs[1]! - 0.0221) < 0.002 && qs[4]! === qs[3]!;
+  check('surface of any temperature: the saturation mixing ratio is a number for 50 K to 1500 K (0 when frozen out, 0.85 beyond boiling), and a run over ground at 1500 K / 50 K and sea at 400 K stays finite',
+    finite && qsOk && mm.time >= 90, `qs ${qs.map((x) => x.toExponential(2)).join(' ')}; ${steps} steps, max |w| ${wmax.toFixed(0)} m/s, hottest air ${tmax.toFixed(0)} K`);
+}
+
 summary('regional');

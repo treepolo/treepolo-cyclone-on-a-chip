@@ -680,5 +680,26 @@ export async function regionalExtremeTest(): Promise<void> {
     out.push(`${c.label}: ${finite ? 'finite' : 'NOT FINITE'}, ${steps} steps, max |w| ${wmax.toFixed(0)} m/s, min dt ${dtMin.toFixed(3)} s, coldest ${tmin.toFixed(0)} K`);
     g.destroy();
   }
+  // a surface of any temperature (ground at 1500 K and at 50 K, sea at 400 K): the flux kernels give numbers
+  {
+    const { m } = mk();
+    const n2 = 16 * 16, tsk = Float64Array.from({ length: n2 }, (_, c) => (c % 16 < 5 ? 1500 : c % 16 < 10 ? 50 : 400)), wet = Float64Array.from({ length: n2 }, (_, c) => (c < 128 ? 1 : 0.3));
+    const cfg = { lh: 400, lv: 100, sst: 0, ck: 1.2e-3, radTau: 0, radMax: 0, surface: { tsk, wet }, z0: 0.1, gust: true, vmin: 1 };
+    const g = new GpuRegional(device, m, { moist: true, physics: cfg, ice: true });
+    g.uploadFrom(m);
+    let dt = 6, steps = 0, finite = true;
+    const t0 = g.time;
+    while (g.time - t0 < 60 && steps < 2000) {
+      const { rate, cmax } = await g.maxCourant();
+      if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { finite = false; break; }
+      dt = Math.min(dt, nextDt({ cur: Infinity, dt0: 6, rate, cmax, cfl: 0.8, dxMin: 2000, nsound: 6, gpu: true }));
+      g.setDt(dt); g.step(1); steps++;
+    }
+    const st = await g.readState();
+    for (let q = 0; q < st.length; q++) if (!Number.isFinite(st[q]!)) { finite = false; break; }
+    ok = ok && finite;
+    out.push(`surface 1500 K / 50 K / 400 K: ${finite ? 'finite' : 'NOT FINITE'}, ${steps} steps`);
+    g.destroy();
+  }
   gcheck('extreme interactions on the GPU: bubbles of 10^4 and 10^6 K, a cold pool colder than the floor, 3000 m/s wind, 1000 m/s updraft and vapour x50 leave the state finite, never colder than the floor', ok, out.join(' | '));
 }

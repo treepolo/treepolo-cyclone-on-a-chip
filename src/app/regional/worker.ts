@@ -1087,9 +1087,8 @@ async function startNest(R: number, dx: number, dz: number, recentre: boolean): 
 }
 
 /** Interaction: change the conditions (never the outcome). Returns a log line. */
-/** The sea cannot be colder than it freezes, and nothing at the surface can be hotter than boiling water (the saturation formula
- *  of the surface fluxes turns over there). */
-const SEA_MIN = 271.35, SURFACE_MAX = 372;
+/** The surface temperature the interactions can paint is anything above absolute zero (the fluxes take any value: surfaceQs in physics.ts). */
+const SURFACE_MIN = 1;
 /** A number for the log: as given up to 4 digits, in exponent form when very large or small. */
 const fmtNum = (x: number): string => (Math.abs(x) >= 1e5 || (x !== 0 && Math.abs(x) < 0.01) ? x.toExponential(2) : String(+x.toPrecision(4)));
 
@@ -1106,12 +1105,11 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const sf = phys?.surface;
     if (!sf || !physCfg) return '這個實驗沒有地面通量，不能塗海溫或陸地 / this experiment has no surface fluxes to paint';
     const dT = Math.abs(Number.isFinite(msg.amount) ? msg.amount! : 2);
-    let tooCold = 0, tooHot = 0;
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       if (Math.hypot((i + 0.5) * dx - msg.x, (j + 0.5) * dy - msg.y) > msg.radius) continue;
       const c = j * nx + i;
-      if (msg.kind === 'warmer') { const v = sf.tsk[c]! + dT; sf.tsk[c] = Math.min(SURFACE_MAX, v); if (v > SURFACE_MAX) tooHot++; }
-      else if (msg.kind === 'cooler') { const lo = sf.wet[c]! >= 0.99 ? SEA_MIN : T_FLOOR, v = sf.tsk[c]! - dT; sf.tsk[c] = Math.max(lo, v); if (v < lo) tooCold++; }
+      if (msg.kind === 'warmer') sf.tsk[c] = sf.tsk[c]! + dT;
+      else if (msg.kind === 'cooler') sf.tsk[c] = Math.max(SURFACE_MIN, sf.tsk[c]! - dT);
       else if (msg.kind === 'land') { if (sf.wet[c]! >= 0.99) sf.tsk[c] = mm.th0[0]! * mm.pi0[0]!; sf.wet[c] = 0.3; }
       else { if (sf.wet[c]! < 0.99) sf.tsk[c] = (setup?.sst ?? 28) + 273.15; sf.wet[c] = 1; }
     }
@@ -1120,8 +1118,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     physCfg.surface = { tsk: sf.tsk, wet: sf.wet };
     gpu?.setSurface(sf.tsk, sf.wet);
     eye?.surfaceFrom(mm, sf);
-    return tooCold ? `${tooCold} 格已到下限（海水 ${SEA_MIN} K 結冰，陸地 ${T_FLOOR} K）/ ${tooCold} cells reached the lower limit (sea freezes at ${SEA_MIN} K)`
-      : tooHot ? `${tooHot} 格已到上限 ${SURFACE_MAX} K（水沸騰，地面通量的飽和公式到此為止）/ ${tooHot} cells reached ${SURFACE_MAX} K (boiling)` : '';
+    return '';
   }
   // on the GPU the change is made there by small kernels (no read-back of the state, which takes long on large grids),
   // with a GPU copy of the state kept for the undo; the environment change rebuilds the models from the CPU state
