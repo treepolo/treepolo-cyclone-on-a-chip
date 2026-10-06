@@ -88,6 +88,8 @@ export class IceMicrophysics {
   readonly rainAcc: Float64Array;
   readonly snowAcc: Float64Array;
   clipped = 0;
+  /** the saturation switches (the shared microOpts: changed between steps by the worker) */
+  opts: MicroOpts = microOpts;
 
   constructor(private readonly m: MicroHost) {
     if (m.scalars.length < 6) throw new Error('IceMicrophysics needs 6 scalars (qv, qc, qr, qi, qs, qg)');
@@ -132,7 +134,7 @@ export class IceMicrophysics {
         const q = m.idx(i, j, k);
         const pi = Math.max(pi0[k]! + m.pp[q]!, 0.05);
         const st = { th: m.th[q]!, qv: S[QV]![q]!, qc: S[QC]![q]!, qr: S[QR]![q]!, qi: S[QI]![q]!, qs: S[QS]![q]!, qg: S[QG]![q]! };
-        cellProcesses(st, rho[k]!, rhoSfc, pi, DRY_AIR.pRef * Math.pow(pi, cp / rd), dt);
+        cellProcesses(st, rho[k]!, rhoSfc, pi, DRY_AIR.pRef * Math.pow(pi, cp / rd), dt, this.opts);
         m.th[q] = st.th; S[QV]![q] = st.qv; S[QC]![q] = st.qc; S[QR]![q] = st.qr; S[QI]![q] = st.qi; S[QS]![q] = st.qs; S[QG]![q] = st.qg;
       }
     }
@@ -161,11 +163,26 @@ function n0Snow(T: number): number { return Math.min(2e8, 2e6 * Math.exp(0.12 * 
 
 interface CellState { th: number; qv: number; qc: number; qr: number; qi: number; qs: number; qg: number }
 
+/** Switches of the saturation handling, changed from the page while the model runs (worker.ts 'micro' message; the GPU kernel reads the same two numbers). */
+export interface MicroOpts {
+  /** Ice supersaturation. On: below -40 °C vapour is brought back only to the saturation ratio at which solution droplets freeze by themselves (iceSCrit),
+   *  so the air can hold ice supersaturation as real cirrus does; off: it is brought to ice saturation at once. (Between -40 and 0 °C the ice grows at a finite rate either way.) */
+  iceSS: boolean;
+  /** Liquid-water supersaturation: the time (s) in which vapour above water saturation condenses (an exponential approach, stable for any step). 0: at once (saturation
+   *  adjustment, as always before; the air never holds more than saturation). Evaporation of cloud water stays instant. */
+  liqTau: number;
+}
+export const MICRO_DEFAULT: Readonly<MicroOpts> = { iceSS: true, liqTau: 0 };
+/** The switches of this page's models (the worker changes them; every IceMicrophysics and GPU model reads them). */
+export const microOpts: MicroOpts = { ...MICRO_DEFAULT };
+/** Saturation ratio over ice at which solution droplets freeze homogeneously, 2.349 - T/259 (Koop et al. 2000 as fitted by Kärcher & Lohmann 2002): 1.45 at -40 °C, 1.6 at -75 °C. */
+export const iceSCrit = (T: number): number => Math.max(1, 2.349 - T / 259);
+
 /**
  * All local microphysical processes of one grid cell over dt (process-split: phase changes forced by
  * temperature, then explicit ice-process rates with sink limiting, then the Kessler warm-rain step).
  */
-export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: number, p: number, dt: number): void {
+export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: number, p: number, dt: number, opt: Readonly<MicroOpts> = MICRO_DEFAULT): void {
   const cp = DRY_AIR.cp, T0 = ICE.T0, hv = ICE.LV / (cp * pi), hs = ICE.LS / (cp * pi), hf = LF / (cp * pi);
   let T = Math.max(T_FLOOR, s.th * pi);
   // ---- temperature-forced phase changes
@@ -267,6 +284,7 @@ export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: num
   const qvs = qvsWater(T, p);
   const f5 = 237.3 * 17.27 * ICE.LV / cp;
   let prod = (vv - qvs) / (1 + qvs * f5 / (T - 35.86) ** 2);
+  if (prod > 0 && opt.liqTau > 0) prod *= -Math.expm1(-dt / opt.liqTau);      // liquid supersaturation: condensation takes liqTau
   if (T < T0 - 40) prod = Math.min(prod, 0);                                  // no liquid condensation below -40 °C
   const rq = Math.max(rho * rr, 0);
   const ern = Math.min(dt * (((1.6 + 124.9 * Math.pow(rq, 0.2046)) * Math.pow(rq, 0.525)) / (2.55e8 / (p * qvs) + 5.4e5)) * (Math.max(qvs - vv, 0) / (rho * qvs)),
@@ -275,9 +293,9 @@ export function cellProcesses(s: CellState, rho: number, rhoSfc: number, pi: num
   s.th += hv * (product - ern);
   vv = Math.max(vv - product + ern, 0);
   s.qv = vv; s.qc = cc + product; s.qr = Math.max(rr - ern, 0);
-  // below -40 °C vapour in excess of ice saturation deposits directly (fast adjustment)
+  // below -40 °C vapour in excess of ice saturation (of the freezing threshold, with ice supersaturation on) deposits directly (fast adjustment)
   if (T < T0 - 40) {
-    const Tn = Math.max(T_FLOOR, s.th * pi), qsi2 = qvsIce(Tn, p);
+    const Tn = Math.max(T_FLOOR, s.th * pi), qsi2 = qvsIce(Tn, p) * (opt.iceSS ? iceSCrit(Tn) : 1);
     if (s.qv > qsi2) {
       const d = (s.qv - qsi2) / (1 + ICE.LS * ICE.LS * qsi2 / (cp * ICE.RV * Tn * Tn));
       s.qv -= d; s.qi += d; s.th += hs * d;

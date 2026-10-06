@@ -66,6 +66,8 @@ export type ToRegionalWorker =
   | { type: 'volMode'; mode: number }
   /** draw sub-grid (partial) cloud in the 3-D view and the visible image (display.ts) */
   | { type: 'subgrid'; on: boolean }
+  /** the saturation switches of the cloud physics (ice.ts MicroOpts): ice supersaturation, and the time (s) liquid water takes to condense (0: at once) */
+  | { type: 'micro'; iceSS?: boolean; liqTau?: number }
   /** tracer particles for the 3-D view (0: off) */
   | { type: 'tracers'; n: number }
   /** interaction (conditions only): a warm bubble or a cold pool centred at (x, y) m in domain coordinates, optionally

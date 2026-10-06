@@ -292,6 +292,15 @@ document.querySelectorAll<HTMLDetailsElement>('details[id]').forEach((d) => {
 $('backendSel').onchange = init;
 $('ground').onchange = (): void => send({ type: 'ground', field: $<HTMLSelectElement>('ground').value as GroundField });
 $('subgrid').onchange = (): void => send({ type: 'subgrid', on: $<HTMLInputElement>('subgrid').checked });
+// cloud-physics switches: ice supersaturation, and the time liquid water takes to condense (off: at once)
+const sendMicro = (): void => {
+  const on = $<HTMLInputElement>('liqSS').checked, tau = Number($<HTMLInputElement>('liqTau').value);
+  $<HTMLInputElement>('liqTau').disabled = !on;
+  send({ type: 'micro', iceSS: $<HTMLInputElement>('iceSS').checked, liqTau: on && tau > 0 ? tau * 60 : 0 });
+};
+$('iceSS').onchange = sendMicro; $('liqSS').onchange = sendMicro; $('liqTau').onchange = sendMicro;
+// (a browser may restore the form: tell the worker unless it is as the worker starts)
+if (!$<HTMLInputElement>('iceSS').checked || $<HTMLInputElement>('liqSS').checked) sendMicro();
 $('exag').oninput = (): void => {
   exag = Number($<HTMLInputElement>('exag').value); $('exagV').textContent = `${exag}×`;
   const f = replayIdx !== null ? rs().frames[replayIdx] : lastVol;

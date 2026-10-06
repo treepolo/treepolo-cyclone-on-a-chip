@@ -1,7 +1,7 @@
 // Regional-model worker: builds an experiment, steps it, and streams 3-D cloud / rain volumes.
 
 import { RegionalModel, type RegionalConfig } from '../../regional/core.js';
-import { IceMicrophysics, QV, qvsIce, qvsWater } from '../../regional/ice.js';
+import { IceMicrophysics, QV, qvsIce, qvsWater, microOpts } from '../../regional/ice.js';
 import { RegionalPhysics } from '../../regional/physics.js';
 import { tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
@@ -28,7 +28,7 @@ import { C, COL as NCOL, SECTION_VARS, MAP_VARS, pressure, qsatW, columnDiagnost
 let m: RegionalModel | null = null;
 let mp: IceMicrophysics | null = null;
 let experiment: RegionalExperiment = 'supercell';
-let running = false, stepsPerTick = 1, ground: GroundField = 'rain';
+let running = false, stepsPerTick = 1, ground: GroundField = 'none';
 let lastFrame = 0, rateSteps = 0, rateT = performance.now(), rate = 0;
 let dpEnv = 0;
 let gpu: GpuRegional | null = null;
@@ -587,6 +587,12 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'charts') { chartReq = msg.req; await refreshFrame(); }
     else if (msg.type === 'volMode') { volMode = msg.mode | 0; await refreshFrame(); }
     else if (msg.type === 'subgrid') { subgrid = msg.on; await refreshFrame(); }
+    else if (msg.type === 'micro') {
+      if (msg.iceSS !== undefined) microOpts.iceSS = !!msg.iceSS;
+      if (msg.liqTau !== undefined && Number.isFinite(msg.liqTau)) microOpts.liqTau = Math.max(0, msg.liqTau);
+      gpu?.syncMicro(); eye?.gpu?.syncMicro();
+      post({ type: 'log', text: `雲物理開關 / cloud-physics switches: 冰過飽和 ${microOpts.iceSS ? '開' : '關'} ice supersaturation ${microOpts.iceSS ? 'on' : 'off'}；液態水過飽和 ${microOpts.liqTau > 0 ? `開，凝結時間 ${fmtNum(microOpts.liqTau / 60)} 分 on, condensation time ${fmtNum(microOpts.liqTau / 60)} min` : '關 off'}` });
+    }
     else if (msg.type === 'tracers') {
       await waitIdle();
       tracerN = Math.max(0, Math.min(65536, msg.n | 0)); setupTracers(); await refreshFrame();

@@ -6,7 +6,7 @@ import { tropicalSounding, insertVortex, tcSounding } from '../../regional/tropi
 import { GpuRegional, COL } from '../regionalGpu.js';
 import { gcheck, getDevice } from './harness.js';
 import { nestFromGlobal, GlobalSnapshot } from '../../regional/nest.js';
-import { IceMicrophysics, QI, QS, QG } from '../../regional/ice.js';
+import { IceMicrophysics, QI, QS, QG, microOpts, qvsIce, qvsWater } from '../../regional/ice.js';
 import { C, columnDiagnostics, columnProfiles, azimuthalMeans, pressure } from '../../regional/diagnostics.js';
 import { Tracers } from '../../regional/tracers.js';
 import { applyWind, type WindForcing } from '../../regional/forcing.js';
@@ -752,4 +752,48 @@ export async function regionalBigEditTest(): Promise<void> {
   gcheck(`interactions on a grid of ${(cells / 1e6).toFixed(1)} M cells (more than 65535 workgroups): the bubble, the added vapour and the wind reach the top levels`,
     dTh > 4 && Math.abs(dQv - 0.002) < 2e-4 && dU > 5, `at level ${nz - 2}: theta +${dTh.toFixed(2)} K (want ~5), qv +${(dQv * 1000).toFixed(2)} g/kg (want ~2), u +${dU.toFixed(2)} m/s (want ~10)`);
   g.destroy();
+}
+
+// Ice and liquid-water supersaturation switches (ice.ts microOpts): the GPU ice kernel follows the CPU with each setting, and the settings do what they say:
+// off, the cold air is brought to ice saturation and the warm air to water saturation at once; on, they keep supersaturation
+export async function regionalSupersatTest(): Promise<void> {
+  const device = await getDevice();
+  const nx = 12, nz = 30, dx = 3000, dz = 600, dt = 6;
+  const keep = { ...microOpts };
+  const out: string[] = []; let ok = true;
+  const cases: { label: string; o: { iceSS: boolean; liqTau: number } }[] = [
+    { label: 'ice off, liquid at once', o: { iceSS: false, liqTau: 0 } }, { label: 'ice on, liquid at once', o: { iceSS: true, liqTau: 0 } }, { label: 'ice on, liquid 600 s', o: { iceSS: true, liqTau: 600 } },
+  ];
+  const peak: Record<string, { rhi: number; rhw: number }> = {};
+  for (const c of cases) {
+    Object.assign(microOpts, c.o);
+    const m = new RegionalModel({ nx, ny: nx, nz, dx, dy: dx, dz, dt, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 3000, dampRate: 1 / 300, kdiff2: 0 }, weismanKlemp, 6);
+    const mp = new IceMicrophysics(m);
+    for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) {
+      const q = m.idx(i, j, k), T = m.th0[k]! * m.pi0[k]!, p = 1e5 * Math.pow(m.pi0[k]!, 1004.5 / 287.05);
+      m.scalars[QV]![q] = m.zc[k]! > 9000 ? 1.3 * qvsIce(T, p) : m.zc[k]! < 3000 ? 1.15 * qvsWater(T, p) : m.qv0[k]!;
+    }
+    const g = new GpuRegional(device, m, { moist: true, physics: null, ice: true });
+    g.uploadFrom(m);
+    g.syncMicro();
+    for (let s = 0; s < 8; s++) { m.step(); mp.apply(dt); }
+    g.step(8);
+    const st = await g.readState();
+    const dq = [QV, QC, QI].map((sp) => cmp(m, st, 5 + sp, m.scalars[sp]!, nz));
+    // relative humidity of the CPU state at the cold levels (over ice) and the warm ones (over water)
+    let rhi = 0, rhw = 0;
+    for (let k = 0; k < nz; k++) for (let q0 = 0; q0 < nx * nx; q0++) {
+      const q = m.idx(q0 % nx, Math.floor(q0 / nx), k), pi = m.pi0[k]! + m.pp[q]!, T = m.th[q]! * pi, p = 1e5 * Math.pow(pi, 1004.5 / 287.05);
+      if (m.zc[k]! > 9500) rhi = Math.max(rhi, m.scalars[QV]![q]! / qvsIce(T, p)); else if (m.zc[k]! < 2500) rhw = Math.max(rhw, m.scalars[QV]![q]! / qvsWater(T, p));
+    }
+    peak[c.label] = { rhi, rhw };
+    const good = dq.every((x) => x < 2e-3);
+    ok = ok && good;
+    out.push(`${c.label}: GPU-CPU qv ${dq[0]!.toExponential(1)} qc ${dq[1]!.toExponential(1)} qi ${dq[2]!.toExponential(1)}; peak RH over ice aloft ${(100 * rhi).toFixed(0)} %, over water low ${(100 * rhw).toFixed(1)} %`);
+    g.destroy();
+  }
+  Object.assign(microOpts, keep);
+  const off = peak['ice off, liquid at once']!, on = peak['ice on, liquid at once']!, slow = peak['ice on, liquid 600 s']!;
+  const meaning = off.rhi < 1.02 && on.rhi > 1.2 && off.rhw < 1.02 && slow.rhw > on.rhw + 0.03;
+  gcheck('ice and liquid supersaturation switches: the GPU follows the CPU with each setting; off, the air is brought to saturation (RHi <= 102 %, RHw <= 102 %); ice on keeps RHi above 120 %; liquid 600 s keeps more water supersaturation', ok && meaning, out.join(' | '));
 }

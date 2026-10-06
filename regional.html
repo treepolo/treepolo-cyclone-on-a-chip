@@ -108,13 +108,19 @@ a{color:#8fc1ff}
 </details>
 
 <details id="secView" open><summary>顯示 / Display</summary>
-<label class="f"><span>地面 / Ground</span><select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="snow">累積雪與霰 / Snow + graupel</option><option value="wind">地面風速 / Surface wind</option><option value="theta">地面溫度擾動 / Surface θ′</option><option value="none">海陸（只看雲）/ Sea and land only</option></select></label>
+<label class="f"><span>地面 / Ground</span><select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="snow">累積雪與霰 / Snow + graupel</option><option value="wind">地面風速 / Surface wind</option><option value="theta">地面溫度擾動 / Surface θ′</option><option value="none" selected>海陸（只看雲）/ Sea and land only</option></select></label>
 <div id="legend" class="muted"></div>
 <label class="f"><span>雲的不透明度 / Cloud opacity</span><input id="cloudK" type="range" min="2" max="80" value="65" /></label>
 <label class="f" title="高度方向放大幾倍（1× 是真實比例：颱風其實很扁）/ how many times the heights are stretched (1× is true scale: a tropical cyclone is really flat)"><span>垂直誇大 / Vertical exaggeration <span id="exagV" class="muted">8×</span></span><input id="exag" type="range" min="1" max="15" step="0.5" value="8" /></label>
 <label class="f" title="廣角適合在颱風眼裡往上看整圈眼牆 / a wide angle suits looking up at the whole eyewall from inside the eye"><span>視野廣度 / Field of view <span id="fovV" class="muted">52°</span></span><input id="fov" type="range" min="20" max="140" value="52" /></label>
-<label class="f chk"><input id="showLabels" type="checkbox" checked /><span>顯示風暴標籤 / Storm labels</span></label>
+<label class="f chk"><input id="showLabels" type="checkbox" /><span>顯示風暴標籤 / Storm labels</span></label>
 <label class="f chk" title="粗網格的一格很大：平均濕度還沒到 100% 時，格子裡較濕的部分其實已經有雲（層積雲、層雲常見）。依 Smith (1990) 由相對濕度估計，只畫出來、不影響計算；網格越細越少 / a coarse grid box holds cloud in its moister part before its mean humidity reaches 100 % (stratocumulus, stratus); estimated from the relative humidity after Smith (1990), drawn only, fewer on finer grids"><input id="subgrid" type="checkbox" checked /><span>次網格雲量（部分雲）/ Sub-grid cloud</span></label>
+</details>
+
+<details id="secPhys" open><summary>雲物理開關 / Cloud-physics switches</summary>
+<label class="f chk" title="−40 °C 以下的空氣可以保持冰過飽和，直到水氣到達溶液滴自己結冰的臨界值（對冰約 145–160%）才凝華成冰，像真實的卷雲；關掉就是一超過冰飽和（對冰 100%）立刻凝華。−40 到 0 °C 之間冰本來就是以有限速率成長 / below −40 °C the air can hold ice supersaturation until the vapour reaches the threshold at which solution droplets freeze by themselves (about 145–160 % over ice), as real cirrus does; off: vapour beyond ice saturation (100 %) deposits at once. Between −40 and 0 °C ice grows at a finite rate either way"><input id="iceSS" type="checkbox" checked /><span>冰過飽和（−40 °C 以下）/ Ice supersaturation</span></label>
+<label class="f chk" title="水氣超過水飽和時，不是當步全部凝結，而是依下面的凝結時間慢慢凝結：空氣可以保持液態水過飽和，之後集中爆發（雲室、過熱液體的味道）。真實大氣的液態過飽和只有約 1%，所以這是「假如」的設定。凝結時間會用在所有格子，包含已經有雲的格子；雲水蒸發仍是立刻 / vapour above water saturation condenses with the time below instead of at once: the air can hold liquid supersaturation and release it later in a burst (cloud chamber, superheated liquid). Real liquid supersaturation is about 1 %, so this is a what-if. The time applies to every cell, cloudy ones too; evaporation of cloud water stays instant"><input id="liqSS" type="checkbox" /><span>液態水過飽和 / Liquid-water supersaturation</span></label>
+<label class="f"><span>凝結時間 / Condensation time (min)</span><input id="liqTau" type="number" min="0.1" step="1" value="10" disabled /></label>
 </details>
 
 <details id="secDiag" open><summary>診斷 / Diagnostics</summary>

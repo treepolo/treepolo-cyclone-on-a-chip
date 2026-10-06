@@ -729,4 +729,36 @@ void DRY_AIR;
     Math.abs(r - 100) < 1e-9 && rw > 62 && rw < 74 && Math.abs(warm - 50) < 1e-9 && Math.abs(qi / qvsIce(T, p) - 1) < 5e-3, `over ice ${r.toFixed(1)} %, over water ${rw.toFixed(1)} %, warm ${warm.toFixed(1)} %, qsatI/qvsIce ${(qi / qvsIce(T, p)).toFixed(4)}`);
 }
 
+// The saturation switches (ice.ts MicroOpts): ice supersaturation below -40 °C (default on, the threshold 2.349 - T/259) and liquid-water supersaturation
+// (condensation time; default 0, at once)
+{
+  const { qvsIce, qvsWater, iceSCrit, MICRO_DEFAULT } = await import('../regional/ice.js');
+  const mk = (T: number, p: number, qv: number): { st: { th: number; qv: number; qc: number; qr: number; qi: number; qs: number; qg: number }; pi: number; rho: number } => {
+    const pi = Math.pow(p / 1e5, DRY_AIR.rd / DRY_AIR.cp);
+    return { st: { th: T / pi, qv, qc: 0, qr: 0, qi: 0, qs: 0, qg: 0 }, pi, rho: p / (DRY_AIR.rd * T) };
+  };
+  const ratioI = (c: ReturnType<typeof mk>, p: number): number => c.st.qv / qvsIce(c.st.th * c.pi, p);
+  const ratioW = (c: ReturnType<typeof mk>, p: number): number => c.st.qv / qvsWater(c.st.th * c.pi, p);
+  // cold: 130 % over ice at -53 °C, then 200 %
+  const p1 = 25000, T1 = 220;
+  const onA = mk(T1, p1, 1.3 * qvsIce(T1, p1)), offA = mk(T1, p1, 1.3 * qvsIce(T1, p1)), onB = mk(T1, p1, 2.0 * qvsIce(T1, p1));
+  cellProcesses(onA.st, onA.rho, 1.1, onA.pi, p1, 20, { iceSS: true, liqTau: 0 });
+  cellProcesses(offA.st, offA.rho, 1.1, offA.pi, p1, 20, { iceSS: false, liqTau: 0 });
+  cellProcesses(onB.st, onB.rho, 1.1, onB.pi, p1, 20, { iceSS: true, liqTau: 0 });
+  const sc = iceSCrit(T1);
+  const coldOk = ratioI(onA, p1) > 1.2 && ratioI(offA, p1) < 1.001 && Math.abs(ratioI(onB, p1) - sc) < 0.02 && MICRO_DEFAULT.iceSS && MICRO_DEFAULT.liqTau === 0 && Math.abs(iceSCrit(233.15) - 1.449) < 0.001;
+  check('ice supersaturation (default on): at -53 °C 130 % over ice stays, 200 % comes back to the freezing threshold (about 150 %); off: brought to 100 % at once',
+    coldOk, `on 130 % -> ${(100 * ratioI(onA, p1)).toFixed(0)} %, off -> ${(100 * ratioI(offA, p1)).toFixed(1)} %, on 200 % -> ${(100 * ratioI(onB, p1)).toFixed(0)} % (threshold ${(100 * sc).toFixed(0)} %)`);
+  // warm: 130 % over water at 17 °C
+  const p2 = 90000, T2 = 290;
+  const at0 = mk(T2, p2, 1.3 * qvsWater(T2, p2)), at600 = mk(T2, p2, 1.3 * qvsWater(T2, p2)), at600b = mk(T2, p2, 1.3 * qvsWater(T2, p2));
+  cellProcesses(at0.st, at0.rho, 1.1, at0.pi, p2, 20, { iceSS: true, liqTau: 0 });
+  cellProcesses(at600.st, at600.rho, 1.1, at600.pi, p2, 20, { iceSS: true, liqTau: 600 });
+  const r1 = ratioW(at600, p2);
+  for (let n = 0; n < 99; n++) cellProcesses(at600b.st, at600b.rho, 1.1, at600b.pi, p2, 20, { iceSS: true, liqTau: 600 });
+  const r100 = ratioW(at600b, p2);
+  check('liquid-water supersaturation (default off): at once, 130 % over water is condensed in one step; with a condensation time of 600 s it stays (about 129 % after 20 s) and relaxes towards 100 % over some time constants',
+    ratioW(at0, p2) < 1.001 && r1 > 1.25 && r1 < 1.299 && r100 < 1.1 && r100 > 1.0 && at600.st.qc > 0, `at once -> ${(100 * ratioW(at0, p2)).toFixed(1)} %, 600 s: ${(100 * r1).toFixed(1)} % after 20 s, ${(100 * r100).toFixed(1)} % after 2000 s`);
+}
+
 summary('regional');

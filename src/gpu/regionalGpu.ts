@@ -8,7 +8,7 @@
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { T_FLOOR, VT_MAX } from '../core/constants.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
-import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2 } from '../regional/ice.js';
+import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2, microOpts } from '../regional/ice.js';
 import { COL, WV_PATH, ETOP_DBZ, VIL_ZMAX, level500, levelNear } from '../regional/diagnostics.js';
 import { FORCING_TAU, MAX_FORCINGS, forcingTable, type WindForcing } from '../regional/forcing.js';
 import { CU_TAU, CU_RH, CU_MIN_DEPTH, CU_DETRAIN, CU_DETRAIN_DEPTH, cumulusScale } from '../regional/cumulus.js';
@@ -232,7 +232,9 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
     const nInt = nx * ny * nz, nInt1 = nx * ny * (nz + 1), nCol = nx * ny;
     const save = disp(pSave, bg(pSave, [this.S, this.S0]), NF * size, 'save state');
     const pIce = this.nq === 6 ? pipe(iceWgsl()) : null;
-    const kes = pIce ? disp(pIce, bg(pIce, [this.S, baseBuf, this.aux, this.params[2]!]), nCol, 'microphysics (ice)') : disp(pKes, bg(pKes, [this.S, baseBuf, this.aux, this.params[2]!]), nCol, 'microphysics (Kessler)');
+    this.microBuf = pIce ? device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }) : null;
+    this.syncMicro();
+    const kes = pIce ? disp(pIce, bg(pIce, [this.S, baseBuf, this.aux, this.params[2]!, this.microBuf!]), nCol, 'microphysics (ice)') : disp(pKes, bg(pKes, [this.S, baseBuf, this.aux, this.params[2]!]), nCol, 'microphysics (Kessler)');
     this.passes = [];
     const seq: Pass[] = [];
     if (pFlag && pDx && pDy) {
@@ -580,6 +582,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   private readonly baseBuf: GPUBuffer;
+  private readonly microBuf: GPUBuffer | null;
+  /** Take the saturation switches (ice.ts microOpts) into the ice kernel: call after the worker changed them. */
+  syncMicro(): void {
+    if (this.microBuf) this.device.queue.writeBuffer(this.microBuf, 0, new Float32Array([microOpts.iceSS ? 1 : 0, Math.max(0, microOpts.liqTau), 0, 0]));
+  }
   private editK: { pipe: GPUComputePipeline; E: GPUBuffer; bind: GPUBindGroup } | null = null;
   /**
    * Change the state in place (the interactions of the regional page; worker.ts does the same to a CPU model): a warm or
@@ -1838,6 +1845,7 @@ const iceWgsl = (): string => {
 ${BASE_FNS}
 @group(0) @binding(2) var<storage, read_write> A: array<f32>;
 @group(0) @binding(3) var<uniform> p: P;
+@group(0) @binding(4) var<uniform> MO: vec4<f32>;     // saturation switches: x 1 = ice supersaturation, y = liquid condensation time (s, 0 = at once)
 const T0: f32 = ${c(ICE.T0)}; const LVI: f32 = ${c(ICE.LV)}; const LSI: f32 = ${c(ICE.LS)}; const LFI: f32 = ${c(LF)}; const RV: f32 = ${c(ICE.RV)};
 const RHOW: f32 = 1000.0; const N0R: f32 = ${c(ICE.N0R)}; const AR: f32 = ${c(ICE.AR)}; const BR: f32 = ${c(ICE.BR)};
 const RHOS: f32 = ${c(ICE.RHOS)}; const AS: f32 = ${c(ICE.AS)}; const BS: f32 = ${c(ICE.BS)};
@@ -1999,6 +2007,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let qvs = qvsw(T, pr);
     let f5c = 237.3 * 17.27 * LVI / CP;
     var prod = (qv - qvs) / (1.0 + qvs * f5c / ((T - 35.86) * (T - 35.86)));
+    if (prod > 0.0 && MO.y > 0.0) { prod *= 1.0 - exp(-dt / MO.y); }
     if (T < T0 - 40.0) { prod = min(prod, 0.0); }
     let rqq = max(rho * qr, 0.0);
     var ern = 0.0;
@@ -2011,7 +2020,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     qc = qc + product;
     qr = max(qr - ern, 0.0);
     if (T < T0 - 40.0) {
-      let Tn = max(th * pi, TFLOOR); let qsi2 = qvsi(Tn, pr);
+      let Tn = max(th * pi, TFLOOR); let qsi2 = qvsi(Tn, pr) * select(1.0, max(1.0, 2.349 - Tn / 259.0), MO.x > 0.5);
       if (qv > qsi2) { let d = (qv - qsi2) / (1.0 + LSI * LSI * qsi2 / (CP * RV * Tn * Tn)); qv -= d; qi += d; th += hs * d; }
     }
     S[3u * SIZE + q] = th;
