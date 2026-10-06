@@ -11,6 +11,7 @@ import { C, columnDiagnostics, columnProfiles, azimuthalMeans, pressure } from '
 import { Tracers } from '../../regional/tracers.js';
 import { applyWind, type WindForcing } from '../../regional/forcing.js';
 import { nextDt, bubbleDt } from '../../regional/stepControl.js';
+import { vortexPatch, applyVortexPatch } from '../../regional/vortex.js';
 import { T_FLOOR } from '../../core/constants.js';
 import { cloudExtinction, precipExtinction, extByte, subgridCloud, subgridRHc, qsatW } from '../../regional/display.js';
 
@@ -872,4 +873,23 @@ export async function regionalCompoundTest(): Promise<void> {
     gcheck('25 interactions of every kind and absurd strength in turn (vapour +0.5 kg/kg and x1000, +10^5 K, cold -500 K, 3000 m/s) leave the GPU state finite', bad2 < 0, bad2 < 0 ? 'finite throughout' : last);
     g2.destroy();
   }
+}
+
+// The vortex patch on the GPU (addPatch) is what the CPU adds (applyVortexPatch), also where it wraps round the edge of a periodic domain
+export async function regionalVortexTest(): Promise<void> {
+  const device = await getDevice();
+  const cfg = { nx: 24, ny: 24, nz: 16, dx: 3000, dy: 3000, dz: 800, dt: 8, nsound: 6, f: 5e-5, beta: 0.2, divDamp: 0.1, dampDepth: 3000, dampRate: 1 / 300, kdiff2: 0, lateral: 'periodic' as const };
+  const m = new RegionalModel(cfg, weismanKlemp, 6);
+  m.setBaseWind((z) => ({ u: 4 * Math.tanh(z / 3000), v: -1 }));
+  for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+  const g = new GpuRegional(device, m, { moist: true, physics: null });
+  g.uploadFrom(m);
+  const before = await g.readState();
+  const specs = [{ x: 10000, y: 36000, z: 0, R: 28000, rm: 8000, H: 6000, vmax: 40, dir: 1 as const }, { x: 50000, y: 60000, z: 6000, R: 26000, rm: 7000, H: 3000, vmax: 25, dir: -1 as const }];
+  for (const sp of specs) { const patch = vortexPatch(m, sp); applyVortexPatch(m, patch); g.addPatch(patch); }
+  const st = await g.readState();
+  const e = [0, 1, 3, 4].map((f) => cmp(m, st, f, f === 0 ? m.u : f === 1 ? m.v : f === 3 ? m.th : m.pp, cfg.nz));
+  let change = 0; for (let q = 0; q < m.size; q++) change = Math.max(change, Math.abs(st[q]! - before[q]!), Math.abs(st[m.size + q]! - before[m.size + q]!));
+  gcheck('vortex patches on the GPU (one wrapping round the periodic edge, one clockwise aloft) are what the CPU adds (u, v, theta, pi: rel L2 < 1e-6)', e.every((x) => x < 1e-6) && change > 20, `u ${e[0]!.toExponential(1)} v ${e[1]!.toExponential(1)} theta ${e[2]!.toExponential(1)} pi ${e[3]!.toExponential(1)}; largest wind change ${change.toFixed(1)} m/s`);
+  g.destroy();
 }

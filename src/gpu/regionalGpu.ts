@@ -8,6 +8,7 @@
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
 import { T_FLOOR, VT_MAX, T_CEIL, Q_CEIL, V_CEIL, PI_CEIL } from '../core/constants.js';
 import { noGuard, type GuardCounts } from '../regional/guard.js';
+import type { VortexPatch } from '../regional/vortex.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2, microOpts } from '../regional/ice.js';
 import { COL, WV_PATH, ETOP_DBZ, VIL_ZMAX, level500, levelNear } from '../regional/diagnostics.js';
@@ -598,6 +599,45 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); dispatchLinear(pass, nx * ny * (nz + 1)); pass.end();
     dev.queue.submit([enc.finish()]);
     dev.queue.writeBuffer(k.T, 0, forcingTable(this.forcings));
+    this.guardNow();
+  }
+
+  private patchK: { pipe: GPUComputePipeline; U: GPUBuffer } | null = null;
+  /** Add a patch of increments (u, v, theta, Exner perturbation: vortex.ts) to the state; the cells of a periodic domain wrap round. */
+  addPatch(p: VortexPatch): void {
+    const dev = this.device, { nz } = this.cpu.c, N = p.ni * p.nj * p.nz;
+    if (!N || p.nz !== nz) return;
+    if (!this.patchK) {
+      const code = this.consts + linearGid(`
+@group(0) @binding(0) var<storage, read_write> S: array<f32>;
+@group(0) @binding(1) var<storage, read> PT: array<f32>;
+@group(0) @binding(2) var<uniform> PP: vec4<i32>;     // i0, j0, ni, nj
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  let n2 = u32(PP.z * PP.w);
+  if (t >= n2 * NZ) { return; }
+  let k = t / n2; let r2 = t % n2; let jj = i32(r2 / u32(PP.z)); let ii = i32(r2 % u32(PP.z));
+  var i = PP.x + ii; var j = PP.y + jj;
+  if (OPEN) { if (i < 0 || i >= i32(NX) || j < 0 || j >= i32(NY)) { return; } }
+  else { i = ((i % i32(NX)) + i32(NX)) % i32(NX); j = ((j % i32(NY)) + i32(NY)) % i32(NY); }
+  let q = ix(u32(i), u32(j), k); let N = n2 * NZ;
+  S[q] = S[q] + PT[t]; S[SIZE + q] = S[SIZE + q] + PT[N + t];
+  S[3u * SIZE + q] = S[3u * SIZE + q] + PT[2u * N + t]; S[4u * SIZE + q] = S[4u * SIZE + q] + PT[3u * N + t];
+}`);
+      const pipe = dev.createComputePipeline({ layout: 'auto', compute: { module: dev.createShaderModule({ code }), entryPoint: 'main' } });
+      this.patchK = { pipe, U: dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }) };
+    }
+    const data = new Float32Array(4 * N);
+    data.set(p.du, 0); data.set(p.dv, N); data.set(p.dth, 2 * N); data.set(p.dpp, 3 * N);
+    const PT = dev.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(PT, 0, data);
+    dev.queue.writeBuffer(this.patchK.U, 0, new Int32Array([p.i0, p.j0, p.ni, p.nj]));
+    const bind = dev.createBindGroup({ layout: this.patchK.pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: PT } }, { binding: 2, resource: { buffer: this.patchK.U } }] });
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    pass.setPipeline(this.patchK.pipe); pass.setBindGroup(0, bind); dispatchLinear(pass, N); pass.end();
+    dev.queue.submit([enc.finish()]);
+    void dev.queue.onSubmittedWorkDone().then(() => PT.destroy());
     this.guardNow();
   }
 

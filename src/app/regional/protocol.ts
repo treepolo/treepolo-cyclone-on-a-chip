@@ -74,6 +74,9 @@ export type ToRegionalWorker =
    *  at height z (m; default 1.5 km warm, the ground cold) with horizontal radius and full depth (m) and theta amplitude
    *  amp (K; default +3 warm, -6 cold) */
   | { type: 'perturb'; kind: 'warm' | 'cold'; x: number; y: number; z?: number; radius?: number; depth?: number; amp?: number }
+  /** a vortex added at (x, y) m: strongest wind `vmax` (m/s) at height z (m: the ground for a warm-core vortex, aloft for a cold-core one) and radius `rm` (m; 0: a fifth
+   *  of the outer radius), outer `radius` and full `depth` (m) as the other tools, `dir` +1 counter-clockwise, -1 clockwise; balanced pressure and temperature (vortex.ts) */
+  | { type: 'vortex'; kind: 'warm' | 'cold'; x: number; y: number; z: number; radius: number; depth: number; vmax: number; rm: number; dir: 1 | -1 }
   /** change the water vapour in a region (centre x, y, z, radius, full depth, m): multiply it by `amount`, add `amount` g/kg (negative removes), or
    *  move it towards the relative humidity `amount` % (over water); the cos^2 envelope of the region weights the change */
   | { type: 'moisture'; x: number; y: number; z: number; radius: number; depth: number; mode: 'mul' | 'add' | 'rh'; amount: number }

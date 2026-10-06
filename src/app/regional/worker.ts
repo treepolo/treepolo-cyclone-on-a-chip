@@ -22,6 +22,7 @@ import { EyeNest, syncModel } from './eyeNest.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { nextDt, soundSpeed, bubbleDt, CFL_DEFAULT } from '../../regional/stepControl.js';
 import { T_FLOOR } from '../../core/constants.js';
+import { vortexPatch, applyVortexPatch, type VortexSpec } from '../../regional/vortex.js';
 import { guardModel, guardNotes, guardAny, addGuard, noGuard, type GuardCounts } from '../../regional/guard.js';
 import { quant, metaOf, modelFromMeta, loadState, packState, type Q16, type ReplayAux, type ReplayMeta, type ReplayRec, type ReplayTier } from '../../regional/replayData.js';
 import { C, COL as NCOL, SECTION_VARS, MAP_VARS, pressure, qsatW, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
@@ -894,7 +895,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       busy = false; running = wasRunning;
     }
     else if (msg.type === 'clearForcing') { clearForcings(); if (!running) await refreshFrame(); }
-    else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment' || msg.type === 'moisture' || msg.type === 'wind') {
+    else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment' || msg.type === 'moisture' || msg.type === 'wind' || msg.type === 'vortex') {
       if (!m || !mp) { post({ type: 'error', message: '這個實驗不支援此互動（軸對稱模式請改用參數面板）/ this experiment does not support this interaction (use the panel for the axisymmetric model)' }); return; }
       if (gpu && stepping && msg.type !== 'environment') {
         // at once, behind the steps in flight (no lock: nothing is read back or rebuilt)
@@ -1138,7 +1139,7 @@ const fmtNum = (x: number): string => (Math.abs(x) >= 1e5 || (x !== 0 && Math.ab
  * (a region larger than the domain, a cold pool colder than T_FLOOR, a sea colder than ice or hotter than boiling), the
  * answer says what was done instead.
  */
-async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'paint' | 'environment' | 'moisture' | 'wind' }>): Promise<string> {
+async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'paint' | 'environment' | 'moisture' | 'wind' | 'vortex' }>): Promise<string> {
   const mm = m!, { nx, ny, nz, dx, dy } = mm.c, L = Math.min(nx * dx, ny * dy);
   if (msg.type === 'paint') {
     const sf = phys?.surface;
@@ -1268,6 +1269,20 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (!warm && (mm.th0[kc]! + amp) * mm.pi0[kc]! < T_FLOOR) notes.push(`最冷處到了下限 ${T_FLOOR} K（−173 °C），不能再冷 / the coldest air reached ${T_FLOOR} K, the floor`);
     await stepAfterChange(Math.abs(amp));
     return done(`${warm ? '放暖泡 / warm bubble' : '放冷池 / cold pool'} ${amp >= 0 ? '+' : '−'}${fmtNum(Math.abs(amp))} K at (${(msg.x / 1000).toFixed(1)}, ${(msg.y / 1000).toFixed(1)}) km, ${(zc / 1000).toFixed(1)} km high; ${reach(rh, rz, zc)}`);
+  }
+  if (msg.type === 'vortex') {
+    // a vortex added to the state: tangential wind, with the pressure and temperature that balance it (vortex.ts); at most half the domain across
+    let R = clampR(msg.radius, 100000);
+    if (R > 0.5 * L) { notes.push(`半徑 ${(R / 1000).toFixed(0)} km 改成 ${(L / 2000).toFixed(0)} km：渦旋至多半個網域寬 / radius made ${(L / 2000).toFixed(0)} km: a vortex is at most half the domain across`); R = 0.5 * L; }
+    const H = clampH(msg.depth), z = Math.max(0, Math.min(top, Number.isFinite(msg.z) ? msg.z : 0));
+    const rm = msg.rm > 0 ? Math.min(msg.rm, 0.8 * R) : R / 5;
+    const spec: VortexSpec = { x: msg.x, y: msg.y, z, R, rm, H, vmax: Math.max(0, Number.isFinite(msg.vmax) ? msg.vmax : 30), dir: msg.dir === -1 ? -1 : 1 };
+    const patch = vortexPatch(mm, spec, 0, 0), ep = eye ? vortexPatch(eye.m, spec, eye.x0, eye.y0) : null;
+    if (onGpu) { gpu!.addPatch(patch); if (eye && ep) eye.gpu?.addPatch(ep); }
+    else { applyVortexPatch(mm, patch); if (eye && ep) applyVortexPatch(eye.m, ep); }
+    await stepAfterChange();
+    const dp = patch.dpCentre;
+    return done(`${msg.kind === 'warm' ? '放暖心渦旋 / warm-core vortex' : '放冷心渦旋 / cold-core vortex'} ${spec.dir > 0 ? '逆時針 / counter-clockwise' : '順時針 / clockwise'}：最強風 / strongest wind ${fmtNum(spec.vmax)} m/s，最大風半徑約 / radius of maximum wind about ${fmtNum(rm / 1000)} km，最強風高度 / at ${(z / 1000).toFixed(1)} km，地面氣壓${dp <= 0 ? '降' : '升'} / surface pressure ${dp <= 0 ? '−' : '+'}${fmtNum(Math.abs(dp))} hPa at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km; ${reach(R, H, z)}`);
   }
   // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km, as asked
   const du6 = Number.isFinite(msg.du6) ? msg.du6 : 0, humidity = Math.max(0, Number.isFinite(msg.humidity) ? msg.humidity : 1);

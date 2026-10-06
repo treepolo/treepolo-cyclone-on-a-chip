@@ -3,13 +3,15 @@
 import type { VolumeView } from './volume.js';
 import type { ForcingInfo, ToRegionalWorker } from './protocol.js';
 
-type Tool = 'view' | 'warm' | 'cold' | 'moist' | 'dry' | 'wind' | 'land' | 'sea' | 'warmer' | 'cooler';
+type Tool = 'view' | 'warm' | 'cold' | 'moist' | 'dry' | 'wind' | 'vortexW' | 'vortexC' | 'land' | 'sea' | 'warmer' | 'cooler';
 const TOOLS: { t: Tool; label: string; tip: string }[] = [
   { t: 'view', label: '視角', tip: '轉動相機（不互動）/ camera only' },
   { t: 'warm', label: '暖泡', tip: '點地面：在設定高度放暖泡 +3 K / tap: warm bubble at the set height' },
   { t: 'cold', label: '冷池', tip: '點地面：放冷空氣 −6 K / tap: cold air' },
   { t: 'moist', label: '增濕', tip: '點地面：水氣 ×1.3（可改成「加 g/kg」或「調到相對濕度」；超過飽和的水氣會凝結）/ tap: vapour ×1.3, or add g/kg, or set towards a relative humidity (what the air cannot hold condenses)' },
   { t: 'dry', label: '變乾', tip: '點地面：水氣 ×0.7（也可減 g/kg 或調到相對濕度）/ tap: vapour ×0.7 (or remove g/kg, or set towards a relative humidity)' },
+  { t: 'vortexW', label: '暖心渦旋', tip: '點地面：加一個暖心渦旋（最強風在地面，往上減弱，像颱風；最強風、半徑、方向可調）/ tap: a warm-core vortex (strongest wind at the ground, weaker above, like a tropical cyclone; strength, size and direction set below)' },
+  { t: 'vortexC', label: '冷心渦旋', tip: '點地面：加一個冷心渦旋（最強風在高處，下方是冷心，像高空冷低壓；高度、最強風、半徑、方向可調）/ tap: a cold-core vortex (strongest wind aloft, cold below it, like an upper-level cold low; height, strength, size and direction set below)' },
   { t: 'wind', label: '風', tip: '點地面：加一陣風或持續的風（方向、仰角、形式、範圍可選）/ tap: a wind once or lasting' },
   { t: 'land', label: '陸地', tip: '拖曳塗陸地 / drag: paint land' },
   { t: 'sea', label: '海洋', tip: '拖曳塗海洋 / drag: paint sea' },
@@ -70,6 +72,9 @@ export class Tools3D {
       row('溫度幅度 / Amplitude (K)', num(3, 0.5), 'amp', 'bubbleOnly byAmp'),
       row('熱含量 / Heat (×10¹⁵ J)', num(10, 1), 'heat', 'bubbleOnly byHeat'),
       heat,
+      row('最強風 / Strongest wind (m/s)', num(40, 5), 'vmax', 'vortexOnly'),
+      row('最大風半徑 / Radius of max wind (km, 0 = 外半徑的 1/5 / a fifth of the radius)', num(0, 5), 'rmw', 'vortexOnly'),
+      row('旋轉 / Spin', sel([['ccw', '逆時針（北半球氣旋）/ counter-clockwise'], ['cw', '順時針 / clockwise']], 'ccw'), 'spin', 'vortexOnly'),
       row('方式 / Mode', sel([['mul', '乘倍數 / ×'], ['add', '加減 g/kg / ±'], ['rh', '設相對濕度 / RH']], 'mul'), 'mmode', 'moistOnly'),
       row('水氣倍數 / Vapour ×', num(1.3, 0.05), 'fac', 'moistOnly moistMul'),
       row('水氣量 / Vapour (g/kg)', num(1, 0.5), 'addq', 'moistOnly moistAdd'),
@@ -135,10 +140,15 @@ export class Tools3D {
     if (t === 'warm' || t === 'cold') { (this.el.amp as HTMLInputElement).value = t === 'warm' ? '3' : '6'; }
     if (t === 'moist' || t === 'dry') { (this.el.fac as HTMLInputElement).value = t === 'moist' ? '1.3' : '0.7'; (this.el.rhT as HTMLInputElement).value = t === 'moist' ? '100' : '20'; }
     if (t === 'warmer' || t === 'cooler') { (this.el.dsst as HTMLInputElement).value = '2'; }
+    if (t === 'vortexW' || t === 'vortexC') {
+      (this.el.vmax as HTMLInputElement).value = t === 'vortexW' ? '40' : '25';
+      (this.el.depth as HTMLInputElement).value = t === 'vortexW' ? '24' : '10';
+      const g = this.grid; if (g) (this.el.r as HTMLInputElement).value = String(Math.round(Math.max(30, Math.min(300, g.Lx / 6000))));
+    }
     this.view.toolActive = t !== 'view';
     this.opts.parentElement!.querySelectorAll<HTMLButtonElement>('.tbtns button').forEach((b) => { b.className = b.dataset.t === t ? 'on' : ''; });
     // sensible heights per tool
-    const z = this.el.z as HTMLInputElement, zs: Partial<Record<Tool, number>> = { warm: 1.5, cold: 0, moist: 3, dry: 3, wind: 1 };
+    const z = this.el.z as HTMLInputElement, zs: Partial<Record<Tool, number>> = { warm: 1.5, cold: 0, moist: 3, dry: 3, wind: 1, vortexW: 0, vortexC: 10 };
     if (zs[t] !== undefined) { z.value = String(zs[t]); z.dispatchEvent(new Event('input')); }
     this.showOpts();
   }
@@ -146,7 +156,9 @@ export class Tools3D {
     const t = this.tool, paint = PAINT.includes(t), wind = t === 'wind', push = (this.el.form as HTMLSelectElement).value === 'push';
     this.opts.hidden = t === 'view';
     this.opts.querySelectorAll<HTMLElement>('.place').forEach((e) => { e.hidden = paint; });
-    this.opts.querySelectorAll<HTMLElement>('.vol').forEach((e) => { e.hidden = !(wind || t === 'moist' || t === 'dry'); });
+    const vortex = t === 'vortexW' || t === 'vortexC';
+    this.opts.querySelectorAll<HTMLElement>('.vol').forEach((e) => { e.hidden = !(wind || vortex || t === 'moist' || t === 'dry'); });
+    this.opts.querySelectorAll<HTMLElement>('.vortexOnly').forEach((e) => { e.hidden = !vortex; });
     this.opts.querySelectorAll<HTMLElement>('.windOnly').forEach((e) => { e.hidden = !wind; });
     this.opts.querySelectorAll<HTMLElement>('.pushOnly').forEach((e) => { e.hidden = !wind || !push; });
     const bubble = t === 'warm' || t === 'cold', byHeat = (this.el.by as HTMLSelectElement).value === 'heat';
@@ -169,7 +181,7 @@ export class Tools3D {
   private showCover(): void {
     const g = this.grid, t = this.tool, el = this.coverEl;
     if (!el) return;
-    const on = !!g && (t === 'warm' || t === 'cold' || t === 'moist' || t === 'dry' || t === 'wind');
+    const on = !!g && (t === 'warm' || t === 'cold' || t === 'moist' || t === 'dry' || t === 'wind' || t === 'vortexW' || t === 'vortexC');
     el.hidden = !on;
     if (!on || !g) return;
     const z = 1000 * this.val('z', 1.5), H = 500 * this.val('depth', 3), R = this.val('r', 10);
@@ -191,6 +203,9 @@ export class Tools3D {
     const p = this.ground(cx, cy); if (!p) return false;
     const R = 1000 * this.val('r', 10), z = 1000 * this.val('z', 1.5), depth = 1000 * this.val('depth', 3);
     if (t === 'warm' || t === 'cold') this.send({ type: 'perturb', kind: t, x: p.x, y: p.y, z, radius: R, depth, amp: this.bubble().amp });
+    else if (t === 'vortexW' || t === 'vortexC') {
+      this.send({ type: 'vortex', kind: t === 'vortexW' ? 'warm' : 'cold', x: p.x, y: p.y, z, radius: R, depth, vmax: Math.max(0, this.val('vmax', 40)), rm: Math.max(0, 1000 * this.val('rmw', 0)), dir: (this.el.spin as HTMLSelectElement).value === 'cw' ? -1 : 1 });
+    }
     else if (t === 'moist' || t === 'dry') {
       const mode = (this.el.mmode as HTMLSelectElement).value as 'mul' | 'add' | 'rh';
       const amount = mode === 'mul' ? Math.max(0, this.val('fac', t === 'moist' ? 1.3 : 0.7)) : mode === 'add' ? (t === 'moist' ? 1 : -1) * Math.abs(this.val('addq', 1)) : Math.max(0, this.val('rhT', 100));
@@ -257,6 +272,10 @@ export class Tools3D {
           if (this.tool === 'wind') {
             const f = (this.el.form as HTMLSelectElement).value;
             windShape({ x: at.x, y: at.y, z, radius: R, speed: 0, az: this.val('az', 90), el: this.val('el', 0), form: f === 'push' ? 'push' : f === 'in' || f === 'out' ? 'converge' : 'rotate', sign: f === 'cw' || f === 'out' ? -1 : 1 }, '#8fc1ff');
+          } else if (this.tool === 'vortexW' || this.tool === 'vortexC') {
+            const colour = this.tool === 'vortexW' ? '#e66767' : '#3987e5', rmw = this.val('rmw', 0) > 0 ? 1000 * this.val('rmw', 0) : R / 5;
+            windShape({ x: at.x, y: at.y, z, radius: R, speed: 0, az: 0, el: 0, form: 'rotate', sign: (this.el.spin as HTMLSelectElement).value === 'cw' ? -1 : 1 }, colour);
+            ring(at.x, at.y, z, Math.min(rmw, 0.8 * R), colour, '2 3');
           } else ring(at.x, at.y, z, R, this.tool === 'warm' ? '#e66767' : this.tool === 'cold' ? '#3987e5' : '#199e70');
         }
       }
