@@ -550,10 +550,10 @@ fn tgt(n: u32, px: f32, py: f32, pz: f32) -> vec4<f32> {
   if (!OPEN) { let lx = f32(NX) * DX; let ly = f32(NY) * DY; dx -= floor(dx / lx + 0.5) * lx; dy -= floor(dy / ly + 0.5) * ly; }
   let r = sqrt(dx * dx + dy * dy); let rh = r / a.w; let rz = abs(pz - a.z) / b.x;
   if (rh >= 1.0 || rz >= 1.0) { return vec4<f32>(0.0); }
-  let ch = cos(1.5707963 * rh); let cz = cos(1.5707963 * rz); let e = ch * ch * cz * cz;
+  let e = 1.0;
   if (b.z < 0.5) { return vec4<f32>(e, b.y * c.x, b.y * c.y, b.y * c.z); }
   if (r < 1e-6) { return vec4<f32>(e, 0.0, 0.0, 0.0); }
-  let sp = b.y * sin(3.14159265 * rh); let ux = dx / r; let uy = dy / r;
+  let sp = b.y; let ux = dx / r; let uy = dy / r;
   if (b.z < 1.5) { return vec4<f32>(e, -b.w * sp * uy, b.w * sp * ux, 0.0); }
   return vec4<f32>(e, -b.w * sp * ux, -b.w * sp * uy, 0.0);
 }
@@ -650,22 +650,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   private editK: { pipe: GPUComputePipeline; E: GPUBuffer; bind: GPUBindGroup } | null = null;
   /**
    * Change the state in place (the interactions of the regional page; worker.ts does the same to a CPU model): a warm or
-   * cold bubble (theta changes by `amp` cos^2 inside the ellipsoid, nothing colder than the temperature `floorT` K), or
+   * cold bubble (theta changes by `amp` all over the ellipsoid, nothing colder than the temperature `floorT` K), or
    * the water vapour of a region multiplied by `amount` (mode 'mul'), added `amount` kg/kg ('add'; never below zero) or
-   * moved towards the relative humidity `amount` (fraction, over water: 'rh'), each by the cos^2 envelope (the excess over
-   * saturation condenses in the next step). Positions in m;
+   * set to the relative humidity `amount` (fraction, over water: 'rh'), the same all over the region (the excess over
+   * saturation condenses in the next step), or the liquid or solid water of the region multiplied, added to or set (0 removes it all). Positions in m;
    * (ox, oy) is this model's origin in those coordinates (an inner grid's corner in the outer grid, else 0).
    */
   edit(e: { kind: 'bubble'; x: number; y: number; z: number; rh: number; rz: number; amp: number; floorT: number; warm: boolean; ox: number; oy: number }
-    | { kind: 'moisture'; x: number; y: number; z: number; R: number; H: number; mode: MoistMode; amount: number; ox: number; oy: number }): void {
+    | { kind: 'moisture'; x: number; y: number; z: number; R: number; H: number; mode: MoistMode; amount: number; ox: number; oy: number }
+    | { kind: 'condensate'; x: number; y: number; z: number; R: number; H: number; phase: 'liquid' | 'solid'; mode: 'mul' | 'add' | 'set'; amount: number; ox: number; oy: number }): void {
     const dev = this.device, m = this.cpu, { nx, ny, nz } = m.c;
+    if (e.kind === 'condensate' && this.nq < (e.phase === 'solid' ? 6 : 3)) return;      // no cloud water and rain (dry model) or no ice species in this model
     if (!this.editK) {
       const code = this.consts + linearGid(`
 @group(0) @binding(0) var<storage, read_write> S: array<f32>;
 @group(0) @binding(1) var<storage, read> base: array<f32>;
 @group(0) @binding(2) var<uniform> E: array<vec4<f32>, 3>;
 @group(0) @binding(3) var<storage, read> LZ: array<f32>;
-// E[0]: kind (0 bubble, 1 vapour times b.z, 2 vapour plus b.z kg/kg, 3 vapour towards the relative humidity b.z), centre x, y, z; E[1]: radius, vertical radius / half depth, amplitude or factor,
+// E[0]: kind (0 bubble, 1 vapour times b.z, 2 vapour plus b.z kg/kg, 3 vapour set to the relative humidity b.z, 4-6 liquid water times / plus / set to b.z, 7-9 solid water the same), centre x, y, z; E[1]: radius, vertical radius / half depth, amplitude or factor,
 // cap; E[2]: origin ox, oy, warm
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -678,23 +680,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (a.x < 0.5) {
     let r = sqrt((ex / b.x) * (ex / b.x) + (ey / b.x) * (ey / b.x) + ((zc - a.w) / b.y) * ((zc - a.w) / b.y));
     if (r >= 1.0) { return; }
-    let cc = cos(1.5707963 * r); let d = b.z * cc * cc;
     let th = S[3u * SIZE + q]; let pk = max(base[L + k] + S[4u * SIZE + q], 0.05);
-    S[3u * SIZE + q] = max(th + d, b.w / pk);
+    S[3u * SIZE + q] = max(th + b.z, b.w / pk);
     return;
   }
   if (!OPEN) { let lx = f32(NX) * DX; let ly = f32(NY) * DY; ex -= floor(ex / lx + 0.5) * lx; ey -= floor(ey / ly + 0.5) * ly; }
   let rh = sqrt(ex * ex + ey * ey) / b.x; let rz = abs(zc - a.w) / b.y;
   if (rh >= 1.0 || rz >= 1.0) { return; }
-  let ch = cos(1.5707963 * rh); let cz = cos(1.5707963 * rz); let e = ch * ch * cz * cz;
+  if (a.x > 3.5) {
+    // liquid (kinds 4-6: cloud water, rain) or solid water (7-9: ice, snow, graupel): the total is multiplied (mode 0), added to (1) or set (2); the kinds
+    // of water keep their shares (all in the first when there was none)
+    let solid = a.x > 6.5; let f0 = select(6u, 8u, solid); let nsp = select(2u, 3u, solid);
+    let mode = u32(a.x + 0.5) - select(4u, 7u, solid);
+    var tot = 0.0;
+    for (var f = f0; f < f0 + nsp; f++) { tot += max(S[f * SIZE + q], 0.0); }
+    var want = tot * b.z;
+    if (mode == 1u) { want = tot + b.z; }
+    if (mode == 2u) { want = b.z; }
+    want = max(want, 0.0);
+    if (want <= 0.0) { for (var f = f0; f < f0 + nsp; f++) { S[f * SIZE + q] = 0.0; } }
+    else if (tot > 0.0) { let sc = want / tot; for (var f = f0; f < f0 + nsp; f++) { S[f * SIZE + q] = max(S[f * SIZE + q], 0.0) * sc; } }
+    else { S[f0 * SIZE + q] = want; }
+    return;
+  }
   let qv = S[5u * SIZE + q];
-  var nq = qv * (1.0 + (b.z - 1.0) * e);
-  if (a.x > 1.5 && a.x < 2.5) { nq = qv + b.z * e; }
+  var nq = qv * b.z;
+  if (a.x > 1.5 && a.x < 2.5) { nq = qv + b.z; }
   if (a.x > 2.5) {
-    // towards the relative humidity b.z (over water, as the charts show it): qv + e (b.z qsat - qv)
+    // set to the relative humidity b.z (over water, as the charts show it)
     let pk = max(base[L + k] + S[4u * SIZE + q], 0.05); let T = max(S[3u * SIZE + q] * pk, TFLOOR);
     let es = 611.2 * exp(17.67 * (T - 273.15) / (T - 29.65)); let p = 1.0e5 * pow(pk, CP / RD);
-    nq = qv + e * (b.z * 0.622 * es / max(p - es, 1.0) - qv);
+    nq = b.z * 0.622 * es / max(p - es, 1.0);
   }
   S[5u * SIZE + q] = max(0.0, nq);
 }`);
@@ -705,6 +721,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       this.editK = { pipe, E, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: this.baseBuf } }, { binding: 2, resource: { buffer: E } }, { binding: 3, resource: { buffer: LZ } }] }) };
     }
     const E = e.kind === 'bubble' ? [0, e.x, e.y, e.z, e.rh, e.rz, e.amp, e.floorT, e.ox, e.oy, e.warm ? 1 : 0, 0]
+      : e.kind === 'condensate' ? [4 + (e.phase === 'solid' ? 3 : 0) + { mul: 0, add: 1, set: 2 }[e.mode], e.x, e.y, e.z, e.R, e.H, e.amount, 0, e.ox, e.oy, 0, 0]
       : [MOIST_KIND[e.mode], e.x, e.y, e.z, e.R, e.H, e.amount, 0, e.ox, e.oy, 0, 0];
     dev.queue.writeBuffer(this.editK.E, 0, new Float32Array(E));
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();

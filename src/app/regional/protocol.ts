@@ -79,8 +79,11 @@ export type ToRegionalWorker =
   /** a vortex added at (x, y) m: strongest wind `vmax` (m/s) at height z (m: the ground for a warm-core vortex, aloft for a cold-core one) and radius `rm` (m; 0: a fifth
    *  of the outer radius), outer `radius` and full `depth` (m) as the other tools, `dir` +1 counter-clockwise, -1 clockwise; balanced pressure and temperature (vortex.ts) */
   | { type: 'vortex'; kind: 'warm' | 'cold'; x: number; y: number; z: number; radius: number; depth: number; vmax: number; rm: number; dir: 1 | -1 }
+  /** the liquid water (cloud water and rain) or the solid water (ice, snow and graupel) of a region (centre x, y, z, radius, full depth, m): multiplied by `amount`,
+   *  added `amount` g/kg (negative removes), or set to `amount` g/kg (0 removes it all); the same all over the region */
+  | { type: 'condensate'; phase: 'liquid' | 'solid'; x: number; y: number; z: number; radius: number; depth: number; mode: 'mul' | 'add' | 'set'; amount: number }
   /** change the water vapour in a region (centre x, y, z, radius, full depth, m): multiply it by `amount`, add `amount` g/kg (negative removes), or
-   *  move it towards the relative humidity `amount` % (over water); the cos^2 envelope of the region weights the change */
+   *  set it to the relative humidity `amount` % (over water); the same all over the region */
   | { type: 'moisture'; x: number; y: number; z: number; radius: number; depth: number; mode: 'mul' | 'add' | 'rh'; amount: number }
   /** wind in a region (forcing.ts): speed (m/s), direction the push blows toward (az degrees clockwise from north,
    *  el degrees above the horizontal), form, sign (rotate: +1 counter-clockwise; converge: +1 inward); minutes 0: once,
@@ -89,7 +92,8 @@ export type ToRegionalWorker =
   /** stop every lasting wind forcing */
   | { type: 'clearForcing' }
   /** paint the surface within `radius` m of (x, y): sea temperature change of `amount` K (default 2) or land / sea */
-  | { type: 'paint'; kind: 'warmer' | 'cooler' | 'land' | 'sea'; x: number; y: number; radius: number; amount?: number }
+  /** paint the surface: land, sea, or the sea (surface) temperature set to `amount` °C */
+  | { type: 'paint'; kind: 'sst' | 'land' | 'sea'; x: number; y: number; radius: number; amount?: number }
   /** change the environment now: add du6 (m/s) of westerly wind at 6 km (linear from the ground) and multiply
    *  the 1-8 km water vapour by humidity (capped at saturation) */
   | { type: 'environment'; du6: number; humidity: number };

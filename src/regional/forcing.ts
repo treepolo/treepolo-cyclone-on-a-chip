@@ -2,12 +2,12 @@
 // toward a target (a steady push, a rotation or a convergence). Only the wind is touched; pressure, temperature, cloud
 // and rain respond through the equations.
 //
-// Region: centre (x, y, z), horizontal radius R and half-depth H; envelope e = cos^2(pi r / 2R) cos^2(pi |z - zc| / 2H)
-// inside, 0 outside. Target wind (departure from the background wind ub, vb):
+// Region: centre (x, y, z), horizontal radius R and half-depth H; the weight e is 1 inside (the strength is what was set all over the region: no fading toward
+// its edge) and 0 outside. Target wind (departure from the background wind ub, vb):
 //   push:     speed * (unit 3-D direction), the same everywhere in the region;
-//   rotate:   speed * s(r) * tangential unit (sign +1 counter-clockwise seen from above, -1 clockwise);
-//   converge: speed * s(r) * radial unit toward the centre (sign +1) or away from it (sign -1);
-// with s(r) = sin(pi r / R) (calm at the centre and the edge). A one-time wind adds e * target; a lasting one relaxes the
+//   rotate:   speed * tangential unit (sign +1 counter-clockwise seen from above, -1 clockwise), the same speed everywhere (calm only at the centre itself);
+//   converge: speed * radial unit toward the centre (sign +1) or away from it (sign -1).
+// A one-time wind adds e * target; a lasting one relaxes the
 // departure toward the target: d(u - ub)/dt = e (target - (u - ub)) / FORCING_TAU. w stays 0 at the ground and the lid.
 
 import type { RegionalModel } from './core.js';
@@ -30,10 +30,10 @@ export function forcingAt(f: WindForcing, px: number, py: number, pz: number, L:
   if (L) { dx -= Math.round(dx / L.x) * L.x; dy -= Math.round(dy / L.y) * L.y; }
   const r = Math.hypot(dx, dy), rh = r / f.R, rz = Math.abs(pz - f.z) / f.H;
   if (rh >= 1 || rz >= 1) return { e: 0, tu: 0, tv: 0, tw: 0 };
-  const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2;
+  const e = 1;
   if (f.form === 'push') return { e, tu: f.speed * f.dir[0], tv: f.speed * f.dir[1], tw: f.speed * f.dir[2] };
   if (r < 1e-6) return { e, tu: 0, tv: 0, tw: 0 };
-  const s = f.speed * Math.sin(Math.PI * rh), cx = dx / r, cy = dy / r;
+  const s = f.speed, cx = dx / r, cy = dy / r;
   if (f.form === 'rotate') return { e, tu: -f.sign * s * cy, tv: f.sign * s * cx, tw: 0 };
   return { e, tu: -f.sign * s * cx, tv: -f.sign * s * cy, tw: 0 };
 }

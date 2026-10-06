@@ -2,7 +2,7 @@
 // pressure that balances it (gradient wind: dpi'/dr = (v^2/r + f v) / (cp theta_v)) and the temperature that balances that (hydrostatic: theta' = cp theta_v^2 / g dpi'/dz).
 //
 // The wind is vt(r, z) = dir vmax g(r) h(z): g is a bell, (r/rm) exp((1 - (r/rm)^2) / 2) times cos^2(pi r / 2R), scaled so that its largest value is 1 (the wind
-// is vmax at the radius of maximum wind, which is rm up to the window), zero beyond the outer radius R; h is the cos^2 envelope of the other tools, 1 at the height z0
+// is vmax at the radius of maximum wind, which is rm up to the window), zero beyond the outer radius R; h is a cos^2 envelope (the other tools are flat inside their region; a vortex keeps its shape), 1 at the height z0
 // of the strongest wind and zero H above and below it. A wind that decreases upwards (z0 at the ground) is a warm-core vortex, as a tropical cyclone; one that increases
 // upwards (z0 aloft) is cold below that height, as a cold low in the upper troposphere. The result is an increment: it is added to the state (to winds, theta and the
 // Exner perturbation), so vortices add up, and an existing storm keeps its own flow. Nothing is remembered: it is a start, not a forcing.

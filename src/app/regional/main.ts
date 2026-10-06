@@ -63,7 +63,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
   interact: (kind, x, y, radius) => {
     if (replayIdx !== null) { log('回放中不能互動；先按「回到即時」/ no interaction during a replay: press Live first'); return; }
     if (kind === 'warm' || kind === 'cold') send({ type: 'perturb', kind, x, y });
-    else if (kind !== 'inspect') send({ type: 'paint', kind, x, y, radius });
+    else if (kind !== 'inspect') send({ type: 'paint', kind, x, y, radius, ...(kind === 'sst' ? { amount: tools.sstTarget() } : {}) });
   },
   camera: (mode) => { view.setCamera(mode); $('flyPad').hidden = mode !== 'fly'; },
   cut: (c) => view.setCut(c),

@@ -593,7 +593,7 @@ export async function regionalEditTest(): Promise<void> {
   for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {
     const r = Math.sqrt(((bub.ox + (i + 0.5) * 3000 - bub.x) / bub.rh) ** 2 + ((bub.oy + (j + 0.5) * 3000 - bub.y) / bub.rh) ** 2 + ((m.zc[k]! - bub.z) / bub.rz) ** 2);
     if (r >= 1) continue;
-    const q = m.idx(i, j, k), d = bub.amp * Math.cos(0.5 * Math.PI * r) ** 2;
+    const q = m.idx(i, j, k), d = bub.amp;
     m.th[q] = Math.max(m.th[q]! + d, bub.floorT / (m.pi0[k]! + m.pp[q]!));
   }
   const mo = { x: 70000, y: 5000, z: 2500, R: 15000, H: 2000, fac: 0.6 }, qv = m.scalars[QV]!;
@@ -602,7 +602,7 @@ export async function regionalEditTest(): Promise<void> {
     ex -= Math.round(ex / 72000) * 72000; ey -= Math.round(ey / 72000) * 72000;
     const rh = Math.hypot(ex, ey) / mo.R, rz = Math.abs(m.zc[k]! - mo.z) / mo.H;
     if (rh >= 1 || rz >= 1) continue;
-    const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = m.idx(i, j, k);
+    const e = 1, q = m.idx(i, j, k);
     qv[q] = Math.max(0, qv[q]! * (1 + (mo.fac - 1) * e));
   }
   const wf: WindForcing = { x: 30000, y: 40000, z: 2000, R: 15000, H: 1500, speed: 8, dir: [0, 0, 0], form: 'rotate', sign: 1 };
@@ -630,7 +630,7 @@ export async function regionalEditTest(): Promise<void> {
       let ex = (i + 0.5) * 3000 - r.x, ey = (j + 0.5) * 3000 - r.y;
       ex -= Math.round(ex / 72000) * 72000; ey -= Math.round(ey / 72000) * 72000;
       const a = Math.hypot(ex, ey) / r.R, b = Math.abs(md.zc[k]! - r.z) / r.H;
-      return a >= 1 || b >= 1 ? 0 : Math.cos(0.5 * Math.PI * a) ** 2 * Math.cos(0.5 * Math.PI * b) ** 2;
+      return a >= 1 || b >= 1 ? 0 : 1;
     };
     const q0 = Float64Array.from(qv);
     for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 24; j++) for (let i = 0; i < 24; i++) {

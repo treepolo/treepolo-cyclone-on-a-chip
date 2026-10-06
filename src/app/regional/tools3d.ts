@@ -3,7 +3,7 @@
 import type { VolumeView } from './volume.js';
 import type { ForcingInfo, ToRegionalWorker } from './protocol.js';
 
-type Tool = 'view' | 'warm' | 'cold' | 'moist' | 'dry' | 'wind' | 'vortexW' | 'vortexC' | 'land' | 'sea' | 'warmer' | 'cooler';
+type Tool = 'view' | 'warm' | 'cold' | 'moist' | 'dry' | 'liquid' | 'solid' | 'wind' | 'vortexW' | 'vortexC' | 'land' | 'sea' | 'sst';
 const TOOLS: { t: Tool; label: string; tip: string }[] = [
   { t: 'view', label: '視角', tip: '轉動相機（不互動）/ camera only' },
   { t: 'warm', label: '暖泡', tip: '點地面：在設定高度放暖泡 +3 K / tap: warm bubble at the set height' },
@@ -12,13 +12,14 @@ const TOOLS: { t: Tool; label: string; tip: string }[] = [
   { t: 'dry', label: '變乾', tip: '點地面：水氣 ×0.7（也可減 g/kg 或調到相對濕度）/ tap: vapour ×0.7 (or remove g/kg, or set towards a relative humidity)' },
   { t: 'vortexW', label: '暖心渦旋', tip: '點地面：加一個暖心渦旋（最強風在地面，往上減弱，像颱風；最強風、半徑、方向可調）/ tap: a warm-core vortex (strongest wind at the ground, weaker above, like a tropical cyclone; strength, size and direction set below)' },
   { t: 'vortexC', label: '冷心渦旋', tip: '點地面：加一個冷心渦旋（最強風在高處，下方是冷心，像高空冷低壓；高度、最強風、半徑、方向可調）/ tap: a cold-core vortex (strongest wind aloft, cold below it, like an upper-level cold low; height, strength, size and direction set below)' },
+  { t: 'liquid', label: '液態水', tip: '點地面：調整範圍內的液態水（雲水＋雨）含量：設為指定值（0 = 全部移除）、乘倍數或加減 / tap: the liquid water (cloud water + rain) of the region: set to a value (0 removes it all), multiplied or added to' },
+  { t: 'solid', label: '固態水', tip: '點地面：調整範圍內的固態水（冰＋雪＋霰）含量：設為指定值（0 = 全部移除）、乘倍數或加減 / tap: the solid water (ice + snow + graupel) of the region: set to a value (0 removes it all), multiplied or added to' },
   { t: 'wind', label: '風', tip: '點地面：加一陣風或持續的風（方向、仰角、形式、範圍可選）/ tap: a wind once or lasting' },
   { t: 'land', label: '陸地', tip: '拖曳塗陸地 / drag: paint land' },
   { t: 'sea', label: '海洋', tip: '拖曳塗海洋 / drag: paint sea' },
-  { t: 'warmer', label: '海溫+', tip: '拖曳：海溫 +2 °C / drag: sea 2 °C warmer' },
-  { t: 'cooler', label: '海溫−', tip: '拖曳：海溫 −2 °C / drag: sea 2 °C cooler' },
+  { t: 'sst', label: '設海溫', tip: '拖曳：把海溫設成指定溫度（°C），筆刷內都是這個溫度 / drag: set the sea temperature to the temperature given (°C), all over the brush' },
 ];
-const PAINT: Tool[] = ['land', 'sea', 'warmer', 'cooler'];
+const PAINT: Tool[] = ['land', 'sea', 'sst'];
 const DIRS = ['北 N', '東北 NE', '東 E', '東南 SE', '南 S', '西南 SW', '西 W', '西北 NW'];
 
 interface Grid { Lx: number; Ly: number; top: number; dx: number; dz: number; /** the run has a surface to paint; takes interactions at all (not the axisymmetric model) */ paint: boolean; interact: boolean }
@@ -79,7 +80,11 @@ export class Tools3D {
       row('水氣倍數 / Vapour ×', num(1.3, 0.05), 'fac', 'moistOnly moistMul'),
       row('水氣量 / Vapour (g/kg)', num(1, 0.5), 'addq', 'moistOnly moistAdd'),
       row('相對濕度 / RH (%)', num(100, 5), 'rhT', 'moistOnly moistRh'),
-      row('海溫變化 / Sea change (°C)', num(2, 0.5), 'dsst', 'sstOnly'),
+      row('方式 / Mode', sel([['set', '設為 g/kg / set'], ['mul', '乘倍數 / ×'], ['add', '加減 g/kg / ±']], 'set'), 'cmode', 'condOnly'),
+      row('含量 / Content (g/kg, 0 = 全部移除 / remove all)', num(0, 0.1), 'cset', 'condOnly condSet'),
+      row('倍數 / Factor (0 = 全部移除 / remove all)', num(0, 0.1), 'cmul', 'condOnly condMul'),
+      row('加減 / Add (g/kg, 負的 = 減 / negative removes)', num(-1, 0.1), 'cadd', 'condOnly condAdd'),
+      row('海溫 / Sea temperature (°C)', num(28, 0.5), 'dsst', 'sstOnly'),
       row('形式 / Form', sel([['push', '推送 / push'], ['ccw', '逆時針旋轉 / counter-clockwise'], ['cw', '順時針旋轉 / clockwise'], ['in', '輻合 / converge'], ['out', '輻散 / diverge']], 'push'), 'form', 'windOnly'),
       row('吹向 / Toward', sel(DIRS.map((d, n) => [String(n * 45), d]), '90'), 'az', 'windOnly pushOnly'),
       row('仰角 / Tilt', sel([['0', '水平 / level'], ['30', '上升 30° / up'], ['60', '上升 60°'], ['90', '垂直上升 / straight up'], ['-30', '下沉 30° / down'], ['-60', '下沉 60°'], ['-90', '垂直下沉 / straight down']], '0'), 'el', 'windOnly pushOnly'),
@@ -90,6 +95,7 @@ export class Tools3D {
     this.el.form!.addEventListener('change', () => this.showOpts());
     this.el.by!.addEventListener('change', () => this.showOpts());
     this.el.mmode!.addEventListener('change', () => this.showOpts());
+    this.el.cmode!.addEventListener('change', () => this.showOpts());
     for (const k of ['amp', 'heat', 'r', 'depth', 'z']) this.el[k]!.addEventListener('input', () => { this.showHeat(); this.showCover(); });
     view.onTap = (x, y): boolean => this.tap(x, y);
     view.onToolDrag = (x, y, phase): void => this.drag(x, y, phase);
@@ -117,13 +123,13 @@ export class Tools3D {
 
   private heatEl: HTMLElement | null = null;
   /**
-   * Bubble amplitude (K, signed) and heat content (J) from the panel. The bubble adds amp cos^2(pi r / 2) inside an
+   * Bubble amplitude (K, signed) and heat content (J) from the panel. The bubble adds amp all over an
    * ellipsoid of horizontal radius R and vertical radius H (half the depth); its heat content is
-   * rho cp amp R^2 H 4 pi (1/6 - 1/pi^2) with the air density at its centre height (standard atmosphere).
+   * rho cp amp (4/3) pi R^2 H with the air density at its centre height (standard atmosphere).
    */
   private bubble(): { amp: number; heat: number } {
     const R = 1000 * this.val('r', 10), H = 500 * this.val('depth', 3), z = 1000 * this.val('z', 1.5), rho = 1.2 * Math.exp(-z / 8500);
-    const k = rho * 1004.5 * R * R * H * 4 * Math.PI * (1 / 6 - 1 / (Math.PI * Math.PI)), sign = this.tool === 'cold' ? -1 : 1;
+    const k = rho * 1004.5 * R * R * H * 4 * Math.PI / 3, sign = this.tool === 'cold' ? -1 : 1;
     const byHeat = (this.el.by as HTMLSelectElement).value === 'heat';
     const amp = byHeat ? sign * Math.abs(this.val('heat', 10)) * 1e15 / k : sign * Math.abs(this.val('amp', 3));
     return { amp, heat: amp * k };
@@ -139,7 +145,7 @@ export class Tools3D {
     // defaults of the strength per tool
     if (t === 'warm' || t === 'cold') { (this.el.amp as HTMLInputElement).value = t === 'warm' ? '3' : '6'; }
     if (t === 'moist' || t === 'dry') { (this.el.fac as HTMLInputElement).value = t === 'moist' ? '1.3' : '0.7'; (this.el.rhT as HTMLInputElement).value = t === 'moist' ? '100' : '20'; }
-    if (t === 'warmer' || t === 'cooler') { (this.el.dsst as HTMLInputElement).value = '2'; }
+    if (t === 'sst') { (this.el.dsst as HTMLInputElement).value = this.el.dsst!.value || '28'; }
     if (t === 'vortexW' || t === 'vortexC') {
       (this.el.vmax as HTMLInputElement).value = t === 'vortexW' ? '40' : '25';
       (this.el.depth as HTMLInputElement).value = t === 'vortexW' ? '24' : '10';
@@ -148,7 +154,7 @@ export class Tools3D {
     this.view.toolActive = t !== 'view';
     this.opts.parentElement!.querySelectorAll<HTMLButtonElement>('.tbtns button').forEach((b) => { b.className = b.dataset.t === t ? 'on' : ''; });
     // sensible heights per tool
-    const z = this.el.z as HTMLInputElement, zs: Partial<Record<Tool, number>> = { warm: 1.5, cold: 0, moist: 3, dry: 3, wind: 1, vortexW: 0, vortexC: 10 };
+    const z = this.el.z as HTMLInputElement, zs: Partial<Record<Tool, number>> = { warm: 1.5, cold: 0, moist: 3, dry: 3, liquid: 3, solid: 8, wind: 1, vortexW: 0, vortexC: 10 };
     if (zs[t] !== undefined) { z.value = String(zs[t]); z.dispatchEvent(new Event('input')); }
     this.showOpts();
   }
@@ -156,8 +162,12 @@ export class Tools3D {
     const t = this.tool, paint = PAINT.includes(t), wind = t === 'wind', push = (this.el.form as HTMLSelectElement).value === 'push';
     this.opts.hidden = t === 'view';
     this.opts.querySelectorAll<HTMLElement>('.place').forEach((e) => { e.hidden = paint; });
-    const vortex = t === 'vortexW' || t === 'vortexC';
-    this.opts.querySelectorAll<HTMLElement>('.vol').forEach((e) => { e.hidden = !(wind || vortex || t === 'moist' || t === 'dry'); });
+    const vortex = t === 'vortexW' || t === 'vortexC', cond = t === 'liquid' || t === 'solid', cmode = (this.el.cmode as HTMLSelectElement).value;
+    this.opts.querySelectorAll<HTMLElement>('.vol').forEach((e) => { e.hidden = !(wind || vortex || cond || t === 'moist' || t === 'dry'); });
+    this.opts.querySelectorAll<HTMLElement>('.condOnly').forEach((e) => { e.hidden = !cond; });
+    this.opts.querySelectorAll<HTMLElement>('.condSet').forEach((e) => { e.hidden = !cond || cmode !== 'set'; });
+    this.opts.querySelectorAll<HTMLElement>('.condMul').forEach((e) => { e.hidden = !cond || cmode !== 'mul'; });
+    this.opts.querySelectorAll<HTMLElement>('.condAdd').forEach((e) => { e.hidden = !cond || cmode !== 'add'; });
     this.opts.querySelectorAll<HTMLElement>('.vortexOnly').forEach((e) => { e.hidden = !vortex; });
     this.opts.querySelectorAll<HTMLElement>('.windOnly').forEach((e) => { e.hidden = !wind; });
     this.opts.querySelectorAll<HTMLElement>('.pushOnly').forEach((e) => { e.hidden = !wind || !push; });
@@ -170,26 +180,28 @@ export class Tools3D {
     this.opts.querySelectorAll<HTMLElement>('.moistMul').forEach((e) => { e.hidden = !moist || mmode !== 'mul'; });
     this.opts.querySelectorAll<HTMLElement>('.moistAdd').forEach((e) => { e.hidden = !moist || mmode !== 'add'; });
     this.opts.querySelectorAll<HTMLElement>('.moistRh').forEach((e) => { e.hidden = !moist || mmode !== 'rh'; });
-    this.opts.querySelectorAll<HTMLElement>('.sstOnly').forEach((e) => { e.hidden = t !== 'warmer' && t !== 'cooler'; });
+    this.opts.querySelectorAll<HTMLElement>('.sstOnly').forEach((e) => { e.hidden = t !== 'sst'; });
     // bubbles use the depth too (their vertical size)
     if (bubble) this.opts.querySelectorAll<HTMLElement>('.vol').forEach((e) => { e.hidden = false; });
     this.showHeat();
     this.showCover();
   }
   private coverEl: HTMLElement | null = null;
-  /** The heights and radius a change reaches: the region is an ellipsoid centred at the height, as deep as the depth, weighted by cos^2 (1 at the centre, 0 at its edge). */
+  /** The heights and radius a change reaches: the region is centred at the height and as deep as the depth; the strength is the same all over it. */
   private showCover(): void {
     const g = this.grid, t = this.tool, el = this.coverEl;
     if (!el) return;
-    const on = !!g && (t === 'warm' || t === 'cold' || t === 'moist' || t === 'dry' || t === 'wind' || t === 'vortexW' || t === 'vortexC');
+    const on = !!g && (t === 'warm' || t === 'cold' || t === 'moist' || t === 'dry' || t === 'liquid' || t === 'solid' || t === 'wind' || t === 'vortexW' || t === 'vortexC');
     el.hidden = !on;
     if (!on || !g) return;
     const z = 1000 * this.val('z', 1.5), H = 500 * this.val('depth', 3), R = this.val('r', 10);
     const lo = Math.max(0, z - H) / 1000, hi = Math.min(g.top, z + H) / 1000;
-    el.textContent = `影響範圍：半徑 ${+R.toFixed(1)} km、高度 ${+lo.toFixed(1)}–${+hi.toFixed(1)} km（中心最強，往邊緣按 cos² 減弱；要涵蓋整個高度，高度設為深度的一半）`
-      + ` / radius ${+R.toFixed(1)} km, heights ${+lo.toFixed(1)}–${+hi.toFixed(1)} km (strongest at the centre, fading as cos²; to cover the whole height set the height to half the depth)`;
+    el.textContent = `影響範圍：半徑 ${+R.toFixed(1)} km、高度 ${+lo.toFixed(1)}–${+hi.toFixed(1)} km（範圍內強度都一樣；要涵蓋整個高度，高度設為深度的一半）`
+      + ` / radius ${+R.toFixed(1)} km, heights ${+lo.toFixed(1)}–${+hi.toFixed(1)} km (the same strength all over it; to cover the whole height set the height to half the depth)`;
   }
 
+  /** the sea temperature (°C) of the panel's 'set sea temperature' tool (the map's paint tool uses it too) */
+  sstTarget(): number { return this.val('dsst', 28); }
   private val(k: string, d: number): number { const v = Number(this.el[k]!.value); return Number.isFinite(v) ? v : d; }
   /** Ground point (domain m) under a screen point, or null (off the domain / sky). */
   private ground(cx: number, cy: number): { x: number; y: number } | null {
@@ -205,6 +217,11 @@ export class Tools3D {
     if (t === 'warm' || t === 'cold') this.send({ type: 'perturb', kind: t, x: p.x, y: p.y, z, radius: R, depth, amp: this.bubble().amp });
     else if (t === 'vortexW' || t === 'vortexC') {
       this.send({ type: 'vortex', kind: t === 'vortexW' ? 'warm' : 'cold', x: p.x, y: p.y, z, radius: R, depth, vmax: Math.max(0, this.val('vmax', 40)), rm: Math.max(0, 1000 * this.val('rmw', 0)), dir: (this.el.spin as HTMLSelectElement).value === 'cw' ? -1 : 1 });
+    }
+    else if (t === 'liquid' || t === 'solid') {
+      const mode = (this.el.cmode as HTMLSelectElement).value as 'set' | 'mul' | 'add';
+      const amount = mode === 'set' ? Math.max(0, this.val('cset', 0)) : mode === 'mul' ? Math.max(0, this.val('cmul', 0)) : this.val('cadd', -1);
+      this.send({ type: 'condensate', phase: t, x: p.x, y: p.y, z, radius: R, depth, mode, amount });
     }
     else if (t === 'moist' || t === 'dry') {
       const mode = (this.el.mmode as HTMLSelectElement).value as 'mul' | 'add' | 'rh';
@@ -226,7 +243,7 @@ export class Tools3D {
     // a stroke every half brush radius along the drag
     if (this.lastPaint && Math.hypot(p.x - this.lastPaint.x, p.y - this.lastPaint.y) < 0.5 * R) return;
     this.lastPaint = p; this.hover = p;
-    this.send({ type: 'paint', kind: t as 'land' | 'sea' | 'warmer' | 'cooler', x: p.x, y: p.y, radius: R, amount: Math.abs(this.val('dsst', 2)) });
+    this.send({ type: 'paint', kind: t as 'land' | 'sea' | 'sst', x: p.x, y: p.y, radius: R, amount: this.val('dsst', 28) });
   }
 
   /** Redraw the overlay (every animation frame: the camera moves). */

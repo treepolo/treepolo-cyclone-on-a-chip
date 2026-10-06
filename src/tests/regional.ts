@@ -637,7 +637,7 @@ void DRY_AIR;
     for (let k = 0; k < mm.c.nz; k++) for (let j = 0; j < mm.c.ny; j++) for (let i = 0; i < mm.c.nx; i++) {
       const rh = Math.hypot(((i + 0.5) * mm.c.dx - L / 2), ((j + 0.5) * mm.c.dy - L / 2)) / 10000, rz = Math.abs(mm.zc[k]! - 1000) / 2000;
       if (rh >= 1 || rz >= 1) continue;
-      const q = mm.idx(i, j, k); qv[q] = Math.max(0, qv[q]! * (1 + (fac - 1) * Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2));
+      const q = mm.idx(i, j, k); qv[q] = Math.max(0, qv[q]! * fac);
     }
     return 0;
   };

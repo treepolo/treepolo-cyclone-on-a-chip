@@ -1,7 +1,7 @@
 // Regional-model worker: builds an experiment, steps it, and streams 3-D cloud / rain volumes.
 
 import { RegionalModel, type RegionalConfig } from '../../regional/core.js';
-import { IceMicrophysics, QV, qvsIce, qvsWater, microOpts } from '../../regional/ice.js';
+import { IceMicrophysics, QV, QC, QR, QI, QS, QG, qvsIce, qvsWater, microOpts } from '../../regional/ice.js';
 import { RegionalPhysics } from '../../regional/physics.js';
 import { tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
@@ -901,7 +901,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try { const note = await setFollow(msg.on); if (note) post({ type: 'log', text: note }); if (m && mp) await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
       busy = false;
     }
-    else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment' || msg.type === 'moisture' || msg.type === 'wind' || msg.type === 'vortex') {
+    else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment' || msg.type === 'moisture' || msg.type === 'wind' || msg.type === 'vortex' || msg.type === 'condensate') {
       if (!m || !mp) { post({ type: 'error', message: '這個實驗不支援此互動（軸對稱模式請改用參數面板）/ this experiment does not support this interaction (use the panel for the axisymmetric model)' }); return; }
       if (gpu && stepping && msg.type !== 'environment') {
         // at once, behind the steps in flight (no lock: nothing is read back or rebuilt)
@@ -1169,17 +1169,17 @@ const fmtNum = (x: number): string => (Math.abs(x) >= 1e5 || (x !== 0 && Math.ab
  * (a region larger than the domain, a cold pool colder than T_FLOOR, a sea colder than ice or hotter than boiling), the
  * answer says what was done instead.
  */
-async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'paint' | 'environment' | 'moisture' | 'wind' | 'vortex' }>): Promise<string> {
+async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'paint' | 'environment' | 'moisture' | 'wind' | 'vortex' | 'condensate' }>): Promise<string> {
   const mm = m!, { nx, ny, nz, dx, dy } = mm.c, L = Math.min(nx * dx, ny * dy);
   if (msg.type === 'paint') {
     const sf = phys?.surface;
     if (!sf || !physCfg) return '這個實驗沒有地面通量，不能塗海溫或陸地 / this experiment has no surface fluxes to paint';
-    const dT = Math.abs(Number.isFinite(msg.amount) ? msg.amount! : 2);
+    // 'sst': the surface temperature is set to the temperature asked (°C), all over the brush
+    const want = (Number.isFinite(msg.amount) ? msg.amount! : 28) + 273.15, tsk = Math.max(SURFACE_MIN, want);
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       if (Math.hypot((i + 0.5) * dx - msg.x, (j + 0.5) * dy - msg.y) > msg.radius) continue;
       const c = j * nx + i;
-      if (msg.kind === 'warmer') sf.tsk[c] = sf.tsk[c]! + dT;
-      else if (msg.kind === 'cooler') sf.tsk[c] = Math.max(SURFACE_MIN, sf.tsk[c]! - dT);
+      if (msg.kind === 'sst') sf.tsk[c] = tsk;
       else if (msg.kind === 'land') { if (sf.wet[c]! >= 0.99) sf.tsk[c] = mm.th0[0]! * mm.pi0[0]!; sf.wet[c] = 0.3; }
       else { if (sf.wet[c]! < 0.99) sf.tsk[c] = (setup?.sst ?? 28) + 273.15; sf.wet[c] = 1; }
     }
@@ -1188,7 +1188,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     physCfg.surface = { tsk: sf.tsk, wet: sf.wet };
     gpu?.setSurface(sf.tsk, sf.wet);
     eye?.surfaceFrom(mm, sf);
-    return '';
+    return msg.kind === 'sst' && want < SURFACE_MIN ? `海溫低於絕對零度，改成 ${SURFACE_MIN} K / the temperature is made ${SURFACE_MIN} K: nothing is colder than absolute zero` : '';
   }
   // on the GPU the change is made there by small kernels (no read-back of the state, which takes long on large grids),
   // with a GPU copy of the state kept for the undo; the environment change rebuilds the models from the CPU state
@@ -1208,8 +1208,8 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (c !== d) notes.push(`深度 ${(d / 1000).toFixed(1)} km 改成 ${(c / 1000).toFixed(1)} km：至少 1 層、至多整個模式高度 / depth made ${(c / 1000).toFixed(1)} km`);
     return 0.5 * c;
   };
-  // where the change is: the radius and the heights it reaches (the cos^2 weight is 1 at the centre and 0 at these edges, so most of
-  // the change is near the centre; a layer centred low and thin does not reach the top of the model)
+  // where the change is: the radius and the heights it reaches (the strength is the same all over this region and nothing outside it
+  // is touched; a layer centred low and thin does not reach the top of the model)
   const reach = (R: number, H: number, zc: number): string => `半徑 ${fmtNum(R / 1000)} km、高度 ${fmtNum(Math.max(0, zc - H) / 1000)}–${fmtNum(Math.min(top, zc + H) / 1000)} km` +
     ` / radius ${fmtNum(R / 1000)} km, heights ${fmtNum(Math.max(0, zc - H) / 1000)}–${fmtNum(Math.min(top, zc + H) / 1000)} km`;
   if (msg.type === 'wind') {
@@ -1234,7 +1234,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     return done(`持續風 / lasting wind: ${what}${until === null ? '，直到清除 / until cleared' : `，${msg.minutes} 模式分鐘 / model minutes`}`);
   }
   if (msg.type === 'moisture') {
-    // change the vapour in the region by the cos^2 envelope: multiplied (mul), added (add, g/kg; negative dries) or moved towards a
+    // change the vapour in the region, the same all over it: multiplied (mul), added (add, g/kg; negative dries) or set to a
     // relative humidity over water (rh, %); what is more than the air can hold condenses in the next step
     const R = clampR(msg.radius, 20 * dx), H = clampH(msg.depth);
     const mode = msg.mode ?? 'mul', raw = Number.isFinite(msg.amount) ? msg.amount : mode === 'mul' ? 1 : 0;
@@ -1247,11 +1247,11 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
         if (!open) { ex -= Math.round(ex / (nx * dx)) * nx * dx; ey -= Math.round(ey / (ny * dy)) * ny * dy; }
         const rh = Math.hypot(ex, ey) / R, rz = Math.abs(md.zc[k]! - msg.z) / H;
         if (rh >= 1 || rz >= 1) continue;
-        const e = Math.cos(0.5 * Math.PI * rh) ** 2 * Math.cos(0.5 * Math.PI * rz) ** 2, q = md.idx(i, j, k);
+        const q = md.idx(i, j, k);
         let nq: number;
-        if (mode === 'mul') nq = qv[q]! * (1 + (amount - 1) * e);
-        else if (mode === 'add') nq = qv[q]! + amount * e;
-        else { const pi = Math.max(md.pi0[k]! + md.pp[q]!, 0.05); nq = qv[q]! + e * (amount * qsatW(Math.max(T_FLOOR, md.th[q]! * pi), pressure(pi)) - qv[q]!); }
+        if (mode === 'mul') nq = qv[q]! * amount;
+        else if (mode === 'add') nq = qv[q]! + amount;
+        else { const pi = Math.max(md.pi0[k]! + md.pp[q]!, 0.05); nq = amount * qsatW(Math.max(T_FLOOR, md.th[q]! * pi), pressure(pi)); }
         qv[q] = Math.max(0, nq);
       }
     };
@@ -1273,6 +1273,37 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (mode === 'rh') return done(`水氣調向相對濕度 / vapour set towards RH ${fmtNum(raw)}% ${where}`);
     return done(`${amount >= 1 ? '增濕 / moistened' : '變乾 / dried'} ×${fmtNum(amount)} ${where}`);
   }
+  if (msg.type === 'condensate') {
+    // the liquid water (cloud water, rain) or the solid water (ice, snow, graupel) of the region, the same all over it: set to an amount (0 removes it all), multiplied or added to.
+    // The kinds of water keep their shares (all in cloud water or cloud ice when there was none); temperature and vapour are not touched, the next step finds what is left.
+    const R = clampR(msg.radius, 20 * dx), H = clampH(msg.depth), liquid = msg.phase === 'liquid';
+    const mode = msg.mode, raw = Number.isFinite(msg.amount) ? msg.amount : 0;
+    const amount = mode === 'mul' ? Math.max(0, raw) : raw * 1e-3;
+    const apply = (md: RegionalModel, ox: number, oy: number): void => {
+      const sc = md.scalars, slots = (liquid ? [QC, QR] : [QI, QS, QG]).filter((x) => x < sc.length);
+      if (!slots.length) return;
+      const { nx, ny, nz, dx, dy } = md.c, open = md.c.lateral === 'open';
+      for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        let ex = ox + (i + 0.5) * dx - msg.x, ey = oy + (j + 0.5) * dy - msg.y;
+        if (!open) { ex -= Math.round(ex / (nx * dx)) * nx * dx; ey -= Math.round(ey / (ny * dy)) * ny * dy; }
+        if (Math.hypot(ex, ey) >= R || Math.abs(md.zc[k]! - msg.z) >= H) continue;
+        const q = md.idx(i, j, k);
+        let tot = 0; for (const x of slots) tot += Math.max(sc[x]![q]!, 0);
+        const want = Math.max(0, mode === 'mul' ? tot * amount : mode === 'add' ? tot + amount : amount);
+        if (want <= 0) for (const x of slots) sc[x]![q] = 0;
+        else if (tot > 0) for (const x of slots) sc[x]![q] = Math.max(sc[x]![q]!, 0) * want / tot;
+        else sc[slots[0]!]![q] = want;
+      }
+    };
+    if (onGpu) {
+      gpu!.edit({ kind: 'condensate', phase: msg.phase, mode, amount, x: msg.x, y: msg.y, z: msg.z, R, H, ox: 0, oy: 0 });
+      if (eye) eye.gpu?.edit({ kind: 'condensate', phase: msg.phase, mode, amount, x: msg.x, y: msg.y, z: msg.z, R, H, ox: eye.x0, oy: eye.y0 });
+    } else { apply(mm, 0, 0); if (eye) apply(eye.m, eye.x0, eye.y0); }
+    await stepAfterChange();
+    const what = liquid ? '液態水（雲水＋雨）/ liquid water (cloud water + rain)' : '固態水（冰＋雪＋霰）/ solid water (ice + snow + graupel)';
+    const how = mode === 'set' ? (raw <= 0 ? '全部移除 / all removed' : `設為 / set to ${fmtNum(raw)} g/kg`) : mode === 'mul' ? `×${fmtNum(amount)}` : `${raw >= 0 ? '+' : '−'}${fmtNum(Math.abs(raw))} g/kg`;
+    return done(`${what} ${how} at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km, ${(msg.z / 1000).toFixed(1)} km high; ${reach(R, H, msg.z)}`);
+  }
   if (msg.type === 'perturb') {
     // warm bubble (+3 K, centred at 1.5 km unless given) or cold pool (-6 K at the ground unless given), horizontal radius 10 km
     // (at least 4 cells, at most the domain) and vertical radius 1.5 km unless given; the amplitude is what the user asks. Repeated
@@ -1287,8 +1318,8 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
       for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const r = Math.sqrt(((ox + (i + 0.5) * dx - msg.x) / rh) ** 2 + ((oy + (j + 0.5) * dy - msg.y) / rh) ** 2 + ((md.zc[k]! - zc) / rz) ** 2);
         if (r >= 1) continue;
-        const q = md.idx(i, j, k), d = amp * Math.cos(0.5 * Math.PI * r) ** 2;
-        md.th[q] = Math.max(md.th[q]! + d, T_FLOOR / (md.pi0[k]! + md.pp[q]!));
+        const q = md.idx(i, j, k);
+        md.th[q] = Math.max(md.th[q]! + amp, T_FLOOR / (md.pi0[k]! + md.pp[q]!));
       }
     };
     if (onGpu) {
@@ -1314,11 +1345,11 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const dp = patch.dpCentre;
     return done(`${msg.kind === 'warm' ? '放暖心渦旋 / warm-core vortex' : '放冷心渦旋 / cold-core vortex'} ${spec.dir > 0 ? '逆時針 / counter-clockwise' : '順時針 / clockwise'}：最強風 / strongest wind ${fmtNum(spec.vmax)} m/s，最大風半徑約 / radius of maximum wind about ${fmtNum(rm / 1000)} km，最強風高度 / at ${(z / 1000).toFixed(1)} km，地面氣壓${dp <= 0 ? '降' : '升'} / surface pressure ${dp <= 0 ? '−' : '+'}${fmtNum(Math.abs(dp))} hPa at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km; ${reach(R, H, z)}`);
   }
-  // environment: wind increment linear to 6 km (constant above) and a humidity factor tapered over 1-8 km, as asked
+  // environment: wind increment linear to 6 km (constant above) and a humidity factor, the same all over 1-8 km, as asked
   const du6 = Number.isFinite(msg.du6) ? msg.du6 : 0, humidity = Math.max(0, Number.isFinite(msg.humidity) ? msg.humidity : 1);
   envDu += du6;
   const du = (z: number): number => du6 * Math.min(1, z / 6000);
-  const hf = (z: number): number => 1 + (humidity - 1) * Math.max(0, Math.min(1, (z - 500) / 500, (8500 - z) / 500));
+  const hf = (z: number): number => (z >= 1000 && z <= 8000 ? humidity : 1);
   // the outer grid (and its boundary targets) and the eye nest (its targets come from the outer grid)
   const change = (md: RegionalModel, targets: boolean): void => {
     const qv = md.scalars[QV]!, { nx, ny, nz } = md.c;

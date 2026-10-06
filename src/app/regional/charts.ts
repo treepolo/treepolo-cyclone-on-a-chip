@@ -105,13 +105,12 @@ interface GridInfo {
 /** map placement: r the whole domain on the page (larger than the visible frame v when zoomed in), v the frame shown */
 type MapFrame = { r: Rect; v: Rect; Lx: number; Ly: number };
 /** what a click or drag on a map does */
-export type MapTool = 'inspect' | 'warm' | 'cold' | 'warmer' | 'cooler' | 'land' | 'sea';
+export type MapTool = 'inspect' | 'warm' | 'cold' | 'sst' | 'land' | 'sea';
 const TOOLS: { v: MapTool; label: string }[] = [
   { v: 'inspect', label: '滑鼠：剖面線與探空點 / Mouse: section line & sounding' },
   { v: 'warm', label: '點一下放暖泡（+3 K）/ Click: warm bubble (+3 K)' },
   { v: 'cold', label: '點一下放冷池（−6 K）/ Click: cold pool (−6 K)' },
-  { v: 'warmer', label: '塗暖海溫 +2 °C / Paint warmer sea' },
-  { v: 'cooler', label: '塗冷海溫 −2 °C / Paint cooler sea' },
+  { v: 'sst', label: '塗海溫（設成 3D 工具列「設海溫」的溫度）/ Paint sea temperature (set to the temperature of the 3-D tool)' },
   { v: 'land', label: '塗陸地（乾地面）/ Paint land (dry ground)' },
   { v: 'sea', label: '塗回海洋 / Paint sea' },
 ];
@@ -562,7 +561,7 @@ export class RegionalCharts {
 
   // ---------------------------------------------------------------- pointer
 
-  private isPaint(): boolean { return (this.view === 'slice' || this.view === 'composite') && (this.tool === 'warmer' || this.tool === 'cooler' || this.tool === 'land' || this.tool === 'sea'); }
+  private isPaint(): boolean { return (this.view === 'slice' || this.view === 'composite') && (this.tool === 'sst' || this.tool === 'land' || this.tool === 'sea'); }
   /** pointer position on the page (magnified charts: on the unmagnified picture) */
   private local(e: { clientX: number; clientY: number }): { x: number; y: number } {
     const r = this.canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
