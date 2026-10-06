@@ -797,3 +797,79 @@ export async function regionalSupersatTest(): Promise<void> {
   const meaning = off.rhi < 1.02 && on.rhi > 1.2 && off.rhw < 1.02 && slow.rhw > on.rhw + 0.03;
   gcheck('ice and liquid supersaturation switches: the GPU follows the CPU with each setting; off, the air is brought to saturation (RHi <= 102 %, RHw <= 102 %); ice on keeps RHi above 120 %; liquid 600 s keeps more water supersaturation', ok && meaning, out.join(' | '));
 }
+
+// Interactions piled on each other (the way they are played): vapour x30 and a +40 K bubble at the same place, again and again, each followed by
+// some model time with the worker's step rule. The state stays finite however many there are.
+export async function regionalCompoundTest(): Promise<void> {
+  const device = await getDevice();
+  const rounds = +(new URLSearchParams(location.search).get('rounds') ?? 12);
+  const cfg = { nx: 16, ny: 16, nz: 24, dx: 2000, dy: 2000, dz: 500, dt: 6, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 3000, dampRate: 1 / 300, kdiff2: 0, lateral: 'periodic' as const };
+  const m = new RegionalModel(cfg, weismanKlemp, 6);
+  for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 16; j++) for (let i = 0; i < 16; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
+  const g = new GpuRegional(device, m, { moist: true, physics: null, ice: true });
+  g.uploadFrom(m);
+  g.step(2);
+  let dt = 6, firstBad = -1; const rows: string[] = [];
+  for (let r = 1; r <= rounds; r++) {
+    g.edit({ kind: 'moisture', x: 16000, y: 16000, z: 3000, R: 20000, H: 6000, mode: 'mul', amount: 30, ox: 0, oy: 0 });
+    g.edit({ kind: 'bubble', x: 16000, y: 16000, z: 1500, rh: 20000, rz: 6000, amp: 40, floorT: T_FLOOR, warm: true, ox: 0, oy: 0 });
+    dt = Math.min(dt, bubbleDt(40, 300, 500));
+    g.setDt(dt);
+    const t0 = g.time; let steps = 0, finite = true;
+    while (g.time - t0 < 30 && steps < 2000) {
+      const { rate, cmax } = await g.maxCourant();
+      if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { finite = false; break; }
+      dt = Math.min(Math.max(dt, 6 * 1e-4), nextDt({ cur: Infinity, dt0: 6, rate, cmax, cfl: 0.8, dxMin: 2000, nsound: 6, gpu: true }));
+      g.setDt(dt); g.step(1); steps++;
+    }
+    const st = await g.readState(), rain = await g.readRain();
+    let tmax = 0, tmin = Infinity, qmax = 0, cmaxq = 0, wmax = 0, ppmax = 0, bad = 0;
+    for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 16; j++) for (let i = 0; i < 16; i++) {
+      const q = m.idx(i, j, k);
+      for (let f = 0; f < 11; f++) if (!Number.isFinite(st[f * m.size + q]!)) bad++;
+      const T = st[3 * m.size + q]! * (m.pi0[k]! + st[4 * m.size + q]!);
+      tmax = Math.max(tmax, T); tmin = Math.min(tmin, T); qmax = Math.max(qmax, st[5 * m.size + q]!); cmaxq = Math.max(cmaxq, st[6 * m.size + q]! + st[8 * m.size + q]!);
+      wmax = Math.max(wmax, Math.abs(st[2 * m.size + q]!)); ppmax = Math.max(ppmax, Math.abs(st[4 * m.size + q]!));
+    }
+    let racc = 0; for (let c = 0; c < rain.length; c++) racc = Math.max(racc, rain[c]!);
+    if (!finite || bad > 0) { if (firstBad < 0) firstBad = r; }
+    rows.push(`#${r}: ${finite && !bad ? 'ok' : `LOST (${bad} bad numbers)`} T ${tmin.toFixed(0)}..${tmax.toExponential(1)} K, qv ${qmax.toExponential(1)}, cloud ${cmaxq.toExponential(1)}, |w| ${wmax.toExponential(1)}, |pi'| ${ppmax.toExponential(1)}, rain ${racc.toExponential(1)} mm, dt ${dt.toExponential(1)}, ${steps} steps`);
+    if (firstBad >= 0) break;
+  }
+  for (const row of rows) console.log('GPUTEST INFO ' + row);
+  gcheck(`${rounds} rounds of vapour x30 and a +40 K bubble at the same place leave the GPU state finite`, firstBad < 0, firstBad < 0 ? 'finite throughout' : `first lost at round ${firstBad}: ${rows[rows.length - 1]}`);
+  g.destroy();
+  // every kind in turn, each of absurd strength (vapour added and multiplied, +10^5 K, a cold pool, 3000 m/s), 25 rounds
+  {
+    const m2 = new RegionalModel(cfg, weismanKlemp, 6);
+    for (let k = 0; k < cfg.nz; k++) for (let j = 0; j < 16; j++) for (let i = 0; i < 16; i++) m2.scalars[QV]![m2.idx(i, j, k)] = m2.qv0[k]!;
+    const g2 = new GpuRegional(device, m2, { moist: true, physics: null, ice: true });
+    g2.uploadFrom(m2); g2.step(2);
+    let dt2 = 6, bad2 = -1, last = '';
+    for (let r = 1; r <= 25 && bad2 < 0; r++) {
+      const kind = r % 5, base = { x: 16000, y: 16000 };
+      if (kind === 0) g2.edit({ kind: 'moisture', ...base, z: 3000, R: 20000, H: 6000, mode: 'add', amount: 0.5, ox: 0, oy: 0 });
+      else if (kind === 1) g2.edit({ kind: 'bubble', ...base, z: 1500, rh: 20000, rz: 6000, amp: 1e5, floorT: T_FLOOR, warm: true, ox: 0, oy: 0 });
+      else if (kind === 2) g2.windOnce({ ...base, z: 1500, R: 20000, H: 6000, speed: 3000, dir: [1, 0, 0.3], form: 'push', sign: 1 });
+      else if (kind === 3) g2.edit({ kind: 'bubble', ...base, z: 0, rh: 20000, rz: 6000, amp: -500, floorT: T_FLOOR, warm: false, ox: 0, oy: 0 });
+      else g2.edit({ kind: 'moisture', ...base, z: 2000, R: 20000, H: 6000, mode: 'mul', amount: 1000, ox: 0, oy: 0 });
+      dt2 = Math.min(dt2, kind === 1 ? bubbleDt(1e5, 300, 500) : dt2);
+      g2.setDt(dt2);
+      const t0 = g2.time; let steps = 0, finite = true;
+      while (g2.time - t0 < 20 && steps < 1500) {
+        const { rate, cmax } = await g2.maxCourant();
+        if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { finite = false; break; }
+        dt2 = Math.min(Math.max(dt2, 6e-4), nextDt({ cur: Infinity, dt0: 6, rate, cmax, cfl: 0.8, dxMin: 2000, nsound: 6, gpu: true }));
+        g2.setDt(dt2); g2.step(1); steps++;
+      }
+      const st = await g2.readState(); let bad = 0, tmx = 0;
+      for (let q = 0; q < st.length; q++) if (!Number.isFinite(st[q]!)) bad++;
+      for (let q = 0; q < m2.size; q++) tmx = Math.max(tmx, st[3 * m2.size + q]! * (1 + 0));
+      last = `round ${r} (${['vapour +0.5 kg/kg', '+1e5 K', 'wind 3000 m/s', 'cold -500 K', 'vapour x1000'][kind]}): ${finite && !bad ? 'ok' : `LOST ${bad}`}, dt ${dt2.toExponential(1)}, ${steps} steps`;
+      if (!finite || bad) bad2 = r;
+    }
+    console.log('GPUTEST INFO ' + last);
+    gcheck('25 interactions of every kind and absurd strength in turn (vapour +0.5 kg/kg and x1000, +10^5 K, cold -500 K, 3000 m/s) leave the GPU state finite', bad2 < 0, bad2 < 0 ? 'finite throughout' : last);
+    g2.destroy();
+  }
+}

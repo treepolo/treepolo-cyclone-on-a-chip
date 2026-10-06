@@ -6,7 +6,8 @@
 // microphysics, 8 qi, 9 qs, 10 qg.
 
 import { RegionalModel, H, BoundaryTargets } from '../regional/core.js';
-import { T_FLOOR, VT_MAX } from '../core/constants.js';
+import { T_FLOOR, VT_MAX, T_CEIL, Q_CEIL, V_CEIL, PI_CEIL } from '../core/constants.js';
+import { noGuard, type GuardCounts } from '../regional/guard.js';
 import { RegionalPhysicsConfig, surfaceState, BL_NOISE_PERIOD, BL_NOISE_DEPTH } from '../regional/physics.js';
 import { ICE, LF, gammaFn, KOENIG_A1, KOENIG_A2, microOpts } from '../regional/ice.js';
 import { COL, WV_PATH, ETOP_DBZ, VIL_ZMAX, level500, levelNear } from '../regional/diagnostics.js';
@@ -135,7 +136,7 @@ export class GpuRegional {
 const NX: u32 = ${nx}u; const NY: u32 = ${ny}u; const NZ: u32 = ${nz}u; const HH: u32 = ${H}u;
 const SX: u32 = ${m.sx}u; const SY: u32 = ${m.sy}u; const PL: u32 = ${m.plane}u; const SIZE: u32 = ${size}u; const L: u32 = ${L}u;
 const DX: f32 = ${dx}; const DY: f32 = ${dy}; const DZ: f32 = ${dz}; const FCOR: f32 = ${f}; const GEOB: f32 = ${m.c.geostrophic ? 1 : 0};
-const CP: f32 = ${cp}; const RD: f32 = ${rd}; const G: f32 = 9.80665; const XLV: f32 = 2.5e6; const TFLOOR: f32 = ${T_FLOOR}.0; const VTMAX: f32 = ${VT_MAX}.0;
+const CP: f32 = ${cp}; const RD: f32 = ${rd}; const G: f32 = 9.80665; const XLV: f32 = 2.5e6; const TFLOOR: f32 = ${T_FLOOR}.0; const VTMAX: f32 = ${VT_MAX}.0; const TCEIL: f32 = ${T_CEIL.toExponential()}; const QCEIL: f32 = ${Q_CEIL.toExponential()}; const VCEIL: f32 = ${V_CEIL.toExponential()}; const PICEIL: f32 = ${PI_CEIL.toExponential()};
 const BETA: f32 = ${beta}; const DIVD: f32 = ${divDamp};
 const MOIST: bool = ${opts.moist}; const PHYS: bool = ${!!ph}; const NQ: u32 = ${this.nq}u; const NFLD: u32 = ${NF}u;
 const OPEN: bool = ${open}; const NEST: bool = ${!!bnd}; const HASPP: bool = ${!!bnd?.pp};
@@ -266,6 +267,11 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
       for (let i = 0; i < ns; i++) seq.push(haloPP, haloPPold, ah, haloUV, av);
     });
     if (opts.moist) seq.push(kes);
+    // the state guard after every step (and after an interaction: guardNow)
+    const pGuard = pipe(GUARD_WGSL);
+    this.guardBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.guardPass = disp(pGuard, bg(pGuard, [this.S, baseBuf, this.guardBuf]), nCol, 'state guard');
+    seq.push(this.guardPass);
     this.passes = seq;
   }
 
@@ -318,9 +324,18 @@ fn f3(a0: f32, a1: f32, a2: f32, a3: f32, vel: f32) -> f32 {
   /** Largest advective Courant rate max(|u|/dx + |v|/dy + |w|/dz) over the domain (1/s). */
   async maxCourantRate(): Promise<number> { return (await this.maxCourant()).rate; }
 
+  private readonly guardBuf: GPUBuffer;
+  private readonly guardPass: Pass;
+  /** Look at every cell now (the guard also runs after every step): after an interaction that changed the state. */
+  guardNow(): void {
+    const enc = this.device.createCommandEncoder(), pass = enc.beginComputePass();
+    this.guardPass(pass); pass.end();
+    this.device.queue.submit([enc.finish()]);
+  }
+
   /** The largest advective Courant rate (1/s) and the speed of sound (m/s) of the hottest air, from a per-column GPU
    *  reduction (two values per column read back). Not finite when the state is not. */
-  async maxCourant(): Promise<{ rate: number; cmax: number }> {
+  async maxCourant(): Promise<{ rate: number; cmax: number; guard: GuardCounts }> {
     const { nx, ny } = this.cpu.c, nCol = nx * ny, dev = this.device;
     if (!this.cflK) {
       const code = this.consts + `
@@ -350,18 +365,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       const out = dev.createBuffer({ size: 2 * nCol * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
       this.cflK = { pipe, out, bind: dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.S } }, { binding: 1, resource: { buffer: out } }, { binding: 2, resource: { buffer: this.baseBuf } }] }) };
     }
-    const k = this.cflK, st = dev.createBuffer({ size: 2 * nCol * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const k = this.cflK, st = dev.createBuffer({ size: 2 * nCol * 4 + 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
     const groups = Math.ceil(nCol / WG);
     pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); pass.dispatchWorkgroups(Math.min(groups, GX), Math.ceil(groups / GX)); pass.end();
     enc.copyBufferToBuffer(k.out, 0, st, 0, 2 * nCol * 4);
+    enc.copyBufferToBuffer(this.guardBuf, 0, st, 2 * nCol * 4, 32);
     dev.queue.submit([enc.finish()]);
     await st.mapAsync(GPUMapMode.READ);
-    const a = new Float32Array(st.getMappedRange());
+    const range = st.getMappedRange(), a = new Float32Array(range, 0, 2 * nCol), gc = new Uint32Array(range.slice(2 * nCol * 4, 2 * nCol * 4 + 32));
     let r = 0, c = 0;
     for (let i = 0; i < nCol; i++) { const x = a[2 * i]!, y = a[2 * i + 1]!; r = Number.isNaN(x) || Number.isNaN(r) ? NaN : Math.max(r, x); c = Number.isNaN(y) || Number.isNaN(c) ? NaN : Math.max(c, y); }
     st.unmap(); st.destroy();
-    return { rate: r, cmax: c };
+    // (the counts are taken: they start again from zero)
+    const guard: GuardCounts = gc[0]! + gc[1]! + gc[2]! + gc[3]! + gc[4]! > 0 ? { lost: gc[0]!, water: gc[1]!, hot: gc[2]!, wind: gc[3]!, pressure: gc[4]! } : noGuard();
+    if (guard.lost + guard.water + guard.hot + guard.wind + guard.pressure > 0) dev.queue.writeBuffer(this.guardBuf, 0, new Uint32Array(8));
+    return { rate: r, cmax: c, guard };
   }
   private cflK: { pipe: GPUComputePipeline; out: GPUBuffer; bind: GPUBindGroup } | null = null;
 
@@ -579,6 +598,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     pass.setPipeline(k.pipe); pass.setBindGroup(0, k.bind); dispatchLinear(pass, nx * ny * (nz + 1)); pass.end();
     dev.queue.submit([enc.finish()]);
     dev.queue.writeBuffer(k.T, 0, forcingTable(this.forcings));
+    this.guardNow();
   }
 
   private readonly baseBuf: GPUBuffer;
@@ -650,6 +670,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
     pass.setPipeline(this.editK.pipe); pass.setBindGroup(0, this.editK.bind); dispatchLinear(pass, nx * ny * nz); pass.end();
     dev.queue.submit([enc.finish()]);
+    this.guardNow();
   }
 
   private snap: { S: GPUBuffer; aux: GPUBuffer; time: number; steps: number } | null = null;
@@ -1771,6 +1792,48 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var k = 0u; k <= NZ; k++) { S[2u * SIZE + ix(i, j, k)] = dp[k]; }
 }
 `;
+
+// The state guard (regional/guard.ts): one thread per column looks at every cell of it. A cell with a value that is not a number (or beyond 1e30) goes back to the
+// environment; values the equations cannot take are held at what they can (T_CEIL, Q_CEIL, V_CEIL, PI_CEIL). GC counts: [0] cells reset, [1] water, [2] hot, [3] wind, [4] pressure.
+const GUARD_WGSL = /* wgsl */`
+@group(0) @binding(0) var<storage, read_write> S: array<f32>;
+@group(0) @binding(1) var<storage, read> base: array<f32>;
+${BASE_FNS}
+@group(0) @binding(2) var<storage, read_write> GC: array<atomic<u32>, 8>;
+fn badv(x: f32) -> bool { return !(abs(x) < 1.0e30); }
+@compute @workgroup_size(${WG})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= NX * NY) { return; }
+  let j = t / NX; let i = t % NX;
+  var nLost = 0u; var nWater = 0u; var nHot = 0u; var nWind = 0u; var nP = 0u;
+  for (var k = 0u; k <= NZ; k++) {
+    let q = ix(i, j, k);
+    var isBad = false;
+    for (var f = 0u; f < NFLD; f++) { if (badv(S[f * SIZE + q])) { isBad = true; } }
+    if (isBad) {
+      nLost++;
+      S[q] = bub(k); S[SIZE + q] = bvb(k); S[2u * SIZE + q] = 0.0; S[3u * SIZE + q] = bth0(k); S[4u * SIZE + q] = 0.0;
+      for (var f = 5u; f < NFLD; f++) { S[f * SIZE + q] = select(0.0, bqv0(k), f == 5u); }
+      continue;
+    }
+    var hitV = false;
+    for (var f = 0u; f < 3u; f++) { let x = S[f * SIZE + q]; if (abs(x) > VCEIL) { S[f * SIZE + q] = clamp(x, -VCEIL, VCEIL); hitV = true; } }
+    let pi0 = bpi0(k); let pp = S[4u * SIZE + q]; let ppc = clamp(pp, -0.95 * pi0, PICEIL - pi0);
+    if (ppc != pp) { S[4u * SIZE + q] = ppc; nP++; }
+    let th = S[3u * SIZE + q]; let thMax = TCEIL / (pi0 + ppc);
+    if (th > thMax) { S[3u * SIZE + q] = thMax; nHot++; }
+    var hitQ = false;
+    for (var f = 5u; f < NFLD; f++) { if (S[f * SIZE + q] > QCEIL) { S[f * SIZE + q] = QCEIL; hitQ = true; } }
+    if (hitV) { nWind++; }
+    if (hitQ) { nWater++; }
+  }
+  if (nLost > 0u) { atomicAdd(&GC[0], nLost); }
+  if (nWater > 0u) { atomicAdd(&GC[1], nWater); }
+  if (nHot > 0u) { atomicAdd(&GC[2], nHot); }
+  if (nWind > 0u) { atomicAdd(&GC[3], nWind); }
+  if (nP > 0u) { atomicAdd(&GC[4], nP); }
+}`;
 
 // Kessler microphysics per column (clip negatives, sedimentation, warm rain, saturation adjustment)
 const KESSLER_WGSL = /* wgsl */`

@@ -22,6 +22,7 @@ import { EyeNest, syncModel } from './eyeNest.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { nextDt, soundSpeed, bubbleDt, CFL_DEFAULT } from '../../regional/stepControl.js';
 import { T_FLOOR } from '../../core/constants.js';
+import { guardModel, guardNotes, guardAny, addGuard, noGuard, type GuardCounts } from '../../regional/guard.js';
 import { quant, metaOf, modelFromMeta, loadState, packState, type Q16, type ReplayAux, type ReplayMeta, type ReplayRec, type ReplayTier } from '../../regional/replayData.js';
 import { C, COL as NCOL, SECTION_VARS, MAP_VARS, pressure, qsatW, columnDiagnostics, columnProfiles, sectionFromColumns, sliceFields, modelPlanes, compositeMaps, azimuthalMeans, unpackRZ, type LevelPlanes, type SectionVar } from '../../regional/diagnostics.js';
 
@@ -128,6 +129,8 @@ function stepGpu(n: number): void {
 function stepCpu(): void {
   if (eye) eye.cpuStep(m!, mp!);
   else { m!.step(); mp!.apply(m!.c.dt); }
+  addGuard(guardTotals, guardModel(m!));
+  if (eye) addGuard(guardTotals, guardModel(eye.m));
 }
 
 /** One storm analysis of the current CPU model state (level-0 fields; column composites for cells). */
@@ -245,6 +248,22 @@ let envDu = 0;
 /** |w| (m/s) beyond which the state is taken for numerically lost (the fastest flow an interaction has made: about 14 km/s from a
  *  bubble heated by a million K): a large wind is not a failure, a number that is not one is */
 const W_BLOWUP = 1e5;
+/** What the state guard did since it was last told (guard.ts; the GPU counts come with the Courant reading) and when it last said so */
+const guardTotals: GuardCounts = noGuard();
+let guardSaid = 0;
+/** The guard's work since the last time, in words ('' when none); the count starts again. */
+function takeGuard(cellSteps = false): string {
+  if (!guardAny(guardTotals)) return '';
+  const t = guardNotes(guardTotals, cellSteps);
+  Object.assign(guardTotals, noGuard());
+  return t;
+}
+/** While running: say in the log what the guard did, at most every 15 s. */
+function flushGuard(): void {
+  if (!guardAny(guardTotals) || performance.now() - guardSaid < 15000) return;
+  guardSaid = performance.now();
+  post({ type: 'log', text: `狀態保護 / state guard: ${takeGuard(true)}` });
+}
 /** CPU adaptive time step: the same rule as the GPU (stepControl.ts), checked every tick */
 function cpuAdaptDt(): void {
   if (!m || gpu) return;
@@ -354,7 +373,8 @@ async function blowUp(): Promise<void> {
 }
 async function adaptDt(): Promise<void> {
   if (!gpu || !m) return;
-  const { rate, cmax } = await gpu.maxCourant();
+  const { rate, cmax, guard } = await gpu.maxCourant();
+  addGuard(guardTotals, guard);
   if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { stateLost = true; return; }
   noteRate(rate);
   if (!adaptive) { await nestFit(); return; }
@@ -368,10 +388,13 @@ async function adaptDt(): Promise<void> {
  * (before any wind exists to measure), set it; it only gets smaller (and only in the automatic mode: a manual step is the user's).
  */
 async function stepAfterChange(bubbleK = 0): Promise<void> {
-  if (!m || !adaptive) return;
+  if (!m) return;
+  // the state guard looks at the changed state (the GPU did, in the edit; its counts come with the Courant reading)
+  if (!gpu) { addGuard(guardTotals, guardModel(m)); if (eye) addGuard(guardTotals, guardModel(eye.m)); }
+  if (!adaptive) return;
   const c = m.c;
   let rate = 0, cmax = 0;
-  if (gpu) ({ rate, cmax } = await gpu.maxCourant());
+  if (gpu) { const r = await gpu.maxCourant(); rate = r.rate; cmax = r.cmax; addGuard(guardTotals, r.guard); }
   else for (let k = 0; k < c.nz; k++) for (let j = 0; j < c.ny; j++) for (let i = 0; i < c.nx; i++) {
     const q = m.idx(i, j, k);
     rate = Math.max(rate, Math.abs(m.u[q]!) / c.dx + Math.abs(m.v[q]!) / c.dy + Math.abs(m.w[q]!) / c.dz);
@@ -934,6 +957,7 @@ async function loop(): Promise<void> {
           stepping = true;
           try { await gpu.device.queue.onSubmittedWorkDone(); await adaptDt(); } finally { stepping = false; }
           if (stateLost) { stateLost = false; await blowUp(); busy = false; continue; }
+          flushGuard();
           const el = performance.now() - t0, target = 60 * stepsPerTick;
           if (DEBUG) console.log(`DBG batch ${gpuBatch} steps ${el.toFixed(0)} ms`);
           const perStep = Math.max(el, 1) / nb;
@@ -947,6 +971,7 @@ async function loop(): Promise<void> {
           advectTracers(ns * dtb, ns);
           cpuAdaptDt();
           if (stateLost) { stateLost = false; await blowUp(); busy = false; continue; }
+          flushGuard();
           await nestFit();
         }
         advanceOrigin();
@@ -1140,7 +1165,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
   if (onGpu) takeUndoGpu(); else { await syncFromGpu(); takeUndo(); }
   gpuBatch = 1;
   const top = nz * mm.c.dz, notes: string[] = [];
-  const done = (what: string): string => `${what}${notes.length ? `（${notes.join('；')}）` : ''}`;
+  const done = (what: string): string => { const g = takeGuard(); if (g) notes.push(g); return `${what}${notes.length ? `（${notes.join('；')}）` : ''}`; };
   // sizes: at least two cells across, at most the whole domain; the depth at most the whole model height
   const clampR = (r: number | undefined, d: number): number => {
     const v = Number.isFinite(r) ? r! : d, c = Math.max(2 * dx, Math.min(L, v));

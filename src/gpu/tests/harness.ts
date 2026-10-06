@@ -15,5 +15,12 @@ export async function getDevice(): Promise<GPUDevice> {
   if (!adapter) throw new Error('no WebGPU adapter');
   const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: Math.min(16, adapter.limits.maxStorageBuffersPerShaderStage), maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } });
   device.addEventListener('uncapturederror', (e) => { console.log(`GPUTEST FAIL gpu-error ${(e as GPUUncapturedErrorEvent).error.message.slice(0, 600)}`); });
+  // a shader that does not compile says why (the pipeline made from it is only reported as invalid)
+  const create = device.createShaderModule.bind(device);
+  device.createShaderModule = (d: GPUShaderModuleDescriptor): GPUShaderModule => {
+    const mod = create(d);
+    void mod.getCompilationInfo().then((info) => { for (const m of info.messages) if (m.type === 'error') console.log(`GPUTEST FAIL shader ${m.lineNum}:${m.linePos} ${m.message.slice(0, 300)} | ${d.code.split('\n')[Math.max(0, m.lineNum - 1)]?.slice(0, 160)}`); });
+    return mod;
+  };
   return device;
 }

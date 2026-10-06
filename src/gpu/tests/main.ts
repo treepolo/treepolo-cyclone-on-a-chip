@@ -2,7 +2,7 @@ import { gdone } from './harness.js';
 import { transformTests } from './transformTest.js';
 import { dycoreTests } from './dycoreTest.js';
 import { moistTests, earthTests, spinupGpuTest } from './moistTest.js';
-import { regionalTests, regionalNestTests, regionalIceTests, regionalPerf, regionalAdaptiveTest, regionalFlagDebug, regionalRefineTest, regionalChartsTest, regionalTwoWayTest, regionalEditTest, regionalExtremeTest, regionalBigEditTest, regionalSupersatTest } from './regionalTest.js';
+import { regionalTests, regionalNestTests, regionalIceTests, regionalPerf, regionalAdaptiveTest, regionalFlagDebug, regionalRefineTest, regionalChartsTest, regionalTwoWayTest, regionalEditTest, regionalExtremeTest, regionalBigEditTest, regionalSupersatTest, regionalCompoundTest } from './regionalTest.js';
 import { regionalDebug } from './regionalDebug.js';
 
 async function main(): Promise<void> {
@@ -25,6 +25,7 @@ async function main(): Promise<void> {
     if (!which || which === 'regional' || which === 'charts') await regionalChartsTest();
     if (!which || which === 'regional' || which === 'extreme') await regionalExtremeTest();
     if (!which || which === 'regional' || which === 'supersat') await regionalSupersatTest();
+    if (which === 'compound') await regionalCompoundTest();
     if (which === 'bigedit') await regionalBigEditTest();
     if (which === 'rdebug') await regionalDebug();
   } catch (e) {

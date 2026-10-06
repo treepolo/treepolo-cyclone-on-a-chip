@@ -33,3 +33,7 @@ export const T_FLOOR = 100;
 /** Fastest fall speed (m/s) of rain, snow, graupel and ice in the sedimentation: nothing in the air falls faster (hail about 50 m/s). The bound keeps the sub-stepping
  *  finite for a state that is not numbers any more (an infinite fall speed would make the loop endless; on the GPU, trip the watchdog). */
 export const VT_MAX = 100;
+/** What the regional model can still hold (regional/guard.ts; the GPU kernel in gpu/regionalGpu.ts): beyond these the equations stop meaning anything, and the
+ *  numbers would overflow. Air hotter than T_CEIL (K) is a plasma, not an ideal gas; more water than Q_CEIL (kg per kg of dry air) is a steam atmosphere, not air with water in it
+ *  (the model's density is that of dry air); winds faster than V_CEIL (m/s) are beyond the speed of sound of the hottest air there can be; the Exner function of the pressure stays below PI_CEIL (3.6e9 Pa). */
+export const T_CEIL = 1e6, Q_CEIL = 1, V_CEIL = 1e5, PI_CEIL = 20;

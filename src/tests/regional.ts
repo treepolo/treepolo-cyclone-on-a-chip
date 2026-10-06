@@ -761,4 +761,75 @@ void DRY_AIR;
     ratioW(at0, p2) < 1.001 && r1 > 1.25 && r1 < 1.299 && r100 < 1.1 && r100 > 1.0 && at600.st.qc > 0, `at once -> ${(100 * ratioW(at0, p2)).toFixed(1)} %, 600 s: ${(100 * r1).toFixed(1)} % after 20 s, ${(100 * r100).toFixed(1)} % after 2000 s`);
 }
 
+// The state guard (guard.ts): a value that is not a number puts its cell back to the environment; temperature, water, wind and pressure are held at what the
+// equations can take (T_CEIL, Q_CEIL, V_CEIL, PI_CEIL); an ordinary state is not touched. And interactions piled on each other, as they are played (vapour x30 and a
+// +40 K bubble at one place, again and again), leave the model finite.
+{
+  const { guardModel, guardNotes, noGuard, addGuard } = await import('../regional/guard.js');
+  const { T_CEIL, Q_CEIL, V_CEIL } = await import('../core/constants.js');
+  const { buildModel } = await import('../app/regional/build.js');
+  const { setupOf } = await import('../app/regional/setup.js');
+  const { RegionalPhysics } = await import('../regional/physics.js');
+  const { nextDt, soundSpeed, bubbleDt } = await import('../regional/stepControl.js');
+  const mk = (): { mm: RegionalModel; mpx: IceMicrophysics } => {
+    const sp = setupOf('supercell'); sp.L = 32000;
+    const b = buildModel(sp, false), mm = b.model, mpx = new IceMicrophysics(mm);
+    if (b.physics) new RegionalPhysics(mm, b.physics);
+    mm.step(); mpx.apply(mm.c.dt);
+    return { mm, mpx };
+  };
+  // 1. what the guard does
+  {
+    const { mm } = mk();
+    const untouched = guardModel(mm), n0 = untouched.lost + untouched.water + untouched.hot + untouched.wind + untouched.pressure;
+    const a = mm.idx(3, 4, 5), b = mm.idx(6, 2, 7), c = mm.idx(2, 2, 2), d = mm.idx(8, 8, 8), e = mm.idx(5, 5, 4);
+    const th0 = mm.th0[5]!;
+    mm.th[a] = NaN; mm.u[a] = 5; mm.scalars[QV]![b] = 7; mm.scalars[QC]![b] = Infinity; mm.th[c] = 1e12; mm.u[d] = 3e9; mm.pp[e] = 1e6;
+    const g = guardModel(mm);
+    const ok = n0 === 0 && g.lost === 2 && g.hot === 1 && g.wind === 1 && g.pressure === 1 && g.water === 0
+      && mm.th[a] === th0 && mm.u[a] === mm.ub[5] && mm.scalars[QV]![b] === mm.qv0[7] && mm.scalars[QC]![b] === 0
+      && mm.th[c]! * (mm.pi0[2]! + mm.pp[c]!) <= T_CEIL * 1.0000001 && Math.abs(mm.u[d]!) === V_CEIL && [mm.u, mm.v, mm.w, mm.th, mm.pp, ...mm.scalars].every((x) => x.every(Number.isFinite));
+    mm.scalars[QV]![mm.idx(1, 1, 1)] = 5;
+    const g2 = guardModel(mm);
+    check('state guard: an ordinary state is untouched; a cell that is not numbers goes back to the environment; temperature, wind and pressure are held at their limits; water at 1 kg/kg',
+      ok && g2.water === 1 && mm.scalars[QV]![mm.idx(1, 1, 1)] === Q_CEIL && guardNotes(g2).includes('水'), `${n0} touched in an ordinary state; ${JSON.stringify(g)} then ${JSON.stringify(g2)}`);
+    const sum = noGuard(); addGuard(sum, g); addGuard(sum, g2);
+    check('state guard: the notes say what was done, in both languages', guardNotes(sum).includes('/') && guardNotes(noGuard()) === '', guardNotes(sum).slice(0, 120));
+  }
+  // 2. interactions piled on each other
+  {
+    const { mm, mpx } = mk();
+    const dt0 = mm.c.dt, { nx, ny, nz, dx, dy, dz } = mm.c, L = nx * dx, tot = noGuard();
+    let finite = true, rounds = 0, steps = 0;
+    for (let r = 1; r <= 12 && finite; r++) {
+      for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const rr = Math.sqrt((((i + 0.5) * dx - L / 2) / 8000) ** 2 + (((j + 0.5) * dy - L / 2) / 8000) ** 2 + ((mm.zc[k]! - 1500) / 3000) ** 2);
+        if (rr >= 1) continue;
+        const q = mm.idx(i, j, k), e = Math.cos(0.5 * Math.PI * rr) ** 2;
+        mm.scalars[QV]![q] = mm.scalars[QV]![q]! * (1 + 29 * e);
+        mm.th[q] = mm.th[q]! + 40 * e;
+      }
+      addGuard(tot, guardModel(mm));
+      mm.c.dt = Math.min(mm.c.dt, bubbleDt(40, 300, dz));
+      const t0 = mm.time;
+      while (mm.time - t0 < 20 && steps < 20000) {
+        let rate = 0, cmax = 0;
+        for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+          const q = mm.idx(i, j, k);
+          rate = Math.max(rate, Math.abs(mm.u[q]!) / dx + Math.abs(mm.v[q]!) / dy + Math.abs(mm.w[q]!) / dz);
+          cmax = Math.max(cmax, soundSpeed(mm.th[q]!, mm.pi0[k]! + mm.pp[q]!));
+        }
+        if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { finite = false; break; }
+        mm.c.dt = Math.min(Math.max(mm.c.dt, dt0 * 1e-4), nextDt({ cur: Infinity, dt0, rate, cmax, cfl: 0.8, dxMin: Math.min(dx, dy), nsound: mm.c.nsound, gpu: false }));
+        mm.step(); mpx.apply(mm.c.dt); steps++;
+        addGuard(tot, guardModel(mm));
+      }
+      rounds = r;
+    }
+    finite = finite && [mm.u, mm.v, mm.w, mm.th, mm.pp, ...mm.scalars].every((x) => x.every(Number.isFinite));
+    check('interactions piled on each other (CPU): 12 rounds of vapour x30 and a +40 K bubble at one place leave the model finite; the guard held the water at 1 kg/kg',
+      finite && rounds === 12 && tot.water > 0, `${rounds} rounds, ${steps} steps, guard ${JSON.stringify(tot)}`);
+  }
+}
+
 summary('regional');
