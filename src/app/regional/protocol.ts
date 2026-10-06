@@ -68,6 +68,8 @@ export type ToRegionalWorker =
   | { type: 'subgrid'; on: boolean }
   /** the saturation switches of the cloud physics (ice.ts MicroOpts): ice supersaturation, and the time (s) liquid water takes to condense (0: at once) */
   | { type: 'micro'; iceSS?: boolean; liqTau?: number }
+  /** the domain follows the storm (on) or stays on the ground (off), at any time: the page's switch; the worker answers with the same message when it changes by itself */
+  | { type: 'follow'; on: boolean }
   /** tracer particles for the 3-D view (0: off) */
   | { type: 'tracers'; n: number }
   /** interaction (conditions only): a warm bubble or a cold pool centred at (x, y) m in domain coordinates, optionally
@@ -204,6 +206,8 @@ export type FromRegionalWorker =
   /** charts of a recorded frame; `need`: the worker holds no meta / no frame data of that id, send it again */
   | { type: 'replayChart'; id: number; charts: ChartData | null; need?: 'meta' | 'frame'; error?: string }
   | { type: 'paused'; reason: string }
+  /** whether the domain follows the storm now (the worker turned it on or off, or confirms the page's switch) */
+  | { type: 'follow'; on: boolean }
   | { type: 'log'; text: string }
   | { type: 'saveData'; meta: import('../saves.js').SaveMeta; buffer: ArrayBuffer }
   | { type: 'error'; message: string };

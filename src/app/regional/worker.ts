@@ -895,6 +895,12 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       busy = false; running = wasRunning;
     }
     else if (msg.type === 'clearForcing') { clearForcings(); if (!running) await refreshFrame(); }
+    else if (msg.type === 'follow') {
+      await waitIdle();
+      busy = true;
+      try { const note = await setFollow(msg.on); if (note) post({ type: 'log', text: note }); if (m && mp) await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
+      busy = false;
+    }
     else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment' || msg.type === 'moisture' || msg.type === 'wind' || msg.type === 'vortex') {
       if (!m || !mp) { post({ type: 'error', message: '這個實驗不支援此互動（軸對稱模式請改用參數面板）/ this experiment does not support this interaction (use the panel for the axisymmetric model)' }); return; }
       if (gpu && stepping && msg.type !== 'environment') {
@@ -1093,6 +1099,30 @@ async function nestGpuUp(): Promise<void> {
 }
 
 /**
+ * Turn the domain's following of the storm on or off while the model runs. On: the tracker starts (the next check, within a step, moves the domain: a frame that
+ * moves with the storm and whole-cell shifts keep it near the centre). Off: back to the frame of the ground (the winds are the winds over the ground again),
+ * and the domain stays where it is. Returns a note for the log.
+ */
+async function setFollow(on: boolean): Promise<string> {
+  if (!m || !mp || axi || experiment === 'nest') { post({ type: 'follow', on: false }); return '這個實驗不能跟著風暴走 / this experiment cannot follow a storm'; }
+  if (on === !!tracker) { post({ type: 'follow', on }); return ''; }
+  let note: string;
+  if (on) {
+    tracker = new StormTracker(setup?.init === 'vortex' ? 'vortex' : 'updraft'); lastTrack = -Infinity; followId = null;
+    note = '計算範圍從現在起跟著風暴走（風暴出現後開始）/ the domain follows the storm from now on (once there is one)';
+  } else {
+    await syncFromGpu();
+    advanceOrigin();
+    tracker = null; followId = null;
+    if (frameVel.u || frameVel.v) await moveDomain({ du: -frameVel.u, dv: -frameVel.v, di: 0, dj: 0 });
+    note = `計算範圍不再跟著風暴走，留在地面上${eye ? '（眼區細化的圓柱固定在範圍中央，風暴會離開它）' : ''} / the domain no longer follows the storm: it stays on the ground${eye ? ' (the eye nest stays at the centre of the domain: the storm will leave it)' : ''}`;
+  }
+  if (setup) setup = { ...setup, follow: on };
+  post({ type: 'follow', on });
+  return note;
+}
+
+/**
  * Start the eye nest: radius R, spacings near dx, dz (m). `recentre`: first roll the domain (whole cells) so the main storm
  * is at its centre, where the cylinder is. Returns a note for the page; throws with the reason when it cannot start.
  */
@@ -1101,7 +1131,7 @@ async function startNest(R: number, dx: number, dz: number, recentre: boolean): 
   let where = '';
   if (recentre) {
     // the cylinder is fixed at the domain centre, so the domain follows the storm from now on
-    if (!tracker) { tracker = new StormTracker(setup?.init === 'vortex' ? 'vortex' : 'updraft'); lastTrack = mm.time; where = '區域從現在起跟著風暴走 / the domain follows the storm from now on；'; }
+    if (!tracker) { tracker = new StormTracker(setup?.init === 'vortex' ? 'vortex' : 'updraft'); lastTrack = mm.time; where = '區域從現在起跟著風暴走 / the domain follows the storm from now on；'; if (setup) setup = { ...setup, follow: true }; post({ type: 'follow', on: true }); }
     analyseStorms(null);
     const st = mainStorm();
     if (!st) where += '還沒偵測到風暴，圓柱在區域中央 / no storm yet: the cylinder is at the domain centre';

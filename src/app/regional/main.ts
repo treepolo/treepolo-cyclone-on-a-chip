@@ -40,6 +40,8 @@ let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } |
 const missions = new Missions($('missions'), (s) => log(s));
 let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
 let lastVol: ReplayFrame | null = null, refining = false;
+// (read-only, for the browser tests)
+(window as unknown as { regionalDebug: () => ReplayFrame | null }).regionalDebug = (): ReplayFrame | null => lastVol;
 // replay: frames the worker marks to be kept (the recording settings are in the replay panel); a replay file loaded from disk
 // is shown from a store of its own (fileMode), apart from the live recording
 const replay = new ReplayStore(400e6), fileStore = new ReplayStore(400e6);
@@ -80,6 +82,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
 
 worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
+  if (m.type === 'follow') { $<HTMLInputElement>('followNow').checked = m.on; return; }
   if (m.type === 'ready') {
     // a new model ends the replay (a refinement keeps the recording, but not a replay file shown)
     if (!refining || fileMode) { replay.clear(); endReplay(); }
@@ -92,6 +95,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     $('backend').textContent = m.backend === 'gpu' ? 'WebGPU（f32）' : 'CPU（Float64）';
     if (m.note) log(m.note);
     $('desc').textContent = m.description;
+    // the domain follows the storm: as the set-up says; no switch where it cannot (the axisymmetric model, the nest in the global model)
+    { const fn = $<HTMLInputElement>('followNow'); fn.checked = !!m.setup?.follow; fn.disabled = m.experiment === 'tc_axi' || m.experiment === 'nest' || !m.setup; }
     const rb = $<HTMLButtonElement>('refine');
     rb.disabled = !m.refineTo;
     rb.textContent = m.refineTo ? `細化到 ${km(m.refineTo)} / Refine to ${km(m.refineTo)}` : '細化 / Refine';
@@ -298,6 +303,7 @@ const sendMicro = (): void => {
   $<HTMLInputElement>('liqTau').disabled = !on;
   send({ type: 'micro', iceSS: $<HTMLInputElement>('iceSS').checked, liqTau: on && tau > 0 ? tau * 60 : 0 });
 };
+$('followNow').onchange = (): void => send({ type: 'follow', on: $<HTMLInputElement>('followNow').checked });
 $('iceSS').onchange = sendMicro; $('liqSS').onchange = sendMicro; $('liqTau').onchange = sendMicro;
 // (a browser may restore the form: tell the worker unless it is as the worker starts)
 if (!$<HTMLInputElement>('iceSS').checked || $<HTMLInputElement>('liqSS').checked) sendMicro();
