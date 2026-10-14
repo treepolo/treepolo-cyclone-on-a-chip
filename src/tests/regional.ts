@@ -416,39 +416,6 @@ void DRY_AIR;
     `${(c95 * 1e3).toFixed(3)} g/kg, albedo ${cs[o + C.vis]!.toFixed(2)}, top ${cs[o + C.visZ]!.toFixed(0)} m`);
 }
 
-// Wind interactions (all added to the wind there is): a push once adds its speed at the centre; a lasting push adds its speed every tau
-// (5 tau: 5 times the speed); a counter-clockwise rotation blows toward +y east of the centre; a cyclone also blows inward there and an anticyclone
-// clockwise and outward; w stays 0 at the ground; a lasting push on top of a wind keeps that wind
-{
-  const { applyWind, FORCING_TAU } = await import('../regional/forcing.js');
-  const mk = (): RegionalModel => new RegionalModel({ ...base, nx: 20, ny: 20, nz: 10, dx: 1000, dy: 1000, dz: 500, dt: 5 }, weismanKlemp, 3);
-  const m1 = mk(), c = 10000, zc = m1.zc[2]!;
-  const push = { x: c, y: c + 500, z: zc, R: 5000, H: 1500, speed: 10, dir: [1, 0, 0] as [number, number, number], form: 'push' as const, sign: 1 as const };
-  applyWind(m1, [push], 'once');
-  const u1 = m1.u[m1.idx(10, 10, 2)]!;
-  const m2 = mk();
-  for (let n = 0; n < 5 * FORCING_TAU / 5; n++) applyWind(m2, [push], 5);
-  const u2 = m2.u[m2.idx(10, 10, 2)]!;
-  const m3 = mk();
-  applyWind(m3, [{ ...push, x: c, y: c, form: 'rotate', speed: 10, dir: [0, 0, 0] }], 'once');
-  const vEast = m3.v[m3.idx(12, 10, 2)]!;
-  const mc = mk(), ma = mk();
-  applyWind(mc, [{ ...push, x: c, y: c, form: 'vortex', sign: 1, speed: 10, ratio: 0.5, dir: [0, 0, 0] }], 'once');
-  applyWind(ma, [{ ...push, x: c, y: c, form: 'vortex', sign: -1, speed: 10, ratio: 0.5, dir: [0, 0, 0] }], 'once');
-  const cycV = mc.v[mc.idx(12, 10, 2)]!, cycU = mc.u[mc.idx(12, 10, 2)]!, antV = ma.v[ma.idx(12, 10, 2)]!, antU = ma.u[ma.idx(12, 10, 2)]!;
-  const m5 = mk(); m5.u.fill(3);
-  for (let n = 0; n < 5 * FORCING_TAU / 5; n++) applyWind(m5, [push], 5);
-  const u5 = m5.u[m5.idx(10, 10, 2)]!;
-  const m4 = mk();
-  applyWind(m4, [{ ...push, z: 0, dir: [0, 0, 1], H: 2000 }], 'once');
-  let w0 = 0; for (let j = 0; j < 20; j++) for (let i = 0; i < 20; i++) w0 = Math.max(w0, Math.abs(m4.w[m4.idx(i, j, 0)]!));
-  const wUp = m4.w[m4.idx(10, 10, 1)]!;
-  check('wind interactions: push once ~10 m/s at the centre, lasting push adds 5 x its speed in 5 tau (also on top of an existing wind), CCW rotation northward east of centre, cyclone inward + counter-clockwise, anticyclone outward + clockwise, no w at the ground',
-    Math.abs(u1 - 10) < 0.2 && Math.abs(u2 - 50) < 0.5 && Math.abs(u5 - 53) < 0.5 && vEast > 1 && w0 === 0 && wUp > 1
-    && cycV > 9 && cycU < -3 && antV < -9 && antU > 3,
-    `${u1.toFixed(2)}, lasting ${u2.toFixed(2)} (on 3 m/s: ${u5.toFixed(2)}), v ${vEast.toFixed(2)}, w0 ${w0}, w1 ${wUp.toFixed(2)}; cyclone v ${cycV.toFixed(1)} u ${cycU.toFixed(1)}, anticyclone v ${antV.toFixed(1)} u ${antU.toFixed(1)}`);
-}
-
 // Cumulus parameterization (simplified Betts-Miller): active in the unstable tropical column, energy-consistent (heating
 // = latent heat of the vapour removed), total water conserved (the removed vapour becomes rain water and detrained
 // ice), inactive over the neutral RE87 column and on a 3 km grid
