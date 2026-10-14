@@ -7,12 +7,12 @@ import { tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
-import { refineInto, coarsenInto } from '../../regional/refine.js';
+import { refineInto, coarsenInto, regridPlane } from '../../regional/refine.js';
 import { Tracers, type TracerParams } from '../../regional/tracers.js';
 import { AxiDriver, AXI_DEFAULTS, LEGACY_TC, type AxiParams } from './axiDriver.js';
 import { buildModel, setupFromLegacy, axiFromSetup, refinedSetup, coarsenedSetup, environmentPressure } from './build.js';
 import { applyLive, changedKeys, liveMerge, ENV_KEYS } from './liveSettings.js';
-import { presetById, setupOf, tcLike, type RegionalSetup } from './setup.js';
+import { presetById, setupOf, tcLike, sanitize, setupCells, type RegionalSetup } from './setup.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { StormTracker, type TornadoEnv } from '../../regional/supercell.js';
@@ -744,53 +744,15 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     }
     else if (msg.type === 'refine') {
       if (!setup || experiment === 'nest' || axi || !m || !mp) return;
-      if (!refinedSetup(setup)) return;
-      const wasRunning = running; running = false;
-      await waitIdle();
-      busy = true;
-      try {
-        await syncFromGpu();
-        advanceOrigin();
-        stopNest();
-        const target = refinedSetup(setup);
-        if (!target) return;
-        const mc = m, mpc = mp, fromDx = mc.c.dx, frameC = { ...frameVel }, trackC = tracker?.position ?? null, originC = { ...origin };
-        const Lc = mc.c.nx * mc.c.dx, Lcy = mc.c.ny * mc.c.dy, Lf = target.L;
-        keepParent(Lf < Lc - 1);
-        const device = gpu ? gpu.device : null;
-        gpu?.destroy(); gpu = null;
-        const info = build(target, !!device);
-        builtGpu = !!device;
-        const mf = m!;
-        // bring the fine model into the coarse model's current frame (the interpolated winds are relative to it)
-        if (frameC.u !== frameVel.u || frameC.v !== frameVel.v) {
-          mf.shiftFrame(frameC.u - frameVel.u, frameC.v - frameVel.v);
-          frameVel = frameC; if (physCfg) physCfg.frameVel = frameVel;
-        }
-        // sub-box around the tracked storm when the fine domain is smaller
-        const Lfx = mf.c.nx * mf.c.dx, Lfy = mf.c.ny * mf.c.dy;
-        const cx = trackC?.x ?? Lc / 2, cy = trackC?.y ?? Lcy / 2;
-        const open = mc.c.lateral === 'open';
-        const x0 = Lfx >= Lc - 1 ? 0 : open ? Math.max(0, Math.min(Lc - Lfx, cx - Lfx / 2)) : cx - Lfx / 2;
-        const y0 = Lfy >= Lcy - 1 ? 0 : open ? Math.max(0, Math.min(Lcy - Lfy, cy - Lfy / 2)) : cy - Lfy / 2;
-        refineInto(mc, mf, x0, y0, { rain: mpc.rainAcc, snow: mpc.snowAcc }, { rain: mp!.rainAcc, snow: mp!.snowAcc });
-        // an open box relaxes to its state at this moment
-        if (mf.c.lateral === 'open') mf.boundary = { u: Float64Array.from(mf.u), v: Float64Array.from(mf.v), th: Float64Array.from(mf.th), qv: Float64Array.from(mf.scalars[QV]!), pp: Float64Array.from(mf.pp) };
-        const km = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${d} m`);
-        let note = `已從 Δx ${km(fromDx)} 細化 / refined from Δx ${km(fromDx)} at t = ${(mc.time / 60).toFixed(0)} min`;
-        if (device) {
-          const reason = await tryGpu(device);
-          if (reason) note += ' · ' + gpuFailNote(reason);
-        }
-        dt0 = mf.c.dt; adaptive = true;
-        const wrapX = (x: number, L: number): number => (open ? x : x - Math.floor(x / L) * L);
-        resetOrigin(originC.x + wrapX(x0, Lc), originC.y + wrapX(y0, Lcy)); stormDomain = null; setupTracers(); clearForcings();
-        const c = mf.c;
-        post({ type: 'ready', land: landMask() ?? info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
-          tc: isTc(), setup, ...gridOptions() });
-        await sendFrame();
-      } catch (e) { post({ type: 'error', message: `細化失敗 / refinement failed: ${String(e)}` }); }
-      finally { busy = false; running = wasRunning; }
+      const target = refinedSetup(setup);
+      if (!target) return;
+      await regridTo(target, 'refine');
+    }
+    else if (msg.type === 'regrid') {
+      if (!setup || experiment === 'nest' || axi || !m || !mp) { post({ type: 'log', text: '這個實驗不能改網格 / this experiment cannot change its grid' }); return; }
+      const target = gridTarget(setup, msg.setup);
+      if (typeof target === 'string') { post({ type: 'log', text: target }); return; }
+      await regridTo(target, 'grid');
     }
     else if (msg.type === 'coarsen') {
       if (!setup || experiment === 'nest' || axi || !m || !mp) return;
@@ -1180,6 +1142,87 @@ async function applySettings(want: RegionalSetup): Promise<string> {
   rec.sendMeta = true;
   await stepAfterChange();
   return `設定已套用，模擬繼續（時間 ${(mm.time / 60).toFixed(0)} 分）/ settings applied, the run goes on: ${notes.join('；')}`;
+}
+
+/**
+ * The set-up a grid change asks for: the domain (not larger than now: a larger one is the nest of a coarse outer grid), the model top and the vertical spacing of `want`, the rest of
+ * `cur`. A message when it cannot be done.
+ */
+function gridTarget(cur: RegionalSetup, want: RegionalSetup): RegionalSetup | string {
+  const s = sanitize({ ...cur, L: want.L, top: want.top, dz: want.dz });
+  if (s.L > cur.L + 1) return '範圍加大要用外圈的粗網格（還沒做）；這裡只能縮小或不變 / a larger domain needs a coarse outer grid (not done yet): here the domain can only get smaller or stay';
+  if (Math.abs(s.L - cur.L) < 1 && Math.abs(s.top - cur.top) < 1 && Math.abs(s.dz - cur.dz) < 1e-9) return '網格沒有變 / the grid did not change';
+  if (setupCells(s) > 30e6) return `網格 ${(setupCells(s) / 1e6).toFixed(1)} M 格，上限 30 M / ${(setupCells(s) / 1e6).toFixed(1)} M cells, at most 30 M`;
+  return { ...s, preset: 'custom', dt: 0 };
+}
+
+/**
+ * Continue the running simulation on the grid of set-up `target` (refinement: a finer grid; 'grid': another domain size, model top or vertical spacing): the state is interpolated into
+ * a model built for it (refine.ts), the time goes on, the replay recording goes on (the frames carry their grid), the painted sea and land, the lasting winds and the particles are kept
+ * where the grid allows (a smaller domain or a lowered top drops what is outside it). The eye nest is stopped (its geometry belongs to the old grid).
+ */
+async function regridTo(target: RegionalSetup, kind: 'refine' | 'grid'): Promise<void> {
+  const wasRunning = running; running = false;
+  await waitIdle();
+  busy = true;
+  try {
+    await syncFromGpu();
+    advanceOrigin();
+    const hadNest = !!eye;
+    stopNest();
+    const mc = m!, mpc = mp!, fromDx = mc.c.dx, frameC = { ...frameVel }, trackC = tracker?.position ?? null, originC = { ...origin };
+    const Lc = mc.c.nx * mc.c.dx, Lcy = mc.c.ny * mc.c.dy, Lf = target.L;
+    const sfC = phys?.surface ? { tsk: Float64Array.from(phys.surface.tsk), wet: Float64Array.from(phys.surface.wet) } : null;
+    const tpC = gpu ? (gpu.tracerCount ? await gpu.readTracers() : null) : tracers ? tracers.pos.slice() : null;
+    const forcingsC = forcings;
+    if (kind === 'refine') keepParent(Lf < Lc - 1); else parents = [];
+    const device = gpu ? gpu.device : null;
+    gpu?.destroy(); gpu = null;
+    const info = build(target, !!device);
+    builtGpu = !!device;
+    const mf = m!;
+    // bring the new model into the old model's current frame (the interpolated winds are relative to it)
+    if (frameC.u !== frameVel.u || frameC.v !== frameVel.v) {
+      mf.shiftFrame(frameC.u - frameVel.u, frameC.v - frameVel.v);
+      frameVel = frameC; if (physCfg) physCfg.frameVel = frameVel;
+    }
+    // a sub-box around the tracked storm when the new domain is smaller
+    const Lfx = mf.c.nx * mf.c.dx, Lfy = mf.c.ny * mf.c.dy;
+    const cx = trackC?.x ?? Lc / 2, cy = trackC?.y ?? Lcy / 2;
+    const open = mc.c.lateral === 'open';
+    const x0 = Lfx >= Lc - 1 ? 0 : open ? Math.max(0, Math.min(Lc - Lfx, cx - Lfx / 2)) : cx - Lfx / 2;
+    const y0 = Lfy >= Lcy - 1 ? 0 : open ? Math.max(0, Math.min(Lcy - Lfy, cy - Lfy / 2)) : cy - Lfy / 2;
+    refineInto(mc, mf, x0, y0, { rain: mpc.rainAcc, snow: mpc.snowAcc }, { rain: mp!.rainAcc, snow: mp!.snowAcc });
+    // an open box relaxes to its state at this moment
+    if (mf.c.lateral === 'open') mf.boundary = { u: Float64Array.from(mf.u), v: Float64Array.from(mf.v), th: Float64Array.from(mf.th), qv: Float64Array.from(mf.scalars[QV]!), pp: Float64Array.from(mf.pp) };
+    // the painted sea and land and the skin temperature (only a grid change: a refinement makes them anew from the set-up, as before)
+    if (kind === 'grid' && sfC && phys?.surface && physCfg) {
+      const sf = phys.surface;
+      sf.tsk.set(regridPlane(mc, sfC.tsk, mf, x0, y0)); sf.wet.set(regridPlane(mc, sfC.wet, mf, x0, y0));
+      physCfg.surface = { tsk: sf.tsk, wet: sf.wet };
+    }
+    const km = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${d} m`);
+    let note = kind === 'refine' ? `已從 Δx ${km(fromDx)} 細化 / refined from Δx ${km(fromDx)} at t = ${(mc.time / 60).toFixed(0)} min`
+      : `網格已改成 ${mf.c.nx}×${mf.c.ny}×${mf.c.nz}（範圍 ${km(Lfx)}、頂 ${km(mf.c.nz * mf.c.dz)}、Δz ${km(mf.c.dz)}），模擬接著跑，t = ${(mc.time / 60).toFixed(0)} 分 / grid changed to ${mf.c.nx}×${mf.c.ny}×${mf.c.nz}: the run goes on`;
+    if (device) {
+      const reason = await tryGpu(device);
+      if (reason) note += ' · ' + gpuFailNote(reason);
+    }
+    dt0 = mf.c.dt; adaptive = true;
+    const wrapX = (x: number, L: number): number => (open ? x : x - Math.floor(x / L) * L);
+    resetOrigin(originC.x + wrapX(x0, Lc), originC.y + wrapX(y0, Lcy)); stormDomain = null;
+    // the lasting winds and the particles stay where the horizontal grid is the same and the top is not lowered
+    const sameXY = Math.abs(Lfx - Lc) < 1 && Math.abs(Lfy - Lcy) < 1, keep = kind === 'grid' && sameXY;
+    if (keep) { forcings = forcingsC; syncForcings(); } else clearForcings();
+    if (keep && tpC && mf.c.nz * mf.c.dz >= mc.c.nz * mc.c.dz - 1e-6) setupTracers(tpC); else setupTracers();
+    if (hadNest) note += ' · 眼區細化已停止（它屬於舊網格），要的話請重新開啟 / the eye nest was stopped (it belonged to the old grid): start it again if you want';
+    if (!keep && kind === 'grid' && forcingsC.length) note += ' · 持續風已清除（範圍變了）/ the lasting winds were cleared (the domain changed)';
+    const c = mf.c;
+    post({ type: 'ready', land: landMask() ?? info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
+      tc: isTc(), setup, ...gridOptions() });
+    await sendFrame();
+  } catch (e) { post({ type: 'error', message: `${kind === 'refine' ? '細化' : '改網格'}失敗 / grid change failed: ${String(e)}` }); }
+  finally { busy = false; running = wasRunning; }
 }
 
 /**

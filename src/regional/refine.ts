@@ -63,6 +63,13 @@ function surfaceSampler(mc: RegionalModel): (a: ArrayLike<number>, x: number, y:
   };
 }
 
+/** A [j][i] surface array of the model `mc` (skin temperature, wetness: painted sea and land) on the grid of `mf`, whose domain starts at (x0, y0) m in mc's coordinates (bilinear). */
+export function regridPlane(mc: RegionalModel, src: ArrayLike<number>, mf: RegionalModel, x0 = 0, y0 = 0): Float64Array {
+  const ss = surfaceSampler(mc), f = mf.c, out = new Float64Array(f.nx * f.ny);
+  for (let j = 0; j < f.ny; j++) for (let i = 0; i < f.nx; i++) out[j * f.nx + i] = ss(src, x0 + (i + 0.5) * f.dx, y0 + (j + 0.5) * f.dy);
+  return out;
+}
+
 /** Interpolate the state of the coarse model `mc` into the fine model `mf`, whose domain starts at
  *  (x0, y0) metres in the coarse model's coordinates. Surface accumulations ([j][i]) are interpolated
  *  too. The fine model's time is set to the coarse model's. `cols`: only the fine columns (i, j) it accepts (faces
@@ -135,6 +142,8 @@ export function refineInto(mc: RegionalModel, mf: RegionalModel, x0 = 0, y0 = 0,
         const y = y0 + (j + 0.5) * f.dy, jc = cell(y / cc.dy, cc.ny);
         for (let i = 0; i < f.nx; i++) {
           if (!take(i, j)) continue;
+          // above the top of the coarse model there is no cloud or rain (a model made taller starts clear up there)
+          if (z >= cc.nz * cc.dz) { dst[mf.idx(i, j, k)] = 0; continue; }
           const x = x0 + (i + 0.5) * f.dx;
           dst[mf.idx(i, j, k)] = sample(root, x, y, z, 0.5, 0.5, false) ** 3;
           T += Math.max(0, src[mc.idx(cell(x / cc.dx, cc.nx), jc, K)]!) * mc.rho0[K]!;

@@ -45,6 +45,8 @@ export type ToRegionalWorker =
       frame?: { state: Q16[]; aux: ReplayAux | null; centre: { x: number; y: number } | null } }
   /** continue the running simulation on the finer grid of its set-up (build.ts refinedSetup) */
   | { type: 'refine' }
+  /** continue the running simulation on a grid with another domain size (smaller only), model top or vertical spacing (the rest of the set-up is ignored): the state is interpolated, the run goes on (worker.ts regridTo) */
+  | { type: 'regrid'; setup: import('./setup.js').RegionalSetup }
   /** refine the eye and eyewall: a finer grid (spacings near dx, dz; m) in a cylinder of radius R (m) at the centre of the
    *  running domain, coupled both ways (twoway.ts); replaces a running one */
   | { type: 'nestStart'; R: number; dx: number; dz: number }

@@ -7,6 +7,7 @@ import { RegionalPhysics } from '../regional/physics.js';
 import { buildModel, envWind, soundingOf } from '../app/regional/build.js';
 import { setupOf, type RegionalSetup } from '../app/regional/setup.js';
 import { applyLive, changedKeys, liveMerge, type LiveHolder } from '../app/regional/liveSettings.js';
+import { refineInto } from '../regional/refine.js';
 import { check, summary } from './assert.js';
 
 const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200, dt: 1, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 0, dampRate: 0, kdiff2: 0 };
@@ -115,6 +116,55 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
   // an inner grid (the eye nest) takes the rotation, never the boundaries or the surface
   { const t = mk(small), r = applyLive(t.h, { ...small, lat: 10, boundary: 'open' as const, sst: 31 }, small, t.frame, true);
     check('live settings: an inner grid takes the rotation, not the boundaries or the surface', t.m.c.lateral !== 'open' && Math.abs(t.m.c.f - 2 * 7.292e-5 * Math.sin(10 * Math.PI / 180)) < 1e-12 && Math.abs(t.h.phys!.surface!.tsk[0]! - 301.15) < 1e-9 && r.physics); }
+}
+
+// Grid changes while running (the domain smaller, the model top higher or lower, another vertical spacing): the state is interpolated into the new grid (refineInto)
+{
+  const A: RegionalSetup = { ...setupOf('tc'), preset: 'custom', L: 300000, dx: 15000, top: 15000, dz: 1000, dt: 0, init: 'vortex', initAmp: 20 };
+  const ma = buildModel(A, true).model;
+  // a state: the vortex and a cloud in the middle levels, all of it smooth in height
+  const n = A.L / A.dx;
+  for (let k = 0; k < ma.c.nz; k++) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const q = ma.idx(i, j, k), z = ma.zc[k]!;
+    ma.th[q] = ma.th[q]! + 0.0004 * z + 0.3 * Math.sin(i * 0.5 + j * 0.3);
+    ma.scalars[1]![q] = z > 3000 && z < 6000 ? 5e-4 : 0;
+    ma.scalars[3]![q] = k === ma.c.nz - 1 ? 1e-4 : 0;            // ice in the topmost level
+  }
+  const maxDiff = (a: Float64Array, b: Float64Array, ka: (k: number) => number, kb: number, nI: number, nJ: number, dI = 0, dJ = 0, mA = ma, mB: RegionalModel): number => {
+    let d = 0;
+    for (let k = 0; k < kb; k++) for (let j = 0; j < nJ; j++) for (let i = 0; i < nI; i++) d = Math.max(d, Math.abs(b[mB.idx(i, j, k)]! - a[mA.idx(i + dI, j + dJ, ka(k))]!));
+    return d;
+  };
+  const regrid = (t: RegionalSetup, x0 = 0, y0 = 0): RegionalModel => { const mf = buildModel(t, true).model; refineInto(ma, mf, x0, y0); return mf; };
+
+  // the same grid: nothing changes
+  { const mf = regrid(A);
+    check('regrid: the same grid gives the same state (theta, u, v, qc to 1e-9)', maxDiff(ma.th, mf.th, (k) => k, ma.c.nz, n, n, 0, 0, ma, mf) < 1e-9 && maxDiff(ma.u, mf.u, (k) => k, ma.c.nz, n, n, 0, 0, ma, mf) < 1e-9 && maxDiff(ma.scalars[1]!, mf.scalars[1]!, (k) => k, ma.c.nz, n, n, 0, 0, ma, mf) < 1e-12); }
+  // a higher top: the lower levels are the same, the new levels carry the departure of the old top, no cloud or rain above the old top, w = 0 at the new lid
+  { const mf = regrid({ ...A, top: 20000 });
+    const lower = maxDiff(ma.th, mf.th, (k) => k, ma.c.nz, n, n, 0, 0, ma, mf) < 1e-9;
+    const depTop = ma.th[ma.idx(4, 4, ma.c.nz - 1)]! - ma.th0[ma.c.nz - 1]!, depNew = mf.th[mf.idx(4, 4, 18)]! - mf.th0[18]!;
+    let cloudAbove = 0; for (let k = ma.c.nz; k < mf.c.nz; k++) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) cloudAbove += mf.scalars[1]![mf.idx(i, j, k)]! + mf.scalars[3]![mf.idx(i, j, k)]!;
+    let wLid = 0; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) wLid = Math.max(wLid, Math.abs(mf.w[mf.idx(i, j, mf.c.nz)]!));
+    // (the new levels all carry the departure at the old lid, a half level beyond the topmost centre: the same in every new level)
+    const sameAbove = [15, 16, 17, 18, 19].every((k) => Math.abs(mf.th[mf.idx(4, 4, k)]! - mf.th0[k]! - depNew) < 1e-9);
+    check('regrid: a higher top keeps the lower levels, the new ones carry the departure of the old lid (the same in all of them), start clear, no w at the lid',
+      mf.c.nz === 20 && lower && sameAbove && Math.abs(depNew - depTop) < 0.3 && cloudAbove === 0 && wLid === 0,
+      `departure at the old top level ${depTop.toFixed(3)}, in the new levels ${depNew.toFixed(3)}`); }
+  // a lower top: the levels that stay are the same
+  { const mf = regrid({ ...A, top: 10000 });
+    check('regrid: a lower top keeps the levels that stay', mf.c.nz === 10 && maxDiff(ma.th, mf.th, (k) => k, 10, n, n, 0, 0, ma, mf) < 1e-9 && maxDiff(ma.v, mf.v, (k) => k, 10, n, n, 0, 0, ma, mf) < 1e-9); }
+  // another vertical spacing: a departure that is linear in height stays exact (a model without the vortex, so that the field is smooth in height)
+  { const mb = buildModel({ ...A, init: 'none' }, true).model;
+    for (let k = 0; k < mb.c.nz; k++) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) mb.th[mb.idx(i, j, k)] = mb.th0[k]! + 0.0004 * mb.zc[k]! + 0.3 * Math.sin(i * 0.5 + j * 0.3);
+    const mf = buildModel({ ...A, init: 'none', dz: 500 }, true).model; refineInto(mb, mf, 0, 0);
+    let ok = mf.c.nz === 30, worst = 0;
+    for (let k = 1; k < 13; k++) { const z = mf.zc[k]!, dep = mf.th[mf.idx(6, 7, k)]! - mf.th0[k]!, expect = 0.0004 * z + 0.3 * Math.sin(6 * 0.5 + 7 * 0.3); worst = Math.max(worst, Math.abs(dep - expect)); }
+    if (worst > 2e-3) ok = false;
+    check('regrid: another vertical spacing interpolates a departure that is linear in height (to 2e-3 K)', ok, worst); }
+  // a smaller domain: the cells of the box are the old cells (same spacing)
+  { const mf = regrid({ ...A, L: 150000 }, 75000, 45000);
+    check('regrid: a smaller domain takes the cells of the box (theta, u to 1e-9)', mf.c.nx === 10 && maxDiff(ma.th, mf.th, (k) => k, ma.c.nz, 10, 10, 5, 3, ma, mf) < 1e-9 && maxDiff(ma.u, mf.u, (k) => k, ma.c.nz, 10, 10, 5, 3, ma, mf) < 1e-9); }
 }
 
 summary('live');
