@@ -70,6 +70,8 @@ export type ToRegionalWorker =
   | { type: 'micro'; iceSS?: boolean; liqTau?: number }
   /** the domain follows the storm (on) or stays on the ground (off), at any time: the page's switch; the worker answers with the same message when it changes by itself */
   | { type: 'follow'; on: boolean }
+  /** change settings of the running model without restarting it (liveSettings.ts: latitude, boundaries, environmental wind, sounding, surface, fluxes, radiation, gustiness, noise, cumulus); the rest of the set-up is ignored */
+  | { type: 'settings'; setup: import('./setup.js').RegionalSetup }
   /** tracer particles for the 3-D view (0: off) */
   | { type: 'tracers'; n: number }
   /** interaction (conditions only): a warm bubble or a cold pool centred at (x, y) m in domain coordinates, optionally
@@ -213,6 +215,8 @@ export type FromRegionalWorker =
   | { type: 'paused'; reason: string }
   /** whether the domain follows the storm now (the worker turned it on or off, or confirms the page's switch) */
   | { type: 'follow'; on: boolean }
+  /** settings changed while running were applied: the set-up as it is now (the page shows it) and what was done */
+  | { type: 'settings'; setup: import('./setup.js').RegionalSetup; note: string }
   | { type: 'log'; text: string }
   | { type: 'saveData'; meta: import('../saves.js').SaveMeta; buffer: ArrayBuffer }
   | { type: 'error'; message: string };

@@ -142,6 +142,25 @@ export class RegionalModel {
     }
   }
 
+  /**
+   * Replace the base state by that of another sounding while keeping the departures from it (theta - theta0, qv - qv0 and the
+   * pressure departure pi'): the storm stays and the environment under it changes. Approximate: the hydrostatic balance of the
+   * departures is the one of the old base state. Open-boundary targets move with the base state. Scalar 0 is the water vapour.
+   */
+  changeSounding(snd: (z: number) => { theta: number; qv: number }): void {
+    const { nz } = this.c, th0 = Float64Array.from(this.th0), qv0 = Float64Array.from(this.qv0);
+    this.buildBaseState(snd);
+    const qv = this.scalars[0], b = this.boundary;
+    for (let k = 0; k < nz; k++) {
+      const dth = this.th0[k]! - th0[k]!, dq = this.qv0[k]! - qv0[k]!;
+      for (let o = k * this.plane; o < (k + 1) * this.plane; o++) {
+        this.th[o] = this.th[o]! + dth;
+        if (qv) qv[o] = Math.max(0, qv[o]! + dq);
+        if (b) { b.th[o] = b.th[o]! + dth; if (b.qv) b.qv[o] = Math.max(0, b.qv[o]! + dq); }
+      }
+    }
+  }
+
   /** Fill periodic halos of a 3-D array for levels [0, nk). */
   fillHalo(a: Float64Array, nk: number): void {
     const { nx, ny } = this.c, sx = this.sx;

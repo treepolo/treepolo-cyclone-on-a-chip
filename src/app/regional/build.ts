@@ -45,6 +45,42 @@ export function envWind(s: RegionalSetup): { wind: (z: number) => { u: number; v
   return { wind: () => ({ u: 0, v: 0 }), frame: { u: 0, v: 0 } };
 }
 
+/** The thermodynamic sounding of a set-up. */
+export function soundingOf(s: RegionalSetup): (z: number) => { theta: number; qv: number } {
+  return s.sounding === 'wk82' ? weismanKlempQ(s.qvBL / 1000) : tcSounding(s.sounding === 're87' ? 're87' : 'unstable', s.sst + 273.15);
+}
+
+/**
+ * The sub-grid / surface / radiation physics of a set-up on the grid of model m: none for the classic numerics-only storm runs (no fluxes, no
+ * radiation); otherwise sub-grid mixing (isotropic LES-type below 1.5 km grid spacing), surface and radiation. `keep`: a per-column surface
+ * (skin temperature K and wetness) that stays as it is (painted sea and land), else one made from the set-up. `land`: the all-land mask of a land set-up.
+ */
+export function physicsOf(s: RegionalSetup, m: RegionalModel, frame: { u: number; v: number }, keep: { tsk: Float64Array; wet: Float64Array } | null): { physics: RegionalPhysicsConfig | null; land: Uint8Array | null } {
+  let physics: RegionalPhysicsConfig | null = null;
+  let land: Uint8Array | null = null;
+  if (s.fluxes || s.radiation !== 'none') {
+    const { nx, ny } = m.c, les = s.dx <= 1500, delta = Math.cbrt(s.dx * s.dx * s.dz);
+    physics = {
+      lh: les ? 0.21 * delta : 0.2 * s.dx, lv: les ? 0.21 * delta : 100, sst: 0, ck: 1.2e-3,
+      radTau: s.radiation === 'relax' ? 12 * 3600 : s.radiation === 'const' ? 12 * 3600 : 0, radMax: (s.radiation === 'relax' ? s.radRate : 2) / 86400,
+      radConst: s.radiation === 'const' ? s.radRate / 86400 : 0,
+      vmin: s.vmin, gust: s.gust, blNoise: s.blNoise, cumulus: !!s.cumulus, frameVel: { ...frame },
+    };
+    if (s.fluxes) {
+      const n2 = nx * ny, sea = s.surface === 'sea';
+      physics.surface = keep ? { tsk: keep.tsk, wet: keep.wet }
+        : { tsk: new Float64Array(n2).fill(sea ? s.sst + 273.15 : m.th0[0]! * m.pi0[0]!), wet: new Float64Array(n2).fill(sea ? 1 : 0.3) };
+      if (!sea) { physics.z0 = 0.1; if (!keep) land = new Uint8Array(n2).fill(1); }
+    }
+  }
+  return { physics, land };
+}
+
+/** Sea-level pressure (hPa) of the undisturbed environment of a model, reduced from its lowest level as storms.ts does (for pressure deficits). */
+export function environmentPressure(m: RegionalModel): number {
+  return 1e5 * Math.pow(m.pi0[0]!, 1004.5 / 287.05) / 100 * Math.exp(9.80665 * m.zc[0]! / (287.05 * m.th0[0]! * m.pi0[0]! * (1 + 0.61 * m.qv0[0]!)));
+}
+
 export function buildModel(input: RegionalSetup, gpuOk: boolean): Built {
   let s = { ...input };
   // grids meant for a GPU run coarser on the CPU (as before: 3 km TC on the 5 km grid, 250 m tornado as a 500 m preview)
@@ -61,8 +97,7 @@ export function buildModel(input: RegionalSetup, gpuOk: boolean): Built {
     // a background wind on a rotating domain is geostrophic (balanced by the large-scale pressure gradient it implies)
     geostrophic: f !== 0 && s.wind !== 'calm',
   };
-  const snd = s.sounding === 'wk82' ? weismanKlempQ(s.qvBL / 1000) : tcSounding(s.sounding === 're87' ? 're87' : 'unstable', s.sst + 273.15);
-  const m = new RegionalModel(cfg, snd, 6);
+  const m = new RegionalModel(cfg, soundingOf(s), 6);
   m.setBaseWind((z) => { const w = wind(z); return { u: w.u - frame.u, v: w.v - frame.v }; });
   for (let k = 0; k < nz; k++) for (let j = 0; j < nx; j++) for (let i = 0; i < nx; i++) m.scalars[QV]![m.idx(i, j, k)] = m.qv0[k]!;
   // open boundaries relax toward the undisturbed environment
@@ -77,25 +112,8 @@ export function buildModel(input: RegionalSetup, gpuOk: boolean): Built {
       if (r < 1) m.th[m.idx(i, j, k)] = m.th[m.idx(i, j, k)]! + s.initAmp * Math.cos(0.5 * Math.PI * r) ** 2;
     }
   }
-  // physics: none for the classic numerics-only storm runs (no fluxes, no radiation); otherwise sub-grid mixing
-  // (isotropic LES-type below 1.5 km grid spacing), surface and radiation
-  let physics: RegionalPhysicsConfig | null = null;
-  let land: Uint8Array | null = null;
-  if (s.fluxes || s.radiation !== 'none') {
-    const les = s.dx <= 1500, delta = Math.cbrt(s.dx * s.dx * s.dz);
-    physics = {
-      lh: les ? 0.21 * delta : 0.2 * s.dx, lv: les ? 0.21 * delta : 100, sst: 0, ck: 1.2e-3,
-      radTau: s.radiation === 'relax' ? 12 * 3600 : s.radiation === 'const' ? 12 * 3600 : 0, radMax: (s.radiation === 'relax' ? s.radRate : 2) / 86400,
-      radConst: s.radiation === 'const' ? s.radRate / 86400 : 0,
-      vmin: s.vmin, gust: s.gust, blNoise: s.blNoise, cumulus: !!s.cumulus, frameVel: { ...frame },
-    };
-    if (s.fluxes) {
-      const n2 = nx * nx, sea = s.surface === 'sea';
-      physics.surface = { tsk: new Float64Array(n2).fill(sea ? s.sst + 273.15 : m.th0[0]! * m.pi0[0]!), wet: new Float64Array(n2).fill(sea ? 1 : 0.3) };
-      if (!sea) { physics.z0 = 0.1; land = new Uint8Array(n2).fill(1); }
-    }
-  }
-  const dpEnv = 1e5 * Math.pow(m.pi0[0]!, 1004.5 / 287.05) / 100 * Math.exp(9.80665 * m.zc[0]! / (287.05 * m.th0[0]! * m.pi0[0]! * (1 + 0.61 * m.qv0[0]!)));
+  const { physics, land } = physicsOf(s, m, frame, null);
+  const dpEnv = environmentPressure(m);
   const tracker = s.follow ? new StormTracker(s.init === 'vortex' ? 'vortex' : 'updraft') : null;
   const p = presetById(s.preset);
   return { model: m, physics, frame, tracker, dpEnv, setup: s, land, description: `${p && s.preset !== 'custom' ? p.label.split(' / ')[0] + '：' : ''}${describe(s)}` };

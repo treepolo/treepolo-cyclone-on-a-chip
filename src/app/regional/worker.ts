@@ -10,7 +10,8 @@ import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regi
 import { refineInto, coarsenInto } from '../../regional/refine.js';
 import { Tracers, type TracerParams } from '../../regional/tracers.js';
 import { AxiDriver, AXI_DEFAULTS, LEGACY_TC, type AxiParams } from './axiDriver.js';
-import { buildModel, setupFromLegacy, axiFromSetup, refinedSetup, coarsenedSetup } from './build.js';
+import { buildModel, setupFromLegacy, axiFromSetup, refinedSetup, coarsenedSetup, environmentPressure } from './build.js';
+import { applyLive, changedKeys, liveMerge, ENV_KEYS } from './liveSettings.js';
 import { presetById, setupOf, tcLike, type RegionalSetup } from './setup.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
@@ -793,7 +794,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     }
     else if (msg.type === 'coarsen') {
       if (!setup || experiment === 'nest' || axi || !m || !mp) return;
-      const parent = parents[parents.length - 1] ?? null, target = parent ? parent.setup : coarsenedSetup(setup);
+      const parent = parents[parents.length - 1] ?? null, target = parent ? liveMerge(parent.setup, setup) : coarsenedSetup(setup);
       if (!target) return;
       const wasRunning = running; running = false;
       await waitIdle();
@@ -900,6 +901,18 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       busy = true;
       try { const note = await setFollow(msg.on); if (note) post({ type: 'log', text: note }); if (m && mp) await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
       busy = false;
+    }
+    else if (msg.type === 'settings') {
+      if (!m || !mp || !setup || axi || experiment === 'nest') { post({ type: 'log', text: '這個實驗不能在模擬中改設定 / this experiment cannot change settings while running' }); return; }
+      const wasRunning = running; running = false;
+      await waitIdle();
+      busy = true;
+      try {
+        const note = await applySettings(msg.setup);
+        post({ type: 'settings', setup: setup!, note });
+        await sendFrame();
+      } catch (e) { post({ type: 'error', message: `套用設定失敗 / applying the settings failed: ${String(e)}` }); }
+      finally { busy = false; running = wasRunning; }
     }
     else if (msg.type === 'perturb' || msg.type === 'paint' || msg.type === 'environment' || msg.type === 'moisture' || msg.type === 'wind' || msg.type === 'vortex' || msg.type === 'condensate') {
       if (!m || !mp) { post({ type: 'error', message: '這個實驗不支援此互動（軸對稱模式請改用參數面板）/ this experiment does not support this interaction (use the panel for the axisymmetric model)' }); return; }
@@ -1120,6 +1133,53 @@ async function setFollow(on: boolean): Promise<string> {
   if (setup) setup = { ...setup, follow: on };
   post({ type: 'follow', on });
   return note;
+}
+
+/**
+ * Change settings of the running model (liveSettings.ts) without restarting it: the state, the time, the replay recording and the lasting winds stay; the CPU model
+ * (and the eye nest's inner grid) is changed in place from the current state, then the GPU models are built anew from it, as for a refinement. Returns the log note.
+ */
+async function applySettings(want: RegionalSetup): Promise<string> {
+  const mm = m!, mpp = mp!, old = setup!, next = liveMerge(old, want);
+  const keys = changedKeys(old, next);
+  if (!keys.length) return '設定沒有變 / nothing changed';
+  await syncFromGpu();
+  advanceOrigin();
+  undo = null;
+  // the outer model
+  const outer = { m: mm, cfg: physCfg, phys };
+  const r = applyLive(outer, next, old, frameVel, false);
+  physCfg = outer.cfg; phys = outer.phys;
+  if (physCfg) physCfg.frameVel = frameVel;
+  if (r.physics) hookForcing(mm);          // (the physics was made anew and cleared the model's hooks)
+  const notes = [...r.notes];
+  // the eye nest's inner grid: the same changes in its own grid
+  if (eye) {
+    const inner = { m: eye.m, cfg: eye.cfg, phys: eye.phys };
+    const ri = applyLive(inner, next, old, frameVel, true);
+    eye.cfg = inner.cfg; eye.phys = inner.phys;
+    if (inner.cfg) inner.cfg.frameVel = frameVel;
+    if (ri.physics) { eye.rehook(); eye.surfaceFrom(mm, phys?.surface ?? null); }
+  }
+  setup = next;
+  // the coarser states kept by refinements were made in the old environment: they cannot be gone back to
+  if (parents.length && keys.some((k) => ENV_KEYS.includes(k))) { parents = []; notes.push('細化前保留的較粗狀態不再適用（環境變了）：粗化改成把目前的模擬平均到較粗網格 / the coarser states kept before refinements no longer fit (the environment changed): coarsening averages the present run instead'); }
+  if (keys.includes('sounding') || keys.includes('qvBL')) dpEnv = environmentPressure(mm);
+  if (keys.includes('surface') || keys.includes('fluxes')) post({ type: 'land', land: landMask() });
+  // the GPU models are built from the changed state (the particles and the lasting winds are kept)
+  if (gpu) {
+    const device = gpu.device, dtNow = gpu.dt, tp = gpu.tracerCount ? await gpu.readTracers() : null;
+    gpu.destroy();
+    gpu = new GpuRegional(device, mm, { moist: true, physics: physCfg, ice: true });
+    gpu.setForcings(forcings.map((x) => x.f));
+    gpu.uploadFrom(mm, { rain: mpp.rainAcc, snow: mpp.snowAcc });
+    gpu.setDt(dtNow);
+    if (tp) gpu.initTracers(tp);
+    await nestGpuUp();
+  }
+  rec.sendMeta = true;
+  await stepAfterChange();
+  return `設定已套用，模擬繼續（時間 ${(mm.time / 60).toFixed(0)} 分）/ settings applied, the run goes on: ${notes.join('；')}`;
 }
 
 /**

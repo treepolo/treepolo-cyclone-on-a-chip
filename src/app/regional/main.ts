@@ -7,6 +7,7 @@ import { RegionalCharts } from './charts.js';
 import { SatelliteRenderer } from './satellite.js';
 import { Missions } from './missions.js';
 import { SetupForm } from './setupForm.js';
+import { LiveForm } from './liveForm.js';
 import { defaultDt, type RegionalSetup } from './setup.js';
 import type { StormNow } from '../../regional/storms.js';
 import { Tools3D } from './tools3d.js';
@@ -83,6 +84,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
 worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
   if (m.type === 'follow') { $<HTMLInputElement>('followNow').checked = m.on; return; }
+  if (m.type === 'settings') { form.set(m.setup); live.set(m.setup); log(m.note); return; }
   if (m.type === 'ready') {
     // a new model ends the replay (a refinement keeps the recording, but not a replay file shown)
     if (!refining || fileMode) { replay.clear(); endReplay(); }
@@ -107,7 +109,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     nestOk = !!m.nestOk;
     $<HTMLButtonElement>('eyeGo').disabled = !nestOk;
     eyeInfo();
-    if (m.setup) form.set(m.setup);
+    if (m.setup) { form.set(m.setup); live.set(m.setup); }
+    live.enable(!!m.setup && m.experiment !== 'tc_axi' && m.experiment !== 'nest');
     curExp = m.experiment; curTc = m.tc;
     // a nest has its land mask from the global model (sea elsewhere); a set-up says which surface it has
     curSea = m.setup ? m.setup.surface === 'sea' : m.experiment === 'nest';
@@ -269,6 +272,8 @@ function showSurface(): void {
   $('surface').textContent = frac <= 0 ? '海洋 / sea' : frac >= 1 ? '陸地 / land' : `海洋 ${(100 * (1 - frac)).toFixed(0)}%、陸地 ${(100 * frac).toFixed(0)}% / sea and land`;
 }
 const form = new SetupForm($<HTMLSelectElement>('preset'), { grid: $('setupGrid'), env: $('setupEnv'), init: $('setupInit') }, $('setupInfo'), $<HTMLButtonElement>('apply'), $<HTMLButtonElement>('resetPreset'));
+const live = new LiveForm($('liveFields'), $('liveInfo'), $<HTMLButtonElement>('liveApply'));
+live.onApply = (s): void => { send({ type: 'settings', setup: s }); };
 const backend = (): 'auto' | 'cpu' => $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu';
 function start(s: RegionalSetup): void {
   running = false; sync();

@@ -122,6 +122,10 @@ a{color:#8fc1ff}
 <label class="f chk" title="−40 °C 以下的空氣可以保持冰過飽和，直到水氣到達溶液滴自己結冰的臨界值（對冰約 145–160%）才凝華成冰，像真實的卷雲；關掉就是一超過冰飽和（對冰 100%）立刻凝華。−40 到 0 °C 之間冰本來就是以有限速率成長 / below −40 °C the air can hold ice supersaturation until the vapour reaches the threshold at which solution droplets freeze by themselves (about 145–160 % over ice), as real cirrus does; off: vapour beyond ice saturation (100 %) deposits at once. Between −40 and 0 °C ice grows at a finite rate either way"><input id="iceSS" type="checkbox" checked /><span>冰過飽和（−40 °C 以下）/ Ice supersaturation</span></label>
 <label class="f chk" title="水氣超過水飽和時，不是當步全部凝結，而是依下面的凝結時間慢慢凝結：空氣可以保持液態水過飽和，之後集中爆發（雲室、過熱液體的味道）。真實大氣的液態過飽和只有約 1%，所以這是「假如」的設定。凝結時間會用在所有格子，包含已經有雲的格子；雲水蒸發仍是立刻 / vapour above water saturation condenses with the time below instead of at once: the air can hold liquid supersaturation and release it later in a burst (cloud chamber, superheated liquid). Real liquid supersaturation is about 1 %, so this is a what-if. The time applies to every cell, cloudy ones too; evaporation of cloud water stays instant"><input id="liqSS" type="checkbox" /><span>液態水過飽和 / Liquid-water supersaturation</span></label>
 <label class="f"><span>凝結時間 / Condensation time (min)</span><input id="liqTau" type="number" min="0.1" step="1" value="10" disabled /></label>
+<div class="muted" style="margin-top:8px">模擬中改設定：改下面的項目後按「套用」，模擬接著跑（時間、回放、圖表都延續，不重來）。範圍、格距、模式頂、步長另有按鈕或開關 / Change settings of the running model: edit below and press Apply; the run goes on (time, recording and charts continue, no restart). The domain, spacings, top and step have their own controls</div>
+<div id="liveFields"></div>
+<div id="liveInfo" class="muted"></div>
+<button id="liveApply" type="button" disabled>套用到目前的模擬 / Apply to the running model</button>
 </details>
 
 <details id="secDiag" open><summary>診斷 / Diagnostics</summary>

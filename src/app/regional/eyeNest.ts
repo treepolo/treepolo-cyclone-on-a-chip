@@ -42,11 +42,17 @@ export class EyeNest {
   /** the lasting wind forcings in the inner grid's coordinates */
   private forcings: WindForcing[] = [];
 
-  private constructor(readonly g: NestGeom, readonly m: RegionalModel, readonly mp: IceMicrophysics, readonly cfg: RegionalPhysicsConfig | null,
-    readonly phys: RegionalPhysics | null, readonly dt0: number, readonly x0: number, readonly y0: number) {
-    const prev = m.preStep;
-    m.preStep = (mm): void => { prev?.(mm); if (this.forcings.length) applyWind(mm, this.forcings, mm.c.dt); };
+  private constructor(readonly g: NestGeom, readonly m: RegionalModel, readonly mp: IceMicrophysics, public cfg: RegionalPhysicsConfig | null,
+    public phys: RegionalPhysics | null, readonly dt0: number, readonly x0: number, readonly y0: number) {
+    this.hook();
   }
+  /** The inner model applies the lasting winds at the start of each step (after the physics' own pre-step work). */
+  private hook(): void {
+    const prev = this.m.preStep;
+    this.m.preStep = (mm): void => { prev?.(mm); if (this.forcings.length) applyWind(mm, this.forcings, mm.c.dt); };
+  }
+  /** The physics of the inner model was made anew (a setting changed while running): hook the lasting winds again. */
+  rehook(): void { this.hook(); }
 
   /**
    * The inner grid of radius R (m) and spacings near dx, dz (m) in the outer model p of set-up `setup` now: the same

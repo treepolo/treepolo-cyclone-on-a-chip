@@ -5,8 +5,8 @@ import { weismanKlempQ } from '../../regional/kessler.js';
 import { quarterCircleWind, bunkersRightMover } from '../../regional/supercell.js';
 import { parcelAscent } from '../../regional/diagnostics.js';
 
-type Key = Exclude<keyof RegionalSetup, 'preset'>;
-interface Field {
+export type Key = Exclude<keyof RegionalSetup, 'preset'>;
+export interface Field {
   key: Key; label: string; group: 'grid' | 'env' | 'init';
   /** number input (value shown = setup value / scale), select or checkbox */
   kind: 'num' | 'sel' | 'chk'; scale?: number; step?: number; options?: [string, string][];
@@ -17,7 +17,7 @@ interface Field {
   tip?: string;
 }
 const notAxi = (s: RegionalSetup): boolean => !presetById(s.preset)?.axi;
-const FIELDS: Field[] = [
+export const FIELDS: Field[] = [
   { key: 'L', label: '範圍 / Width (km)', group: 'grid', kind: 'num', scale: 1000, step: 10, show: notAxi },
   { key: 'dx', label: '水平格距 / Δx (km)', group: 'grid', kind: 'num', scale: 1000, step: 0.25, tip: '越細越真實也越慢：格點數 ∝ 1/Δx² / finer is more realistic and slower: cells grow as 1/Δx²' },
   { key: 'top', label: '模式頂 / Top (km)', group: 'grid', kind: 'num', scale: 1000, step: 1, show: notAxi },
