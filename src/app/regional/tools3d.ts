@@ -47,6 +47,12 @@ export class Tools3D {
       bar.append(b);
     }
     this.opts = document.createElement('div'); this.opts.className = 'topts'; this.opts.hidden = true;
+    // on a phone the options would cover the ground to tap: a button folds them away (and back)
+    const fold = document.createElement('button'); fold.type = 'button'; fold.className = 'fold';
+    const foldText = (): void => { fold.textContent = this.opts.classList.contains('folded') ? '展開選項 ▾ / show options' : '收合選項 ▴ / hide options'; };
+    fold.onclick = (): void => { this.opts.classList.toggle('folded'); foldText(); };
+    foldText();
+    this.opts.append(fold);
     root.append(bar, this.opts);
     const row = (label: string, input: HTMLInputElement | HTMLSelectElement, key: string, cls = ''): HTMLElement => {
       const l = document.createElement('label'); l.className = 'to ' + cls;
@@ -157,6 +163,7 @@ export class Tools3D {
       (this.el.depth as HTMLInputElement).value = t === 'vortexW' ? '24' : '10';
       const g = this.grid; if (g) (this.el.r as HTMLInputElement).value = String(Math.round(Math.max(30, Math.min(300, g.Lx / 6000))));
     }
+    if (this.opts.classList.contains('folded')) { this.opts.classList.remove('folded'); (this.opts.querySelector('.fold') as HTMLButtonElement).textContent = '收合選項 ▴ / hide options'; }
     this.view.toolActive = t !== 'view';
     this.opts.parentElement!.querySelectorAll<HTMLButtonElement>('.tbtns button').forEach((b) => { b.className = b.dataset.t === t ? 'on' : ''; });
     // sensible heights per tool

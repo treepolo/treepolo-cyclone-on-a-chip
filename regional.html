@@ -63,12 +63,42 @@ label.f.chk{grid-template-columns:auto 1fr;justify-content:start}label.f.chk inp
 .topts label.to input,.topts label.to select{width:100%;box-sizing:border-box;min-width:0;padding:3px 5px}
 .topts label.to.place{grid-template-columns:auto 1fr auto}.topts .hv{font-variant-numeric:tabular-nums;color:var(--muted)}
 .topts button{font-size:12px;padding:4px 6px}
+.topts .fold{display:none}
 .slabels div{position:absolute;transform:translate(-50%,-100%);background:rgba(10,14,19,.78);border:1px solid;border-radius:4px;padding:1px 5px;font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--fg)}
 .missions{display:flex;flex-direction:column;gap:6px;margin-top:6px}.mission{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:4px;padding:6px 8px}
 .mission .mark{font-size:15px;line-height:1.2;color:var(--muted)}.mission.done .mark{color:#1baf7a}
 .log{white-space:pre-wrap;font-size:11px;line-height:1.4;background:var(--bg);padding:8px;border:1px solid #1d2833;max-height:120px;overflow:auto}
 a{color:#8fc1ff}
-@media(max-width:820px){body{grid-template-columns:1fr;grid-template-rows:72vh auto}.panel{border-left:0;border-top:1px solid var(--line)}}
+@media(max-width:820px){
+  /* a phone: the 3-D view takes most of the first screen; the bar above it and the tool buttons are one scrolling row each (they used to wrap into
+     rows that covered the view), the options of a tool are a short scrolling box, and the panel below has finger-sized controls */
+  body{grid-template-columns:1fr;grid-template-rows:80vh auto;grid-template-rows:80svh auto}
+  .panel{border-left:0;border-top:1px solid var(--line);padding:12px 12px 90px;font-size:14px}
+  .chartbar{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:4px 6px;gap:6px;scrollbar-width:none}
+  .chartbar::-webkit-scrollbar{display:none}
+  .chartbar>*{flex:none}
+  .chartbar select{font-size:13px;padding:5px 6px;width:auto;max-width:70vw}
+  .chartbar .hint{white-space:nowrap}
+  .tools{left:6px;max-width:calc(100% - 58px);gap:4px}
+  .tbtns{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:2px}
+  .tbtns::-webkit-scrollbar{display:none}
+  .tbtns button{flex:none;min-height:38px;padding:6px 11px;font-size:14px}
+  .topts{width:min(100%,340px);max-height:34vh;max-height:34svh;overflow-y:auto;-webkit-overflow-scrolling:touch;font-size:13px;padding:6px 8px}
+  .topts label.to{grid-template-columns:1fr 6.5em;min-height:32px}
+  .topts input,.topts select{font-size:16px;min-height:32px}
+  .topts button{min-height:36px;font-size:13px}
+  .topts .fold{display:block;width:100%;position:sticky;top:-6px;background:#16324f;border-color:#3d6d99}
+  .topts.folded>*:not(.fold){display:none!important}
+  .ov{left:6px;bottom:6px}.ov button{min-width:44px;height:42px}
+  .flypad{grid-template-columns:repeat(3,46px)}.flypad button{height:46px}
+  .runbar{flex-wrap:wrap}.runbar button{flex:1 1 42%;min-height:40px;padding:6px}
+  label.f{grid-template-columns:1fr 7.5em;margin:6px 0}
+  label.f input,label.f select{font-size:16px;min-height:36px}
+  label.f.chk{grid-template-columns:auto 1fr;gap:10px}label.f.chk input{width:22px;height:22px;min-height:0}
+  summary{padding:10px 0;font-size:14px}
+  button.primary,.controls button{min-height:40px}
+  .rp{left:6px;right:6px;bottom:52px}
+}
 </style>
 </head>
 <body>
