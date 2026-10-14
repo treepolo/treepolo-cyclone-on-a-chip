@@ -86,9 +86,10 @@ export type ToRegionalWorker =
    *  set it to the relative humidity `amount` % (over water); the same all over the region */
   | { type: 'moisture'; x: number; y: number; z: number; radius: number; depth: number; mode: 'mul' | 'add' | 'rh'; amount: number }
   /** wind in a region (forcing.ts): speed (m/s), direction the push blows toward (az degrees clockwise from north,
-   *  el degrees above the horizontal), form, sign (rotate: +1 counter-clockwise; converge: +1 inward); minutes 0: once,
-   *  > 0: lasting that many model minutes, < 0: lasting until cleared */
-  | { type: 'wind'; x: number; y: number; z: number; radius: number; depth: number; speed: number; az: number; el: number; form: 'push' | 'rotate' | 'converge'; sign: 1 | -1; minutes: number }
+   *  el degrees above the horizontal), form, sign (rotate: +1 counter-clockwise; converge: +1 inward; vortex: +1 a cyclone, counter-clockwise and
+   *  converging, -1 an anticyclone, clockwise and diverging, with the radial speed `ratio` times the tangential one); minutes 0: once,
+   *  > 0: lasting that many model minutes, < 0: lasting until cleared. The wind is added to the model's own, never set. */
+  | { type: 'wind'; x: number; y: number; z: number; radius: number; depth: number; speed: number; az: number; el: number; form: 'push' | 'rotate' | 'converge' | 'vortex'; sign: 1 | -1; ratio?: number; minutes: number }
   /** stop every lasting wind forcing */
   | { type: 'clearForcing' }
   /** paint the surface within `radius` m of (x, y): sea temperature change of `amount` K (default 2) or land / sea */
@@ -99,7 +100,7 @@ export type ToRegionalWorker =
   | { type: 'environment'; du6: number; humidity: number };
 
 /** A lasting wind forcing as shown on the page. */
-export interface ForcingInfo { id: number; x: number; y: number; z: number; radius: number; depth: number; speed: number; az: number; el: number; form: 'push' | 'rotate' | 'converge'; sign: 1 | -1; until: number | null }
+export interface ForcingInfo { id: number; x: number; y: number; z: number; radius: number; depth: number; speed: number; az: number; el: number; form: 'push' | 'rotate' | 'converge' | 'vortex'; sign: 1 | -1; ratio?: number; until: number | null }
 
 /** What the charts need in each frame. Positions in m from the domain origin (lower-left corner). */
 export interface ChartRequest {

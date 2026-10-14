@@ -1,14 +1,17 @@
-// Wind interactions of the regional model: a wind added once, or a lasting forcing that nudges the wind in a region
-// toward a target (a steady push, a rotation or a convergence). Only the wind is touched; pressure, temperature, cloud
-// and rain respond through the equations.
+// Wind interactions of the regional model: a wind added once, or a lasting forcing that keeps adding wind in a region.
+// Only the wind is touched; pressure, temperature, cloud and rain respond through the equations.
 //
 // Region: centre (x, y, z), horizontal radius R and half-depth H; the weight e is 1 inside (the strength is what was set all over the region: no fading toward
-// its edge) and 0 outside. Target wind (departure from the background wind ub, vb):
+// its edge) and 0 outside. Wind of the forcing (what it adds):
 //   push:     speed * (unit 3-D direction), the same everywhere in the region;
 //   rotate:   speed * tangential unit (sign +1 counter-clockwise seen from above, -1 clockwise), the same speed everywhere (calm only at the centre itself);
-//   converge: speed * radial unit toward the centre (sign +1) or away from it (sign -1).
-// A one-time wind adds e * target; a lasting one relaxes the
-// departure toward the target: d(u - ub)/dt = e (target - (u - ub)) / FORCING_TAU. w stays 0 at the ground and the lid.
+//   converge: speed * radial unit toward the centre (sign +1) or away from it (sign -1);
+//   vortex:   a cyclone (sign +1: counter-clockwise and converging) or an anticyclone (sign -1: clockwise and diverging): the tangential speed `speed` and
+//             the radial speed `ratio * speed` (inward for the cyclone, outward for the anticyclone) together. The pressure that goes with it is not set:
+//             the model makes it (convergence with rotation lowers it, divergence with rotation raises it).
+// Everything is ADDED to the wind the model has, nothing is overwritten: a one-time wind adds e * wind to u, v, w once; a lasting one adds
+// e * wind * dt / FORCING_TAU at every step (an acceleration: it adds `speed` every FORCING_TAU seconds if nothing else acts), so it works together with
+// the flow of the model and with other interactions. w stays 0 at the ground and the lid.
 
 import type { RegionalModel } from './core.js';
 
@@ -20,11 +23,15 @@ export interface WindForcing {
   x: number; y: number; z: number; R: number; H: number;
   /** target speed (m/s); push: unit direction (east, north, up) */
   speed: number; dir: [number, number, number];
-  form: 'push' | 'rotate' | 'converge'; sign: 1 | -1;
+  form: 'push' | 'rotate' | 'converge' | 'vortex'; sign: 1 | -1;
+  /** vortex: radial speed as a fraction of the tangential one (default 0.3) */
+  ratio?: number;
 }
-export const FORM_ID = { push: 0, rotate: 1, converge: 2 } as const;
+export const FORM_ID = { push: 0, rotate: 1, converge: 2, vortex: 3 } as const;
+/** the radial-to-tangential ratio of a cyclone or anticyclone when none is given */
+export const VORTEX_RATIO = 0.3;
 
-/** Envelope and target wind (u, v, w departure) of a forcing at a point (m); periodic domains wrap the offsets. */
+/** Envelope and wind (u, v, w) a forcing adds at a point (m); periodic domains wrap the offsets. */
 export function forcingAt(f: WindForcing, px: number, py: number, pz: number, L: { x: number; y: number } | null): { e: number; tu: number; tv: number; tw: number } {
   let dx = px - f.x, dy = py - f.y;
   if (L) { dx -= Math.round(dx / L.x) * L.x; dy -= Math.round(dy / L.y) * L.y; }
@@ -35,14 +42,15 @@ export function forcingAt(f: WindForcing, px: number, py: number, pz: number, L:
   if (r < 1e-6) return { e, tu: 0, tv: 0, tw: 0 };
   const s = f.speed, cx = dx / r, cy = dy / r;
   if (f.form === 'rotate') return { e, tu: -f.sign * s * cy, tv: f.sign * s * cx, tw: 0 };
+  if (f.form === 'vortex') { const q = f.ratio ?? VORTEX_RATIO; return { e, tu: f.sign * s * (-cy - q * cx), tv: f.sign * s * (cx - q * cy), tw: 0 }; }
   return { e, tu: -f.sign * s * cx, tv: -f.sign * s * cy, tw: 0 };
 }
 
-/** Apply forcings to the CPU model: once (add e * target) or as a relaxation over dt (lasting). */
+/** Apply forcings to the CPU model: once (add e * wind) or the share dt / FORCING_TAU of it over a step of dt (lasting): always added. */
 export function applyWind(m: RegionalModel, list: readonly WindForcing[], dt: number | 'once'): void {
   if (!list.length) return;
   const { nx, ny, nz, dx, dy } = m.c, L = m.c.lateral === 'open' ? null : { x: nx * dx, y: ny * dy };
-  const once = dt === 'once', a = once ? 0 : (dt as number) / FORCING_TAU;
+  const once = dt === 'once', a = once ? 1 : (dt as number) / FORCING_TAU;
   for (const f of list) {
     // the cells the region can touch (with wrapping on periodic domains)
     const ri = Math.ceil(f.R / dx) + 1, rj = Math.ceil(f.R / dy) + 1, ic = Math.floor(f.x / dx), jc = Math.floor(f.y / dy);
@@ -55,24 +63,24 @@ export function applyWind(m: RegionalModel, list: readonly WindForcing[], dt: nu
         if (k < nz) {
           const zc = m.zc[k]!;
           const fu = forcingAt(f, xs, yc, zc, L);
-          if (fu.e > 0) m.u[q] = m.u[q]! + (once ? fu.e * fu.tu : a * fu.e * (fu.tu - (m.u[q]! - m.ub[k]!)));
+          if (fu.e > 0) m.u[q] = m.u[q]! + a * fu.e * fu.tu;
           const fv = forcingAt(f, xc, ys, zc, L);
-          if (fv.e > 0) m.v[q] = m.v[q]! + (once ? fv.e * fv.tv : a * fv.e * (fv.tv - (m.v[q]! - m.vb[k]!)));
+          if (fv.e > 0) m.v[q] = m.v[q]! + a * fv.e * fv.tv;
         }
         if (k > 0 && k < nz) {
           const fw = forcingAt(f, xc, yc, m.zf[k]!, L);
-          if (fw.e > 0) m.w[q] = m.w[q]! + (once ? fw.e * fw.tw : a * fw.e * (fw.tw - m.w[q]!));
+          if (fw.e > 0) m.w[q] = m.w[q]! + a * fw.e * fw.tw;
         }
       }
     }
   }
 }
 
-/** Forcing table for the GPU kernel: per forcing 3 vec4 (x, y, z, R | H, speed, form, sign | dir x, y, z, 0). */
+/** Forcing table for the GPU kernel: per forcing 3 vec4 (x, y, z, R | H, speed, form, sign | dir x, y, z, ratio). */
 export function forcingTable(list: readonly WindForcing[]): Float32Array {
   const t = new Float32Array(12 * MAX_FORCINGS);
   list.slice(0, MAX_FORCINGS).forEach((f, n) => {
-    t.set([f.x, f.y, f.z, f.R, f.H, f.speed, FORM_ID[f.form], f.sign, f.dir[0], f.dir[1], f.dir[2], 0], 12 * n);
+    t.set([f.x, f.y, f.z, f.R, f.H, f.speed, FORM_ID[f.form], f.sign, f.dir[0], f.dir[1], f.dir[2], f.ratio ?? VORTEX_RATIO], 12 * n);
   });
   return t;
 }

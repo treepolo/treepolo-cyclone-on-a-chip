@@ -20,6 +20,8 @@ const TOOLS: { t: Tool; label: string; tip: string }[] = [
   { t: 'sst', label: '設海溫', tip: '拖曳：把海溫設成指定溫度（°C），筆刷內都是這個溫度 / drag: set the sea temperature to the temperature given (°C), all over the brush' },
 ];
 const PAINT: Tool[] = ['land', 'sea', 'sst'];
+/** the form of the wind tool's select: a cyclone and an anticyclone are the 'vortex' form (rotation and convergence or divergence together) */
+const windForm = (f: string): 'push' | 'rotate' | 'converge' | 'vortex' => (f === 'push' ? 'push' : f === 'in' || f === 'out' ? 'converge' : f === 'cyc' || f === 'anti' ? 'vortex' : 'rotate');
 const DIRS = ['北 N', '東北 NE', '東 E', '東南 SE', '南 S', '西南 SW', '西 W', '西北 NW'];
 
 interface Grid { Lx: number; Ly: number; top: number; dx: number; dz: number; /** the run has a surface to paint; takes interactions at all (not the axisymmetric model) */ paint: boolean; interact: boolean }
@@ -57,6 +59,8 @@ export class Tools3D {
     const hv = document.createElement('span'); hv.className = 'hv';
     hgt.addEventListener('input', () => { hv.textContent = `${hgt.value} km`; });
     const hRow = row('高度 / Height', hgt, 'z', 'place'); hRow.append(hv); hv.textContent = '1.5 km';
+    const windHint = document.createElement('div'); windHint.className = 'hv windOnly';
+    windHint.textContent = '風都是加在模式原有的風上，不是覆蓋；持續風每 10 分鐘加上這個風速（一次 = 立刻加一次）/ the wind is added to the model\'s own, never set; a lasting wind adds this speed every 10 min (once = added at once)';
     const clear = document.createElement('button'); clear.textContent = '清除持續風 / Clear lasting winds'; clear.className = 'windOnly';
     clear.onclick = (): void => { this.send({ type: 'clearForcing' }); };
     // strength: temperature change (or heat content) of bubbles, factor of the vapour change, sea-temperature change
@@ -85,10 +89,12 @@ export class Tools3D {
       row('倍數 / Factor (0 = 全部移除 / remove all)', num(0, 0.1), 'cmul', 'condOnly condMul'),
       row('加減 / Add (g/kg, 負的 = 減 / negative removes)', num(-1, 0.1), 'cadd', 'condOnly condAdd'),
       row('海溫 / Sea temperature (°C)', num(28, 0.5), 'dsst', 'sstOnly'),
-      row('形式 / Form', sel([['push', '推送 / push'], ['ccw', '逆時針旋轉 / counter-clockwise'], ['cw', '順時針旋轉 / clockwise'], ['in', '輻合 / converge'], ['out', '輻散 / diverge']], 'push'), 'form', 'windOnly'),
+      row('形式 / Form', sel([['push', '推送 / push'], ['ccw', '逆時針旋轉 / counter-clockwise'], ['cw', '順時針旋轉 / clockwise'], ['in', '輻合 / converge'], ['out', '輻散 / diverge'], ['cyc', '氣旋：逆時針＋輻合 / cyclone'], ['anti', '反氣旋：順時針＋輻散 / anticyclone']], 'push'), 'form', 'windOnly'),
       row('吹向 / Toward', sel(DIRS.map((d, n) => [String(n * 45), d]), '90'), 'az', 'windOnly pushOnly'),
       row('仰角 / Tilt', sel([['0', '水平 / level'], ['30', '上升 30° / up'], ['60', '上升 60°'], ['90', '垂直上升 / straight up'], ['-30', '下沉 30° / down'], ['-60', '下沉 60°'], ['-90', '垂直下沉 / straight down']], '0'), 'el', 'windOnly pushOnly'),
       row('風速 / Speed (m/s)', num(15, 1), 'speed', 'windOnly'),
+      row('輻合／輻散風 / Radial wind (× 旋轉風 / of the spin)', num(0.3, 0.1), 'ratio', 'windOnly vortexWind'),
+      windHint,
       row('持續 / Lasts', sel([['0', '一次 / once'], ['10', '10 分 / min'], ['30', '30 分'], ['60', '1 小時 / h'], ['180', '3 小時'], ['-1', '直到清除 / until cleared']], '30'), 'min', 'windOnly'),
       clear,
     );
@@ -171,6 +177,8 @@ export class Tools3D {
     this.opts.querySelectorAll<HTMLElement>('.vortexOnly').forEach((e) => { e.hidden = !vortex; });
     this.opts.querySelectorAll<HTMLElement>('.windOnly').forEach((e) => { e.hidden = !wind; });
     this.opts.querySelectorAll<HTMLElement>('.pushOnly').forEach((e) => { e.hidden = !wind || !push; });
+    const spinForm = (this.el.form as HTMLSelectElement).value, vortexWind = wind && (spinForm === 'cyc' || spinForm === 'anti');
+    this.opts.querySelectorAll<HTMLElement>('.vortexWind').forEach((e) => { e.hidden = !vortexWind; });
     const bubble = t === 'warm' || t === 'cold', byHeat = (this.el.by as HTMLSelectElement).value === 'heat';
     this.opts.querySelectorAll<HTMLElement>('.bubbleOnly').forEach((e) => { e.hidden = !bubble; });
     this.opts.querySelectorAll<HTMLElement>('.byAmp').forEach((e) => { e.hidden = !bubble || byHeat; });
@@ -229,8 +237,8 @@ export class Tools3D {
       this.send({ type: 'moisture', x: p.x, y: p.y, z, radius: R, depth, mode, amount });
     }
     else {
-      const f = (this.el.form as HTMLSelectElement).value, form = f === 'push' ? 'push' : f === 'in' || f === 'out' ? 'converge' : 'rotate';
-      this.send({ type: 'wind', x: p.x, y: p.y, z, radius: R, depth, speed: this.val('speed', 15), az: this.val('az', 90), el: this.val('el', 0), form, sign: f === 'cw' || f === 'out' ? -1 : 1, minutes: this.val('min', 30) });
+      const f = (this.el.form as HTMLSelectElement).value, form = windForm(f);
+      this.send({ type: 'wind', x: p.x, y: p.y, z, radius: R, depth, speed: this.val('speed', 15), az: this.val('az', 90), el: this.val('el', 0), form, sign: f === 'cw' || f === 'out' || f === 'anti' ? -1 : 1, ratio: Math.max(0, this.val('ratio', 0.3)), minutes: this.val('min', 30) });
     }
     this.flash = { ...p, t: performance.now() };
     return true;
@@ -265,7 +273,7 @@ export class Tools3D {
         const ang = Math.atan2(b.y - a.y, b.x - a.x), h = 9;
         parts.push(`<polygon points="${b.x},${b.y} ${b.x - h * Math.cos(ang - 0.45)},${b.y - h * Math.sin(ang - 0.45)} ${b.x - h * Math.cos(ang + 0.45)},${b.y - h * Math.sin(ang + 0.45)}" fill="${stroke}"/>`);
       };
-      const windShape = (f: { x: number; y: number; z: number; radius: number; speed: number; az: number; el: number; form: string; sign: number }, stroke: string): void => {
+      const windShape = (f: { x: number; y: number; z: number; radius: number; speed: number; az: number; el: number; form: string; sign: number; ratio?: number }, stroke: string): void => {
         ring(f.x, f.y, f.z, f.radius, stroke);
         if (f.form === 'push') {
           const az = f.az * Math.PI / 180, el = f.el * Math.PI / 180, L = 0.8 * f.radius;
@@ -274,6 +282,7 @@ export class Tools3D {
         } else for (let n = 0; n < 4; n++) {
           const a = n * Math.PI / 2, r0 = 0.5 * f.radius, px = f.x + r0 * Math.cos(a), py = f.y + r0 * Math.sin(a);
           if (f.form === 'rotate') { const s = f.sign * 0.35 * f.radius; arrow(px, py, f.z, px - s * Math.sin(a), py + s * Math.cos(a), f.z, stroke); }
+          else if (f.form === 'vortex') { const s = f.sign * 0.35 * f.radius, q = f.ratio ?? 0.3; arrow(px, py, f.z, px + s * (-Math.sin(a) - q * Math.cos(a)), py + s * (Math.cos(a) - q * Math.sin(a)), f.z, stroke); }
           else { const s = -f.sign * 0.35 * f.radius; arrow(px, py, f.z, px + s * Math.cos(a), py + s * Math.sin(a), f.z, stroke); }
         }
       };
@@ -288,7 +297,7 @@ export class Tools3D {
           line(P(at.x, at.y, 0), P(at.x, at.y, z), '#dbe5ef', 1);
           if (this.tool === 'wind') {
             const f = (this.el.form as HTMLSelectElement).value;
-            windShape({ x: at.x, y: at.y, z, radius: R, speed: 0, az: this.val('az', 90), el: this.val('el', 0), form: f === 'push' ? 'push' : f === 'in' || f === 'out' ? 'converge' : 'rotate', sign: f === 'cw' || f === 'out' ? -1 : 1 }, '#8fc1ff');
+            windShape({ x: at.x, y: at.y, z, radius: R, speed: 0, az: this.val('az', 90), el: this.val('el', 0), form: windForm(f), sign: f === 'cw' || f === 'out' || f === 'anti' ? -1 : 1, ratio: Math.max(0, this.val('ratio', 0.3)) }, '#8fc1ff');
           } else if (this.tool === 'vortexW' || this.tool === 'vortexC') {
             const colour = this.tool === 'vortexW' ? '#e66767' : '#3987e5', rmw = this.val('rmw', 0) > 0 ? 1000 * this.val('rmw', 0) : R / 5;
             windShape({ x: at.x, y: at.y, z, radius: R, speed: 0, az: 0, el: 0, form: 'rotate', sign: (this.el.spin as HTMLSelectElement).value === 'cw' ? -1 : 1 }, colour);

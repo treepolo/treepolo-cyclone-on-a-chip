@@ -16,7 +16,7 @@ import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
 import { StormTracker, type TornadoEnv } from '../../regional/supercell.js';
 import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.js';
-import { applyWind, MAX_FORCINGS, type WindForcing } from '../../regional/forcing.js';
+import { applyWind, FORCING_TAU, MAX_FORCINGS, VORTEX_RATIO, type WindForcing } from '../../regional/forcing.js';
 import { volumeBytes } from '../../regional/display.js';
 import { EyeNest, syncModel } from './eyeNest.js';
 import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
@@ -1218,8 +1218,9 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const az = (msg.az || 0) * Math.PI / 180, el = Math.max(-90, Math.min(90, msg.el || 0)) * Math.PI / 180;
     const speed = Math.max(0, msg.speed || 0);
     const dir: [number, number, number] = [Math.cos(el) * Math.sin(az), Math.cos(el) * Math.cos(az), Math.sin(el)];
-    const f: WindForcing = { x: msg.x, y: msg.y, z: Math.max(0, Math.min(top, msg.z || 0)), R, H, speed, dir, form: msg.form, sign: msg.sign === -1 ? -1 : 1 };
-    const what = `${msg.form === 'push' ? '推送 / push' : msg.form === 'rotate' ? (f.sign > 0 ? '逆時針旋轉 / counter-clockwise' : '順時針旋轉 / clockwise') : (f.sign > 0 ? '輻合 / converging' : '輻散 / diverging')} ${fmtNum(speed)} m/s`;
+    const ratio = Number.isFinite(msg.ratio) ? Math.max(0, msg.ratio!) : VORTEX_RATIO;
+    const f: WindForcing = { x: msg.x, y: msg.y, z: Math.max(0, Math.min(top, msg.z || 0)), R, H, speed, dir, form: msg.form, sign: msg.sign === -1 ? -1 : 1, ratio };
+    const what = `${msg.form === 'vortex' ? (f.sign > 0 ? `氣旋（逆時針、輻合，輻合風 ${fmtNum(ratio)} 倍）/ cyclone (counter-clockwise, converging, radial ${fmtNum(ratio)}× tangential)` : `反氣旋（順時針、輻散，輻散風 ${fmtNum(ratio)} 倍）/ anticyclone (clockwise, diverging, radial ${fmtNum(ratio)}× tangential)`) : msg.form === 'push' ? '推送 / push' : msg.form === 'rotate' ? (f.sign > 0 ? '逆時針旋轉 / counter-clockwise' : '順時針旋轉 / clockwise') : (f.sign > 0 ? '輻合 / converging' : '輻散 / diverging')} ${fmtNum(speed)} m/s`;
     if (msg.minutes === 0) {
       const fe = eye ? { ...f, x: f.x - eye.x0, y: f.y - eye.y0 } : f;
       if (onGpu) { gpu!.windOnce(f); eye?.gpu?.windOnce(fe); }
@@ -1229,9 +1230,9 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     }
     if (forcings.length >= MAX_FORCINGS) forcings.shift();
     const until = msg.minutes > 0 ? modelNow() + msg.minutes * 60 : null;
-    forcings.push({ f, info: { id: forcingId++, x: f.x, y: f.y, z: f.z, radius: R, depth: 2 * H, speed, az: msg.az || 0, el: msg.el || 0, form: msg.form, sign: f.sign, until } });
+    forcings.push({ f, info: { id: forcingId++, x: f.x, y: f.y, z: f.z, radius: R, depth: 2 * H, speed, az: msg.az || 0, el: msg.el || 0, form: msg.form, sign: f.sign, ratio, until } });
     syncForcings();
-    return done(`持續風 / lasting wind: ${what}${until === null ? '，直到清除 / until cleared' : `，${msg.minutes} 模式分鐘 / model minutes`}`);
+    return done(`持續風 / lasting wind: ${what}，每 ${FORCING_TAU / 60} 分鐘加上這個風 / adds this wind every ${FORCING_TAU / 60} min${until === null ? '，直到清除 / until cleared' : `，${msg.minutes} 模式分鐘 / model minutes`}`);
   }
   if (msg.type === 'moisture') {
     // change the vapour in the region, the same all over it: multiplied (mul), added (add, g/kg; negative dries) or set to a

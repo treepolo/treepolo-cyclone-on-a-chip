@@ -522,7 +522,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dev.queue.submit([enc.finish()]);
   }
 
-  /** lasting wind forcings (forcing.ts) applied at the start of every step */
+  /** lasting wind forcings (forcing.ts) added at the start of every step */
   private nForce = 0;
   private forceK: { pipe: GPUComputePipeline; T: GPUBuffer; FP: GPUBuffer; bind: GPUBindGroup } | null = null;
   /** Set the lasting wind forcings (at most MAX_FORCINGS; an empty list stops them). */
@@ -555,6 +555,8 @@ fn tgt(n: u32, px: f32, py: f32, pz: f32) -> vec4<f32> {
   if (r < 1e-6) { return vec4<f32>(e, 0.0, 0.0, 0.0); }
   let sp = b.y; let ux = dx / r; let uy = dy / r;
   if (b.z < 1.5) { return vec4<f32>(e, -b.w * sp * uy, b.w * sp * ux, 0.0); }
+  // vortex (cyclone: sign +1, anticyclone: -1): tangential and radial (c.w times the tangential speed, inward for +1) together
+  if (b.z > 2.5) { return vec4<f32>(e, b.w * sp * (-uy - c.w * ux), b.w * sp * (ux - c.w * uy), 0.0); }
   return vec4<f32>(e, -b.w * sp * ux, -b.w * sp * uy, 0.0);
 }
 @compute @workgroup_size(64)
@@ -562,20 +564,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
   if (t >= NX * NY * (NZ + 1u)) { return; }
   let k = t / (NX * NY); let r2 = t % (NX * NY); let j = r2 / NX; let i = r2 % NX;
-  // FP: count, relaxation weight dt / tau, 1 for a one-time wind (add e * target, as applyWind(.., 'once'))
-  let q = ix(i, j, k); let nf = u32(FP.x); let al = FP.y; let once = FP.z > 0.5;
+  // FP: count, the share of the wind added per step (dt / tau; 1 for a one-time wind, FP.z = 1): always added, as applyWind
+  let q = ix(i, j, k); let nf = u32(FP.x); let al = select(FP.y, 1.0, FP.z > 0.5);
   let xs = f32(i) * DX; let ys = f32(j) * DY; let xc = (f32(i) + 0.5) * DX; let yc = (f32(j) + 0.5) * DY;
   for (var n = 0u; n < nf; n++) {
     if (k < NZ) {
       let zc = LV[2u * NZ + k];
       let fu = tgt(n, xs, yc, zc);
-      if (fu.x > 0.0) { S[q] = S[q] + select(al * fu.x * (fu.y - (S[q] - LV[k])), fu.x * fu.y, once); }
+      if (fu.x > 0.0) { S[q] = S[q] + al * fu.x * fu.y; }
       let fv = tgt(n, xc, ys, zc);
-      if (fv.x > 0.0) { S[SIZE + q] = S[SIZE + q] + select(al * fv.x * (fv.z - (S[SIZE + q] - LV[NZ + k])), fv.x * fv.z, once); }
+      if (fv.x > 0.0) { S[SIZE + q] = S[SIZE + q] + al * fv.x * fv.z; }
     }
     if (k > 0u && k < NZ) {
       let fw = tgt(n, xc, yc, LV[3u * NZ + k]);
-      if (fw.x > 0.0) { S[2u * SIZE + q] = S[2u * SIZE + q] + select(al * fw.x * (fw.w - S[2u * SIZE + q]), fw.x * fw.w, once); }
+      if (fw.x > 0.0) { S[2u * SIZE + q] = S[2u * SIZE + q] + al * fw.x * fw.w; }
     }
   }
 }`) }), entryPoint: 'main' } });
