@@ -5,13 +5,16 @@ import { IceMicrophysics, QV, QC, QR, QI, QS, QG, qvsIce, qvsWater, microOpts } 
 import { RegionalPhysics } from '../../regional/physics.js';
 import { tcMetrics, eyewallProfile } from '../../regional/tropical.js';
 import { GpuRegional } from '../../gpu/regionalGpu.js';
+import { GpuNest } from '../../gpu/nestGpu.js';
+import { nestTargets as outerTargets, parentState, type ParentState } from '../../regional/twoway.js';
+import { buildOuter, openInner, type Outer } from './extension.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { refineInto, coarsenInto, regridPlane } from '../../regional/refine.js';
 import { Tracers, type TracerParams } from '../../regional/tracers.js';
 import { AxiDriver, AXI_DEFAULTS, LEGACY_TC, type AxiParams } from './axiDriver.js';
 import { buildModel, setupFromLegacy, axiFromSetup, refinedSetup, coarsenedSetup, environmentPressure } from './build.js';
-import { applyLive, changedKeys, liveMerge, ENV_KEYS } from './liveSettings.js';
+import { applyLive, changedKeys, liveMerge, environmentTargets, ENV_KEYS } from './liveSettings.js';
 import { presetById, setupOf, tcLike, sanitize, setupCells, type RegionalSetup } from './setup.js';
 import { packSave, unpackSave, type SaveArrays } from '../saves.js';
 import { Pacer } from '../pacer.js';
@@ -121,16 +124,146 @@ function stopNest(): void {
   eye.destroy(); eye = null;
   post({ type: 'nest', info: null });
 }
+
+/**
+ * An outer grid around the running model (extension.ts; the page's "範圍加大"), or null: a coarse model of a larger domain that runs by itself, ahead of the model (the inner
+ * grid), whose lateral boundaries relax to it. `was`: what the inner grid's boundaries were. One way: nothing flows back to the outer grid.
+ */
+interface Ext { o: Outer; gpu: GpuRegional | null; link: GpuNest | null; old: ParentState | null; was: ReturnType<typeof openInner>;
+  /** its GPU model was just built: it has no previous state yet, so it takes one step before the inner grid's targets are set from it */
+  fresh: boolean }
+let ext: Ext | null = null;
+const extInfo = (): { L: number; dx: number; nx: number; cells: number } | null => (ext ? { L: ext.o.model.c.nx * ext.o.model.c.dx, dx: ext.o.model.c.dx, nx: ext.o.model.c.nx, cells: ext.o.model.c.nx ** 2 * ext.o.model.c.nz } : null);
+/** Forget the outer grid (a new model was built: its boundaries are the set-up's). */
+function extDrop(): void {
+  if (!ext) return;
+  ext.link?.destroy(); ext.gpu?.destroy(); ext = null;
+  post({ type: 'ext', info: null });
+  post({ type: 'log', text: '外圈已移除（模式換了網格或重新開始）/ the outer grid was removed (the model has another grid or was restarted)' });
+}
+/** Before one inner step on the GPU: the outer grid is stepped until its last step covers it, and the inner relaxation targets are set from it. */
+function extPrepare(): void {
+  const e = ext!, g = gpu!, og = e.gpu!, t1 = g.time + g.dt;
+  let n = 0;
+  if (e.fresh) { og.step(1); e.fresh = false; }
+  while (og.time < t1 - 1e-6 && n++ < 100000) og.step(1);
+  const dtp = og.dt;
+  e.link!.targets(Math.max(0, Math.min(1, (g.time + 0.5 * g.dt - (og.time - dtp)) / dtp)));
+}
+/** The same on the CPU. */
+function extPrepareCpu(): void {
+  const e = ext!, mm = m!, om = e.o.model, t1 = mm.time + mm.c.dt;
+  let n = 0;
+  while (om.time < t1 - 1e-6 && n++ < 100000) { e.old = parentState(om); om.step(); e.o.mp.apply(om.c.dt); }
+  outerTargets(om, e.old, mm, e.o.geom, Math.max(0, Math.min(1, (mm.time + 0.5 * mm.c.dt - (om.time - om.c.dt)) / om.c.dt)), mm.boundary!);
+}
+/** The outer grid's step follows its own Courant number (GPU). */
+async function extAdapt(): Promise<void> {
+  const e = ext;
+  if (!e?.gpu) return;
+  const { rate, cmax, guard } = await e.gpu.maxCourant();
+  addGuard(guardTotals, guard);
+  if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { stateLost = true; return; }
+  if (!adaptive) return;
+  const c = e.o.model.c, next = nextDt({ cur: e.gpu.dt, dt0: e.o.dt0, rate, cmax, cfl: cflTarget, dxMin: c.dx, nsound: c.nsound, gpu: true });
+  if (Math.abs(next - e.gpu.dt) > 0.02 * e.gpu.dt) e.gpu.setDt(next);
+}
+/** The GPU model of an outer grid, trial-built under error scopes; a message when it fails. */
+async function outerGpu(device: GPUDevice, o: Outer): Promise<GpuRegional | string> {
+  const scopes = ['validation', 'internal', 'out-of-memory'] as const;
+  for (const sc of scopes) device.pushErrorScope(sc);
+  let reason = '', g: GpuRegional | null = null;
+  try { g = new GpuRegional(device, o.model, { moist: true, physics: o.cfg, ice: true }); g.uploadFrom(o.model, { rain: o.mp.rainAcc, snow: o.mp.snowAcc }); g.setDt(o.model.c.dt); }
+  catch (e) { reason = String(e); }
+  for (let i = 0; i < scopes.length; i++) { const err = await device.popErrorScope(); if (err && !reason) reason = err.message; }
+  if (reason) { g?.destroy(); return reason; }
+  return g!;
+}
+/** Make the GPU link between the outer grid and the (newly built) inner GPU model. */
+function extRelink(): void {
+  const e = ext;
+  if (!e || !gpu || !e.gpu) return;
+  e.link?.destroy();
+  try { e.link = new GpuNest(e.gpu, gpu, e.o.geom); }
+  catch (err) { e.link = null; post({ type: 'log', text: `外圈的 GPU 連結失敗：${String(err)} / the GPU link to the outer grid failed` }); }
+}
+/** The inner GPU model built anew from the CPU state (time, step, forcings, particles kept) and linked to the outer grid. */
+async function rebuildInnerGpu(): Promise<void> {
+  if (!gpu || !m || !mp) return;
+  const device = gpu.device, dtNow = gpu.dt, tp = gpu.tracerCount ? await gpu.readTracers() : null;
+  gpu.destroy();
+  gpu = new GpuRegional(device, m, { moist: true, physics: physCfg, ice: true });
+  gpu.setForcings(forcings.map((x) => x.f));
+  gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
+  gpu.setDt(dtNow);
+  if (tp) gpu.initTracers(tp);
+  await nestGpuUp();
+}
+/** The outer grid's state on the CPU (for a change of it), and its GPU model built anew from the CPU state after the change. */
+async function extToCpu(): Promise<void> { if (ext?.gpu) await syncModel(ext.gpu, ext.o.model, ext.o.mp); }
+async function extFromCpu(): Promise<void> {
+  const e = ext;
+  if (!e?.gpu) return;
+  const dtp = e.gpu.dt, device = e.gpu.device;
+  e.link?.destroy(); e.link = null; e.gpu.destroy();
+  e.gpu = new GpuRegional(device, e.o.model, { moist: true, physics: e.o.cfg, ice: true });
+  e.gpu.uploadFrom(e.o.model, { rain: e.o.mp.rainAcc, snow: e.o.mp.snowAcc });
+  e.gpu.setDt(dtp);
+  e.fresh = true;
+}
+
+/** Add an outer grid around the running model: at least `wantL` m across, spacing near `wantDx` m. Returns a note for the log. */
+async function startExt(wantL: number, wantDx: number): Promise<string> {
+  if (!m || !mp || !setup || axi || experiment === 'nest') return '這個實驗不能加外圈 / this experiment cannot have an outer grid';
+  if (eye) return '請先停止眼區細化再加外圈（兩者還不能同時用）/ stop the eye nest first: the two cannot be used together yet';
+  if (ext) await extStop();
+  await syncFromGpu();
+  advanceOrigin();
+  const sfc = phys?.surface ?? null, mm = m;
+  const out = buildOuter(mm, setup, frameVel, wantL, wantDx, !!gpu, { rain: mp.rainAcc, snow: mp.snowAcc }, sfc ? { tsk: sfc.tsk, wet: sfc.wet } : null);
+  if (typeof out === 'string') return out;
+  let og: GpuRegional | null = null;
+  if (gpu) {
+    const r = await outerGpu(gpu.device, out);
+    if (typeof r === 'string') return `外圈的 GPU 模式建立失敗 / the outer grid's GPU model failed: ${r.slice(0, 300)}`;
+    og = r;
+  }
+  const was = openInner(mm);
+  outerTargets(out.model, null, mm, out.geom, 1, mm.boundary!);
+  ext = { o: out, gpu: og, link: null, old: null, was, fresh: true };
+  try { await rebuildInnerGpu(); }
+  catch (e) { await extStop(); return `內圈的 GPU 模式重建失敗，外圈已取消 / the inner GPU model could not be rebuilt, the outer grid was cancelled: ${String(e).slice(0, 300)}`; }
+  if (gpu && !ext?.link) { await extStop(); return '外圈的 GPU 連結失敗，已取消 / the GPU link failed, the outer grid was cancelled'; }
+  rec.sendMeta = true;
+  await stepAfterChange();
+  const i = extInfo()!;
+  post({ type: 'ext', info: i });
+  return `外圈已加上：${(i.L / 1000).toFixed(0)} km 見方、Δx ${(i.dx / 1000).toFixed(1)} km（${(i.cells / 1e6).toFixed(2)} M 格），內圈（現在的模式）原封不動、邊界向外圈鬆弛；單向：外圈影響內圈，內圈不回饋外圈；3D 畫面和圖表只看內圈 / outer grid added: ${(i.L / 1000).toFixed(0)} km across, Δx ${(i.dx / 1000).toFixed(1)} km; the model stays as the inner grid, its edges relax to the outer grid; one way; the 3-D view and the charts show the inner grid`;
+}
+/** Take the outer grid away: the inner grid's boundaries are the set-up's again. */
+async function extStop(): Promise<void> {
+  const e = ext;
+  if (!e) return;
+  if (m && gpu) await syncFromGpu();
+  e.link?.destroy(); e.gpu?.destroy(); ext = null;
+  if (m) {
+    const c = m.c as { lateral?: 'periodic' | 'open' };
+    if (setup?.boundary === 'open') { c.lateral = 'open'; m.boundary = environmentTargets(m); } else { c.lateral = 'periodic'; m.boundary = null; }
+    if (gpu) await rebuildInnerGpu();
+  }
+  post({ type: 'ext', info: null });
+}
 /** Advance the models by n outer steps on the GPU (with the eye nest: its sub-steps and feedback in each). */
 function stepGpu(n: number): void {
   const e = eye, link = e?.link;
   if (e && link) for (let s = 0; s < n; s++) link.step(e.nsub);
+  else if (ext?.link) for (let s = 0; s < n; s++) { extPrepare(); gpu!.step(1); }
   else gpu!.step(n);
 }
 /** One outer step on the CPU (with the eye nest's sub-steps and feedback). */
 function stepCpu(): void {
   if (eye) eye.cpuStep(m!, mp!);
-  else { m!.step(); mp!.apply(m!.c.dt); }
+  else { if (ext) extPrepareCpu(); m!.step(); mp!.apply(m!.c.dt); }
   addGuard(guardTotals, guardModel(m!));
   if (eye) addGuard(guardTotals, guardModel(eye.m));
 }
@@ -350,6 +483,7 @@ async function restoreUndo(): Promise<boolean> {
     gpu.uploadFrom(m, { rain: mp.rainAcc, snow: mp.snowAcc });
     gpu.setDt(dt0);
     if (tp) gpu.initTracers(tp);
+    extRelink();
   }
   // the eye nest starts again from the restored outer state
   if (eye) {
@@ -379,6 +513,7 @@ async function adaptDt(): Promise<void> {
   addGuard(guardTotals, guard);
   if (!Number.isFinite(rate) || !Number.isFinite(cmax)) { stateLost = true; return; }
   noteRate(rate);
+  await extAdapt();
   if (!adaptive) { await nestFit(); return; }
   const c = m.c, next = nextDt({ cur: gpu.dt, dt0, rate, cmax, cfl: cflTarget, dxMin: Math.min(c.dx, c.dy), nsound: c.nsound, gpu: true });
   if (Math.abs(next - gpu.dt) > 0.02 * gpu.dt) gpu.setDt(next);
@@ -471,6 +606,7 @@ const post = (msg: FromRegionalWorker, tr: Transferable[] = []): void => {
 
 /** Build the model of a set-up (presets included); sets the module state. */
 function build(s0: RegionalSetup, gpuOk: boolean): { dt: number; description: string; land: Uint8Array | null } {
+  extDrop();
   const b = buildModel(s0, gpuOk);
   setup = b.setup;
   experiment = presetById(setup.preset) && setup.preset !== 'custom' ? setup.preset as RegionalExperiment : 'custom';
@@ -864,6 +1000,18 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try { const note = await setFollow(msg.on); if (note) post({ type: 'log', text: note }); if (m && mp) await sendFrame(); } catch (e) { post({ type: 'error', message: String(e) }); }
       busy = false;
     }
+    else if (msg.type === 'extend' || msg.type === 'unextend') {
+      if (!m || !mp) return;
+      const wasRunning = running; running = false;
+      await waitIdle();
+      busy = true;
+      try {
+        const note = msg.type === 'extend' ? await startExt(msg.L, msg.dx) : (await extStop(), '外圈已移除 / the outer grid was removed');
+        post({ type: 'log', text: note });
+        await sendFrame();
+      } catch (e) { post({ type: 'error', message: `外圈失敗 / outer grid failed: ${String(e)}` }); }
+      finally { busy = false; running = wasRunning; }
+    }
     else if (msg.type === 'settings') {
       if (!m || !mp || !setup || axi || experiment === 'nest') { post({ type: 'log', text: '這個實驗不能在模擬中改設定 / this experiment cannot change settings while running' }); return; }
       const wasRunning = running; running = false;
@@ -1030,12 +1178,18 @@ async function moveDomain(a: { du: number; dv: number; di: number; dj: number })
   if (!m || !mp) return;
   if (!a.du && !a.dv && !a.di && !a.dj) return;
   if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); eye?.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; if (physCfg) physCfg.frameVel = frameVel; }
+  if (ext && (a.du || a.dv)) {
+    // the outer grid is in the same moving frame as the inner one
+    await extToCpu(); ext.o.model.shiftFrame(a.du, a.dv); if (ext.o.cfg) ext.o.cfg.frameVel = { ...frameVel }; await extFromCpu();
+  }
   if (a.di || a.dj) {
     m.roll(a.di, a.dj, [mp.rainAcc, mp.snowAcc]); origin.x -= a.di * m.c.dx; origin.y -= a.dj * m.c.dy; prevAcc = null;
+    if (ext) { ext.o.geom.x0 = ext.o.geom.x0! - a.di * m.c.dx; ext.o.geom.y0 = ext.o.geom.y0! - a.dj * m.c.dy; if (ext.link) { ext.link.x0 = ext.o.geom.x0; ext.link.y0 = ext.o.geom.y0; } }
     if (swath && swath.uh.length === m.c.nx * m.c.ny) { rollPlane(swath.uh, a.di, a.dj); rollPlane(swath.wind, a.di, a.dj); }
     // the ground stays put: painted sea and land move through the domain with the fields
     const sf = phys?.surface;
     if (sf && physCfg) { rollPlane(sf.tsk, a.di, a.dj); rollPlane(sf.wet, a.di, a.dj); physCfg.surface = { tsk: sf.tsk, wet: sf.wet }; }
+    if (ext) { await extToCpu(); outerTargets(ext.o.model, null, m, ext.o.geom, 1, m.boundary!); }          // (the columns that come in take the outer grid's state)
     if (m.c.lateral === 'open') enterEnvironment(a.di, a.dj);
     eye?.roll(m, { rain: mp.rainAcc, snow: mp.snowAcc }, a.di, a.dj, sf ?? null);
     if (sf) post({ type: 'land', land: landMask() });
@@ -1067,6 +1221,7 @@ async function moveDomain(a: { du: number; dv: number; di: number; dj: number })
 
 /** Rebuild the eye nest's GPU model and coupling for a newly built outer GPU model (stops the nest if that fails). */
 async function nestGpuUp(): Promise<void> {
+  extRelink();
   if (!eye || !gpu) return;
   const reason = await eye.gpuUp(gpu);
   if (reason) { stopNest(); post({ type: 'log', text: `眼區細化的 GPU 模式建立失敗，已停止 / the eye nest's GPU model failed, stopped: ${reason.slice(0, 200)}` }); }
@@ -1102,7 +1257,10 @@ async function setFollow(on: boolean): Promise<string> {
  * (and the eye nest's inner grid) is changed in place from the current state, then the GPU models are built anew from it, as for a refinement. Returns the log note.
  */
 async function applySettings(want: RegionalSetup): Promise<string> {
-  const mm = m!, mpp = mp!, old = setup!, next = liveMerge(old, want);
+  const mm = m!, mpp = mp!, old = setup!;
+  let next = liveMerge(old, want);
+  const pre: string[] = [];
+  if (ext && next.boundary !== old.boundary) { next = { ...next, boundary: old.boundary }; pre.push('外圈存在時側邊界不能改（內圈的邊界向外圈鬆弛）/ the boundaries cannot change while there is an outer grid'); }
   const keys = changedKeys(old, next);
   if (!keys.length) return '設定沒有變 / nothing changed';
   await syncFromGpu();
@@ -1114,7 +1272,7 @@ async function applySettings(want: RegionalSetup): Promise<string> {
   physCfg = outer.cfg; phys = outer.phys;
   if (physCfg) physCfg.frameVel = frameVel;
   if (r.physics) hookForcing(mm);          // (the physics was made anew and cleared the model's hooks)
-  const notes = [...r.notes];
+  const notes = [...pre, ...r.notes];
   // the eye nest's inner grid: the same changes in its own grid
   if (eye) {
     const inner = { m: eye.m, cfg: eye.cfg, phys: eye.phys };
@@ -1122,6 +1280,15 @@ async function applySettings(want: RegionalSetup): Promise<string> {
     eye.cfg = inner.cfg; eye.phys = inner.phys;
     if (inner.cfg) inner.cfg.frameVel = frameVel;
     if (ri.physics) { eye.rehook(); eye.surfaceFrom(mm, phys?.surface ?? null); }
+  }
+  // the outer grid has the same settings
+  if (ext) {
+    await extToCpu();
+    const oh = { m: ext.o.model, cfg: ext.o.cfg, phys: ext.o.phys };
+    applyLive(oh, next, old, frameVel, false);
+    ext.o.cfg = oh.cfg; ext.o.phys = oh.phys; if (oh.cfg) oh.cfg.frameVel = frameVel;
+    ext.o.setup = liveMerge(ext.o.setup, next);
+    await extFromCpu();
   }
   setup = next;
   // the coarser states kept by refinements were made in the old environment: they cannot be gone back to
@@ -1230,6 +1397,7 @@ async function regridTo(target: RegionalSetup, kind: 'refine' | 'grid'): Promise
  * is at its centre, where the cylinder is. Returns a note for the page; throws with the reason when it cannot start.
  */
 async function startNest(R: number, dx: number, dz: number, recentre: boolean): Promise<string> {
+  if (ext) throw new Error('請先移除外圈（兩者還不能同時用）/ remove the outer grid first: the two cannot be used together yet');
   const mm = m!, mpp = mp!, c = mm.c;
   let where = '';
   if (recentre) {
@@ -1471,6 +1639,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
   };
   change(mm, true);
   if (eye) change(eye.m, false);
+  if (ext) { await extToCpu(); change(ext.o.model, true); await extFromCpu(); }          // (the outer grid has the same environment)
   if (gpu) {
     // the damping-layer wind and the boundary targets live in the GPU model's tables: rebuild it
     const device = gpu.device, dtNow = gpu.dt, tp = gpu.tracerCount ? await gpu.readTracers() : null;

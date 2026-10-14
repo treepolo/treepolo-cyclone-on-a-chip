@@ -27,6 +27,9 @@ export interface NestGeom {
   /** the cylinder: centre (parent coordinates, m) and radius (m); relaxation ring width outside it and feedback taper
    *  inside it (m) */
   cx: number; cy: number; R: number; W: number; Wf: number;
+  /** a child box that is a whole domain (the outer grid of an extension, below): its lower-left corner in parent coordinates (m; default: parent cell (i0, j0)), which a
+   *  domain that follows a storm moves, and the width (child cells) of the edge ring where the relaxation targets are needed (default: the cylinder's ring) */
+  x0?: number; y0?: number; ring?: number;
 }
 
 /** relaxation time scale of the child at full strength (s) */
@@ -79,10 +82,11 @@ export const emptyTargets = (c: RegionalModel): BoundaryTargets =>
  * now. Only where the child uses them: its relaxation ring and beyond, and its sponge layer below the lid.
  */
 export function nestTargets(p: RegionalModel, old: ParentState | null, child: RegionalModel, g: NestGeom, alpha: number, out: BoundaryTargets): void {
-  const pc = p.c, c = child.c, sample = makeSampler(p), x0 = g.i0 * pc.dx, y0 = g.j0 * pc.dy;
+  const pc = p.c, c = child.c, sample = makeSampler(p), x0 = g.x0 ?? g.i0 * pc.dx, y0 = g.y0 ?? g.j0 * pc.dy;
   const zSponge = c.nz * c.dz - c.dampDepth, cyl = c.relaxCyl;
   const used = (i: number, j: number, k: number): boolean => {
     if (c.dampDepth > 0 && (k + 0.5) * c.dz > zSponge) return true;
+    if (g.ring !== undefined) return Math.min(i, j, c.nx - 1 - i, c.ny - 1 - j) < g.ring;
     if (!cyl) return true;
     return Math.hypot(i + 0.5 - c.nx / 2, j + 0.5 - c.ny / 2) > cyl.r;
   };

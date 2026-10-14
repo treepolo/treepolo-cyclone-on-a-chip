@@ -47,7 +47,7 @@ export function environmentTargets(m: RegionalModel): BoundaryTargets {
 }
 
 /** Add a wind profile (per level, m/s) to the whole wind field, the base wind and the open-boundary targets. */
-function addWind(m: RegionalModel, dU: Float64Array, dV: Float64Array): void {
+export function addWind(m: RegionalModel, dU: Float64Array, dV: Float64Array): void {
   const b = m.boundary;
   for (let k = 0; k < m.c.nz; k++) {
     m.ub[k] = m.ub[k]! + dU[k]!; m.vb[k] = m.vb[k]! + dV[k]!;

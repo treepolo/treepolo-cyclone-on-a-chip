@@ -7,7 +7,9 @@ import { RegionalPhysics } from '../regional/physics.js';
 import { buildModel, envWind, soundingOf } from '../app/regional/build.js';
 import { setupOf, type RegionalSetup } from '../app/regional/setup.js';
 import { applyLive, changedKeys, liveMerge, type LiveHolder } from '../app/regional/liveSettings.js';
-import { refineInto } from '../regional/refine.js';
+import { refineInto, makeSampler } from '../regional/refine.js';
+import { nestTargets } from '../regional/twoway.js';
+import { buildOuter, openInner, outerSpacing } from '../app/regional/extension.js';
 import { check, summary } from './assert.js';
 
 const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200, dt: 1, nsound: 6, f: 0, beta: 0.2, divDamp: 0.1, dampDepth: 0, dampRate: 0, kdiff2: 0 };
@@ -165,6 +167,37 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
   // a smaller domain: the cells of the box are the old cells (same spacing)
   { const mf = regrid({ ...A, L: 150000 }, 75000, 45000);
     check('regrid: a smaller domain takes the cells of the box (theta, u to 1e-9)', mf.c.nx === 10 && maxDiff(ma.th, mf.th, (k) => k, ma.c.nz, 10, 10, 5, 3, ma, mf) < 1e-9 && maxDiff(ma.u, mf.u, (k) => k, ma.c.nz, 10, 10, 5, 3, ma, mf) < 1e-9); }
+}
+
+// An outer grid around the running model (extension.ts): the spacing, the outer state, and the relaxation targets it sets for the inner grid (no time steps)
+{
+  const S: RegionalSetup = { ...setupOf('tc'), preset: 'custom', L: 150000, dx: 5000, top: 15000, dz: 1000, dt: 0, init: 'vortex', initAmp: 20 };
+  check('outer grid: the spacing is a whole multiple that divides the inner domain (30 cells: 15 km from 15 km; 30 km from 40 km)',
+    outerSpacing(30, 5000, 15000) === 15000 && outerSpacing(30, 5000, 40000) === 30000 && typeof outerSpacing(31, 5000, 15000) === 'string');
+  const b = buildModel(S, true), inner = b.model, n = 30;
+  inner.ub[3] = inner.ub[3]! + 2;                                         // a change of the environment by an interaction: the outer grid carries it
+  const acc = { rain: new Float64Array(n * n), snow: new Float64Array(n * n) };
+  const out = buildOuter(inner, S, b.frame, 300000, 15000, true, acc, null);
+  if (typeof out === 'string') { check('outer grid: it can be built', false, out); }
+  else {
+    const o = out.model, g = out.geom, k = 3;
+    check('outer grid: 20 x 20 columns of 15 km, the inner box of 10 x 10 of them in the middle, the same levels', o.c.nx === 20 && o.c.dx === 15000 && o.c.nz === inner.c.nz && g.np === 10 && g.i0 === 5 && g.r === 3 && g.x0 === 75000);
+    // inside the box the outer cell is the mean of its 3 x 3 inner cells; outside it is the plain environment
+    let mean = 0; for (let dj = 0; dj < 3; dj++) for (let di = 0; di < 3; di++) mean += inner.th[inner.idx(15 + di, 15 + dj, k)]! / 9;
+    check('outer grid: inside the box the outer cell is the mean of its inner cells (theta to 1e-9)', Math.abs(o.th[o.idx(10, 10, k)]! - mean) < 1e-9, `${o.th[o.idx(10, 10, k)]!.toFixed(4)} vs ${mean.toFixed(4)}`);
+    check('outer grid: outside the box it is the plain environment, with the inner grid\'s base wind', Math.abs(o.th[o.idx(2, 2, k)]! - o.th0[k]!) < 1e-9 && Math.abs(o.ub[3]! - inner.ub[3]!) < 1e-12 && Math.abs(o.u[o.idx(2, 2, 3)]! - inner.ub[3]!) < 1e-9);
+    // the targets: only in the edge ring and the sponge layer, the outer state interpolated to the inner edge
+    openInner(inner);
+    nestTargets(o, null, inner, g, 1, inner.boundary!);
+    const sample = makeSampler(o), z = (k + 0.5) * inner.c.dz;
+    const want = (i: number, j: number, x0 = g.x0!, y0 = g.y0!): number => inner.th0[k]! + sample(o.th, x0 + (i + 0.5) * inner.c.dx, y0 + (j + 0.5) * inner.c.dy, z, 0.5, 0.5, false, o.th0);
+    check('outer grid: the edge cells of the inner grid relax to the outer state interpolated there', Math.abs(inner.boundary!.th[inner.idx(0, 7, k)]! - want(0, 7)) < 1e-9 && Math.abs(inner.boundary!.th[inner.idx(12, 29, k)]! - want(12, 29)) < 1e-9);
+    check('outer grid: no targets in the middle (below the sponge layer), targets in the sponge layer', inner.boundary!.th[inner.idx(15, 15, k)] === 0 && inner.boundary!.th[inner.idx(15, 15, inner.c.nz - 1)]! !== 0);
+    // the box moves with a domain that follows the storm
+    g.x0 = g.x0! - 10000;
+    nestTargets(o, null, inner, g, 1, inner.boundary!);
+    check('outer grid: the targets follow the inner box when it moves over the outer grid', Math.abs(inner.boundary!.th[inner.idx(0, 7, k)]! - want(0, 7, g.x0!, g.y0!)) < 1e-9);
+  }
 }
 
 summary('live');

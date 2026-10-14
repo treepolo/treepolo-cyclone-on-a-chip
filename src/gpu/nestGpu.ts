@@ -16,6 +16,7 @@ export class GpuNest {
   constructor(readonly parent: GpuRegional, readonly child: GpuRegional, readonly g: NestGeom) {
     const dev = parent.device, p = parent.cpu, c = child.cpu, pc = p.c, cc = c.c;
     this.device = dev;
+    this.x0 = g.x0 ?? g.i0 * pc.dx; this.y0 = g.y0 ?? g.j0 * pc.dy;
     if (!child.B) throw new Error('the child model has no relaxation targets');
     if (parent.nf !== child.nf) throw new Error('parent and child must carry the same fields');
     // base profiles: parent th0, qv0, ub, vb (nz each), then the child's
@@ -32,7 +33,7 @@ const PNX: u32 = ${pc.nx}u; const PNY: u32 = ${pc.ny}u; const PNZ: u32 = ${pc.nz
 const PDX: f32 = ${pc.dx}; const PDY: f32 = ${pc.dy}; const PDZ: f32 = ${pc.dz};
 const CNX: u32 = ${cc.nx}u; const CNY: u32 = ${cc.ny}u; const CNZ: u32 = ${cc.nz}u; const CSX: u32 = ${c.sx}u; const CPL: u32 = ${c.plane}u; const CSIZE: u32 = ${c.size}u;
 const CDX: f32 = ${cc.dx}; const CDZ: f32 = ${cc.dz};
-const X0: f32 = ${this.g.i0 * pc.dx}; const Y0: f32 = ${this.g.j0 * pc.dy};
+const RING: i32 = ${this.g.ring ?? -1};
 const I0: u32 = ${this.g.i0}u; const J0: u32 = ${this.g.j0}u; const NP: u32 = ${this.g.np}u; const R: u32 = ${this.g.r}u; const RZ: u32 = ${this.g.rz}u;
 const CX: f32 = ${this.g.cx}; const CY: f32 = ${this.g.cy}; const RC: f32 = ${this.g.R}; const WF: f32 = ${this.g.Wf};
 const CYLR: f32 = ${cc.relaxCyl?.r ?? 0}; const CYL: bool = ${!!cc.relaxCyl}; const ZSP: f32 = ${zSponge}; const SPONGE: bool = ${cc.dampDepth > 0};
@@ -91,11 +92,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let ic = min(i, CNX - 1u); let jc = min(j, CNY - 1u);
   let z = (f32(k) + 0.5) * CDZ;
   // only where the child uses the targets: its relaxation ring and beyond, its sponge layer
-  var used = !CYL || (SPONGE && z > ZSP);
-  if (!used) { used = length(vec2<f32>(f32(ic) + 0.5 - 0.5 * f32(CNX), f32(jc) + 0.5 - 0.5 * f32(CNY))) > CYLR; }
+  var used = (!CYL && RING < 0) || (SPONGE && z > ZSP);
+  if (!used && RING >= 0) { used = min(min(i32(ic), i32(jc)), min(i32(CNX) - 1 - i32(ic), i32(CNY) - 1 - i32(jc))) < RING; }
+  else if (!used) { used = length(vec2<f32>(f32(ic) + 0.5 - 0.5 * f32(CNX), f32(jc) + 0.5 - 0.5 * f32(CNY))) > CYLR; }
   if (!used) { return; }
   let q = cix(i, j, k);
-  let xf = X0 + f32(i) * CDX; let yf = Y0 + f32(j) * CDX; let xc = X0 + (f32(i) + 0.5) * CDX; let yc = Y0 + (f32(j) + 0.5) * CDX;
+  let xf = P.y + f32(i) * CDX; let yf = P.z + f32(j) * CDX; let xc = P.y + (f32(i) + 0.5) * CDX; let yc = P.z + (f32(j) + 0.5) * CDX;
   if (j < CNY) { B[q] = cbase(2u, k) + samp(0u, 2u, xf, yc, z, 0.0, 0.5); }
   if (i < CNX) { B[CSIZE + q] = cbase(3u, k) + samp(1u, 3u, xc, yf, z, 0.5, 0.0); }
   if (i < CNX && j < CNY) {
@@ -166,9 +168,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     this.device.queue.submit([enc.finish()]);
   }
 
+  /** where the child box's lower-left corner is in the parent's coordinates (m): a child box that moves (a domain that follows a storm) */
+  x0: number; y0: number;
   /** The child's relaxation targets at fraction alpha of the parent's last step (after parent.step(1)). */
   targets(alpha: number): void {
-    this.device.queue.writeBuffer(this.prm, 0, new Float32Array([alpha, 0, 0, 0]));
+    this.device.queue.writeBuffer(this.prm, 0, new Float32Array([alpha, this.x0, this.y0, 0]));
     this.run(this.tgt);
   }
 

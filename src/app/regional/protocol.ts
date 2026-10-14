@@ -45,6 +45,10 @@ export type ToRegionalWorker =
       frame?: { state: Q16[]; aux: ReplayAux | null; centre: { x: number; y: number } | null } }
   /** continue the running simulation on the finer grid of its set-up (build.ts refinedSetup) */
   | { type: 'refine' }
+  /** an outer grid around the running model: a domain at least `L` m across whose added part has the spacing near `dx` m (extension.ts); the model stays as the inner grid */
+  | { type: 'extend'; L: number; dx: number }
+  /** take the outer grid away again */
+  | { type: 'unextend' }
   /** continue the running simulation on a grid with another domain size (smaller only), model top or vertical spacing (the rest of the set-up is ignored): the state is interpolated, the run goes on (worker.ts regridTo) */
   | { type: 'regrid'; setup: import('./setup.js').RegionalSetup }
   /** refine the eye and eyewall: a finer grid (spacings near dx, dz; m) in a cylinder of radius R (m) at the centre of the
@@ -207,6 +211,8 @@ export type FromRegionalWorker =
       setup: import('./setup.js').RegionalSetup | null }
   /** the eye nest started, changed or stopped (null) */
   | { type: 'nest'; info: NestInfo | null }
+  /** the outer grid around the model now (null: none) */
+  | { type: 'ext'; info: { L: number; dx: number; nx: number; cells: number } | null }
   /** surface changed (painting): land mask per column (1 land) */
   | { type: 'land'; land: Uint8Array | null }
   /** the lasting wind forcings now (domain positions, m; until: model time they end, null: until cleared) */

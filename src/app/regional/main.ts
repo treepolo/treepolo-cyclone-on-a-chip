@@ -84,6 +84,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
 worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
   if (m.type === 'follow') { $<HTMLInputElement>('followNow').checked = m.on; return; }
+  if (m.type === 'ext') { gridForm.setExt(m.info); return; }
   if (m.type === 'settings') { form.set(m.setup); live.set(m.setup); gridForm.set(m.setup); log(m.note); return; }
   if (m.type === 'ready') {
     // a new model ends the replay (a refinement keeps the recording, but not a replay file shown)
@@ -277,6 +278,8 @@ const live = new LiveForm($('liveFields'), $('liveInfo'), $<HTMLButtonElement>('
 live.onApply = (s): void => { send({ type: 'settings', setup: s }); };
 const gridForm = new GridForm($('gridFields'), $('gridInfo'), $<HTMLButtonElement>('gridApply'));
 gridForm.onApply = (s): void => { refining = true; log('改網格中… / Changing the grid…'); send({ type: 'regrid', setup: s }); };
+gridForm.onExtend = (L, dx): void => { log('加外圈中… / Adding the outer grid…'); send({ type: 'extend', L, dx }); };
+gridForm.onUnextend = (): void => { log('移除外圈中… / Removing the outer grid…'); send({ type: 'unextend' }); };
 const backend = (): 'auto' | 'cpu' => $<HTMLSelectElement>('backendSel').value as 'auto' | 'cpu';
 function start(s: RegionalSetup): void {
   running = false; sync();
