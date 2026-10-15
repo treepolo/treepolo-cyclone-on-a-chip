@@ -451,6 +451,10 @@
     - **畫面與圖表只看內圈**（外圈沒有 3D 疊層，也沒有圖表）；這是這一版的限制，不是漏掉。
     - **測試（不做時間步）**：`live.ts` 新增 7 項（外圈格距選擇、外圈格點與框的位置、框內是內圈的平均、框外是無擾動環境與內圈基準風、邊緣目標等於外圈內插、中間沒有目標而海綿層有、框移動後目標跟著動），32/32；GPU 一次性頁面（沒留檔）：`GpuNest.targets` 的邊緣環（10560 格）和 CPU 的 `nestTargets` 一致（u、θ、qv、π′ 都在 3e-5 以內），框移動後也一致。
     - **沒驗證**（要跑模擬，由使用者測）：外圈一起步進、時間內插、`extAdapt`、外圈 GPU 重建、跟風暴時的位置與座標系、移除外圈、設定同步到外圈；外圈風暴與內圈風暴不一致造成的邊界影響大小。
+34. 開發計畫 Step 0（`docs/DEV_PLAN_nesting.md`）：共用檔回歸檢查，**沒改任何程式**。我之前為了外圈改過 `twoway.ts`（`NestGeom` 的 `x0,y0,ring`）與 `nestGpu.ts`（`X0/Y0` 改 uniform、`RING`），另外 `eyeNest.ts`（`hook()`）、`refine.ts`（頂以上水象 0）；逐行讀 diff 的結論是對眼區無影響，這次補數值對照（與外圈之前的 v54 版 ec3eaa6 比）：
+    - CPU：同一組隨機場，`nestGeometry` 相同；`nestTargets`（alpha 0、0.5、1）與 `nestFeedback` 的輸出**逐位元相同**（差異 0 格）。
+    - GPU（一次性頁面，沒留檔）：新舊 `GpuNest` 在眼區 geom 上各 dispatch 一次 `targets(0.5)` 與 `feedback()`，讀回差 **0**（目標 100418 個非零值、回饋 264083 個）。為了有 S0 對 S，父模型先走了 1 個步（只此一步，沒有時間迴圈）。
+    - 結論：外圈的共用檔修改沒有改變眼區細化的行為。
 
 ## 文件截圖
 - `docs/results/charts_*.png`（RESULTS 4.6）：在 Node 用 CPU 跑出成熟狀態存檔（超大胞 `packSave`；軸對稱用 `AxiDriver`＋`packSave`），
