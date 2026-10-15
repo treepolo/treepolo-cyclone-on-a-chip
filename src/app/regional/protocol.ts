@@ -146,6 +146,18 @@ export interface NestInfo {
 /** The eye nest's 3-D view bytes ([k][j][i], nx x nx x nz) with its geometry. */
 export interface NestFrame extends NestInfo { cloud: Uint8Array; rain: Uint8Array }
 
+/**
+ * The outer grid's 3-D view bytes ([k][j][i], nx x nx x nz; the display volume of the outer model, reduced horizontally by f when it is large) with its place in
+ * the inner grid's coordinates (m; the corner can be negative): what the 3-D view draws around the inner domain.
+ */
+export interface OuterFrame {
+  nx: number; nz: number; f: number; dx: number; dz: number;
+  x0: number; y0: number; L: number; top: number;
+  /** the width (m) of the band at the inner domain's edge where its state relaxes to the outer grid's (the views blend there) */
+  taper: number;
+  cloud: Uint8Array; rain: Uint8Array;
+}
+
 export interface RegionalFrame {
   type: 'frame';
   time: number;               // s
@@ -187,6 +199,8 @@ export interface RegionalFrame {
   tracers: Float32Array | null;
   /** the eye nest's volume (null: none) */
   nest: NestFrame | null;
+  /** the outer grid's volume: absent = the same as the last one sent, null = no outer grid */
+  outer?: OuterFrame | null;
   stepsPerSecond: number;
   /** current step size (s): varies with the automatic step size */
   dt: number;

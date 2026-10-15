@@ -15,7 +15,7 @@ import { ReplayStore, type ReplayFrame } from './replay.js';
 import { ReplayCharts } from './replayCharts.js';
 import { mountReplayPanel } from './replayPanel.js';
 import type { ReplayMeta } from '../../regional/replayData.js';
-import type { ChartData, FromRegionalWorker, GroundField, RegionalFrame, NestInfo, NestPayload, NestSize, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import type { ChartData, FromRegionalWorker, GroundField, RegionalFrame, NestInfo, NestPayload, NestSize, OuterFrame, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 import { nestGeometry, nestCells } from '../../regional/twoway.js';
 import type { RegionalConfig } from '../../regional/core.js';
 
@@ -41,6 +41,8 @@ let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } |
 const missions = new Missions($('missions'), (s) => log(s));
 let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
 let lastVol: ReplayFrame | null = null, refining = false;
+/** the outer grid's volume (the last one sent; null: none) and the one the 3-D view holds */
+let lastOuter: OuterFrame | null = null, shownOuter: OuterFrame | null = null;
 // (read-only, for the browser tests)
 (window as unknown as { regionalDebug: () => ReplayFrame | null }).regionalDebug = (): ReplayFrame | null => lastVol;
 // replay: frames the worker marks to be kept (the recording settings are in the replay panel); a replay file loaded from disk
@@ -56,6 +58,9 @@ let sat: SatelliteRenderer | null | undefined, volMode = 0;
 function showVolume(f: ReplayFrame): void {
   view.setVolume(f.nx, f.ny, f.nz, f.cloud, f.rain, Math.min(0.8, f.top / f.Lx * (exag ?? autoExag(f.Lx))), f.top, f.nest ? { ...f.nest, Lx: f.Lx, Ly: f.Ly } : null);
   view.setGround(f.nx, f.ny, f.ground);
+  // the outer grid goes with the live frame (a replay holds none)
+  const want = f === lastVol ? lastOuter : null;
+  if (want !== shownOuter) { view.setOuter(want ? { ...want, Lx: f.Lx } : null); shownOuter = want; }
 }
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
   request: (req) => { if (replayIdx !== null) void replayChartsNow(); else send({ type: 'charts', req }); },
@@ -84,7 +89,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
 worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
   if (m.type === 'follow') { $<HTMLInputElement>('followNow').checked = m.on; return; }
-  if (m.type === 'ext') { gridForm.setExt(m.info); return; }
+  if (m.type === 'ext') { gridForm.setExt(m.info); if (!m.info) { lastOuter = null; if (shownOuter) { view.setOuter(null); shownOuter = null; } } return; }
   if (m.type === 'settings') { form.set(m.setup); live.set(m.setup); gridForm.set(m.setup); log(m.note); return; }
   if (m.type === 'ready') {
     // a new model ends the replay (a refinement keeps the recording, but not a replay file shown)
@@ -143,6 +148,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       else c = sequential((v - lo) / ((hi - lo) || 1));
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
+    if (m.outer !== undefined) lastOuter = m.outer;
     lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dz: m.dz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [], nest: m.nest,
       stats: m.stats, origin: m.origin };
     if (m.nest) showNest(m.nest);
@@ -314,6 +320,7 @@ const sendMicro = (): void => {
   $<HTMLInputElement>('liqTau').disabled = !on;
   send({ type: 'micro', iceSS: $<HTMLInputElement>('iceSS').checked, liqTau: on && tau > 0 ? tau * 60 : 0 });
 };
+$<HTMLInputElement>('showOuter').onchange = (): void => view.setOuterVisible($<HTMLInputElement>('showOuter').checked);
 $('followNow').onchange = (): void => send({ type: 'follow', on: $<HTMLInputElement>('followNow').checked });
 $('iceSS').onchange = sendMicro; $('liqSS').onchange = sendMicro; $('liqTau').onchange = sendMicro;
 // (a browser may restore the form: tell the worker unless it is as the worker starts)

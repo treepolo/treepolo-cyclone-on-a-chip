@@ -455,6 +455,12 @@
     - CPU：同一組隨機場，`nestGeometry` 相同；`nestTargets`（alpha 0、0.5、1）與 `nestFeedback` 的輸出**逐位元相同**（差異 0 格）。
     - GPU（一次性頁面，沒留檔）：新舊 `GpuNest` 在眼區 geom 上各 dispatch 一次 `targets(0.5)` 與 `feedback()`，讀回差 **0**（目標 100418 個非零值、回饋 264083 個）。為了有 S0 對 S，父模型先走了 1 個步（只此一步，沒有時間迴圈）。
     - 結論：外圈的共用檔修改沒有改變眼區細化的行為。
+35. 開發計畫 Step 1（第 56 版）：外圈在 3D 畫面看得到。**不跑模擬。**
+    - **畫面**（`volume.ts`）：射線範圍由內圈盒擴成內圈盒與外圈盒的聯集（`uLo/uHi`），外圈另有體積／光／佔據貼圖（`uOVol/uOLight/uOOcc`）；內圈盒外只看外圈，內圈邊緣的鬆弛帶（`relaxCells+2` 格）內兩者線性混合（`outerW`），外圈區域用外圈格距走步；內圈盒外的地面是純海／陸色加外圈的雲影，內圈的邊用一條金線標出；鏡頭可移到外圈範圍。眼區疊層（`nestW`）完全沒動，眼區在內圈裡照舊。
+    - **資料**：`OuterFrame`（`protocol.ts`；`RegionalFrame.outer`：沒有這個欄位＝沿用上一份，`null`＝沒有外圈）。worker `sendFrameRaw` 的 `outerVolume()`：GPU 用 `readDisplay`、CPU 用 `volumeBytes`；外圈體素超過 4 M（`OUTER_DISPLAY_MAX`）就水平降取樣（消光量平均，`outerView.ts`）；最多約每秒一次、外圈時間有前進才送。回放時外圈隱藏、回放不存外圈。面板「3D 畫面顯示外圈」勾選。
+    - **驗證（無時間步）**：`src/tests/outerView.ts` 9/9（降取樣、外圈角落與寬度、鬆弛帶、雲在自己的格、降取樣後位置、內圈在外圈中央；已加進 `npm test`）；`live.js` 32/32。
+      渲染器：`tools/renderCheck/`（無頭瀏覽器 SwiftShader、合成體積、不跑模型）——**著色器改動前後三個場景（無眼區、合成眼區疊層、側視）的 PNG 逐位元相同**（`cmp`）；合成外圈場景（外圈雲環繞內圈、外圈雲與眼區疊層同時、側視）截圖確認外圈的雲出現在內圈盒外、內圈盒內的外圈雲不畫、金線在內圈邊。GPU 一次性頁面：GPU 外圈模型（只上傳、不步進）`readDisplay` 的雲／雨位元組與 CPU `volumeBytes` 差 0（304 個有雲格）。
+    - **沒驗證**（要跑模擬，由使用者測）：真實外圈跑起來後畫面的樣子、相接處是否有明顯斷層（合成資料看起來連續）、大外圈的傳輸／渲染速度、外圈雲對內圈的遮蔭（光的連鎖沒做，外圈雲影只落在內圈盒外的地面）。
 
 ## 文件截圖
 - `docs/results/charts_*.png`（RESULTS 4.6）：在 Node 用 CPU 跑出成熟狀態存檔（超大胞 `packSave`；軸對稱用 `AxiDriver`＋`packSave`），

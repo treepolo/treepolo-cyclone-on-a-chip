@@ -8,6 +8,7 @@ import { GpuRegional } from '../../gpu/regionalGpu.js';
 import { GpuNest } from '../../gpu/nestGpu.js';
 import { nestTargets as outerTargets, parentState, type ParentState } from '../../regional/twoway.js';
 import { buildOuter, openInner, type Outer } from './extension.js';
+import { outerFrameOf } from './outerView.js';
 import type { RegionalPhysicsConfig } from '../../regional/physics.js';
 import { nestFromGlobal, nestTargets, sampleSurface, NestSpec } from '../../regional/nest.js';
 import { refineInto, coarsenInto, regridPlane } from '../../regional/refine.js';
@@ -23,7 +24,7 @@ import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.j
 import { applyWind, FORCING_TAU, MAX_FORCINGS, VORTEX_RATIO, type WindForcing } from '../../regional/forcing.js';
 import { volumeBytes } from '../../regional/display.js';
 import { EyeNest, syncModel } from './eyeNest.js';
-import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
+import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type OuterFrame, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { nextDt, soundSpeed, bubbleDt, CFL_DEFAULT } from '../../regional/stepControl.js';
 import { T_FLOOR } from '../../core/constants.js';
 import { vortexPatch, applyVortexPatch, type VortexSpec } from '../../regional/vortex.js';
@@ -135,6 +136,8 @@ interface Ext { o: Outer; gpu: GpuRegional | null; link: GpuNest | null; old: Pa
 let ext: Ext | null = null;
 const extInfo = (): { L: number; dx: number; nx: number; cells: number } | null => (ext ? { L: ext.o.model.c.nx * ext.o.model.c.dx, dx: ext.o.model.c.dx, nx: ext.o.model.c.nx, cells: ext.o.model.c.nx ** 2 * ext.o.model.c.nz } : null);
 /** Forget the outer grid (a new model was built: its boundaries are the set-up's). */
+/** when the outer grid's volume was last sent to the page (null: not yet, or no outer grid) */
+let outerSent: { time: number; wall: number } | null = null;
 function extDrop(): void {
   if (!ext) return;
   ext.link?.destroy(); ext.gpu?.destroy(); ext = null;
@@ -235,10 +238,11 @@ async function startExt(wantL: number, wantDx: number): Promise<string> {
   catch (e) { await extStop(); return `內圈的 GPU 模式重建失敗，外圈已取消 / the inner GPU model could not be rebuilt, the outer grid was cancelled: ${String(e).slice(0, 300)}`; }
   if (gpu && !ext?.link) { await extStop(); return '外圈的 GPU 連結失敗，已取消 / the GPU link failed, the outer grid was cancelled'; }
   rec.sendMeta = true;
+  outerSent = null;
   await stepAfterChange();
   const i = extInfo()!;
   post({ type: 'ext', info: i });
-  return `外圈已加上：${(i.L / 1000).toFixed(0)} km 見方、Δx ${(i.dx / 1000).toFixed(1)} km（${(i.cells / 1e6).toFixed(2)} M 格），內圈（現在的模式）原封不動、邊界向外圈鬆弛；單向：外圈影響內圈，內圈不回饋外圈；3D 畫面和圖表只看內圈 / outer grid added: ${(i.L / 1000).toFixed(0)} km across, Δx ${(i.dx / 1000).toFixed(1)} km; the model stays as the inner grid, its edges relax to the outer grid; one way; the 3-D view and the charts show the inner grid`;
+  return `外圈已加上：${(i.L / 1000).toFixed(0)} km 見方、Δx ${(i.dx / 1000).toFixed(1)} km（${(i.cells / 1e6).toFixed(2)} M 格），內圈（現在的模式）原封不動、邊界向外圈鬆弛；單向：外圈影響內圈，內圈不回饋外圈；3D 畫面畫出外圈、圖表只看內圈 / outer grid added: ${(i.L / 1000).toFixed(0)} km across, Δx ${(i.dx / 1000).toFixed(1)} km; the model stays as the inner grid, its edges relax to the outer grid; one way; the 3-D view draws the outer grid, the charts show the inner grid`;
 }
 /** Take the outer grid away: the inner grid's boundaries are the set-up's again. */
 async function extStop(): Promise<void> {
@@ -1694,7 +1698,7 @@ async function sendFrameRaw(): Promise<void> {
   const planeAt = new Map<number, LevelPlanes>();
   const sliceK = req?.slice ? Math.max(0, Math.min(nz - 1, req.slice.k | 0)) : -1;
   let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
-  let charts: ChartData | null = null, trOut: Float32Array | null = null, nestOut: NestFrame | null = null;
+  let charts: ChartData | null = null, trOut: Float32Array | null = null, nestOut: NestFrame | null = null, outerOut: OuterFrame | null | undefined;
   const transfer = new Set<ArrayBuffer>([cloud.buffer, rain.buffer]);
   /** the eye nest's volume at this moment (before the GPU steps on); false when it is numerically unstable */
   const nestVolume = async (): Promise<boolean> => {
@@ -1704,6 +1708,26 @@ async function sendFrameRaw(): Promise<void> {
     if (!Number.isFinite(v.wmax) || !Number.isFinite(v.wmin) || Math.max(v.wmax, -v.wmin) > W_BLOWUP) return false;
     nestOut = { ...info, cloud: v.cloud, rain: v.rain };
     transfer.add(v.cloud.buffer as ArrayBuffer); transfer.add(v.rain.buffer as ArrayBuffer);
+    return true;
+  };
+  /** the outer grid's volume for the 3-D view: at most about once a second and only when the outer model has gone on (the page keeps the last one); null once when it is gone */
+  const outerVolume = async (): Promise<boolean> => {
+    const e = ext;
+    if (!e) { if (outerSent) { outerOut = null; outerSent = null; } return true; }
+    const og = e.gpu, om = e.o.model, tNow = og ? og.time : om.time, wall = performance.now();
+    if (outerSent && (tNow === outerSent.time || wall - outerSent.wall < 1000)) return true;
+    const { nx: onx, nz: onz, dx: odx, dz: odz } = om.c, n = onx * onx * onz, oc = new Uint8Array(n), orn = new Uint8Array(n);
+    let wmx = 0, wmn = 0;
+    if (og) {
+      const d = await og.readDisplay([], volMode, subgrid);
+      for (let i = 0; i < n; i++) { const v = d.packed[i]!; oc[i] = v & 255; orn[i] = (v >> 8) & 255; }
+      for (let c = 0; c < onx * onx; c++) { wmx = Math.max(wmx, d.col[NCOL * c]!); wmn = Math.min(wmn, d.col[NCOL * c + 1]!); }
+    } else ({ wmax: wmx, wmin: wmn } = volumeBytes(om, oc, orn, volMode, subgrid));
+    if (!Number.isFinite(wmx) || !Number.isFinite(wmn) || Math.max(wmx, -wmn) > W_BLOWUP) return false;
+    const g = e.o.geom;
+    outerOut = outerFrameOf(oc, orn, onx, onz, odx, odz, g.x0!, g.y0!, g.ring ?? 0, m!.c.dx);
+    transfer.add(outerOut.cloud.buffer as ArrayBuffer); transfer.add(outerOut.rain.buffer as ArrayBuffer);
+    outerSent = { time: tNow, wall };
     return true;
   };
   // the GPU model of this frame (the module variable can be replaced while a readback is awaited)
@@ -1724,7 +1748,7 @@ async function sendFrameRaw(): Promise<void> {
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = m.idx(i, j, 0); mp.rainAcc[j * nx + i] = d.rain[q]!; mp.snowAcc[j * nx + i] = d.snow[q]!; }
     m.time = tNow; m.steps = sNow;
     if (!Number.isFinite(wmax) || !Number.isFinite(wmin) || Math.max(wmax, -wmin) > W_BLOWUP) { blowPending = true; return; }
-    if (!await nestVolume()) { blowPending = true; return; }
+    if (!await nestVolume() || !await outerVolume()) { blowPending = true; return; }
     updateSwath(m, col);
     if (req) charts = await buildCharts(req, col, planeAt, sliceK, gpu);
     // the state of a 'full' recording is read before the GPU steps on
@@ -1742,7 +1766,7 @@ async function sendFrameRaw(): Promise<void> {
     // cloud: extinction of cloud water, sub-grid cloud, ice and snow (anvils are mostly snow); channel 2: extinction of
     // precipitation (rain + graupel), updraft or vorticity (display.ts; the GPU display kernel packs the same bytes)
     ({ wmax, wmin, qcmax, qrmax } = volumeBytes(m, cloud, rain, volMode, subgrid));
-    if (!await nestVolume()) { blowPending = true; return; }
+    if (!await nestVolume() || !await outerVolume()) { blowPending = true; return; }
     if (req || (keep && rec.tier !== 'view')) {
       col = columnDiagnostics(m, subgrid);
       planeAt.set(0, modelPlanes(m, 0));
@@ -1825,7 +1849,7 @@ async function sendFrameRaw(): Promise<void> {
   if (recOut) for (const b of recArrays(recOut)) transfer.add(b as ArrayBuffer);
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
     stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, uhMin, capeMax, storm, storms: catalog.active, mainId: main?.id ?? null, vtProfile, tornado, tcRain: isTc() ? tcRain : null, shear },
-    origin: { ...origin }, charts, tracers: trOut, nest: nestOut, stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt, step: stepInfo(gpu ? gpu.dt : m.c.dt), keep, rec: recOut }, [...transfer]);
+    origin: { ...origin }, charts, tracers: trOut, nest: nestOut, ...(outerOut !== undefined ? { outer: outerOut } : {}), stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt, step: stepInfo(gpu ? gpu.dt : m.c.dt), keep, rec: recOut }, [...transfer]);
 }
 
 /** The step size control of a frame: mode, target Courant number, nominal step and the Courant numbers of the step now. */

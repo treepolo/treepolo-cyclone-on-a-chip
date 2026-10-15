@@ -10,11 +10,13 @@
 // nearest particle colour and its distance from the eye; the ray march composites that colour where the
 // ray passes that distance, so clouds in front hide the particles behind them.
 import { EXT_MAX } from '../../regional/display.js';
-import type { NestFrame } from './protocol.js';
+import type { NestFrame, OuterFrame } from './protocol.js';
 import { nestSunSkyLight, occupancyGrid, sunSkyLight, type V3 } from './light.js';
 
 /** The eye nest's volume for the view, with the outer domain's width and height (m). */
 export type NestVolume = NestFrame & { Lx: number; Ly: number };
+/** The outer grid's volume for the view, with the inner domain's width (m: the unit of the box). */
+export type OuterVolume = OuterFrame & { Lx: number };
 
 const VS = `#version 300 es
 in vec2 aPos; out vec2 vUv;
@@ -41,6 +43,12 @@ uniform vec3 uNBox; uniform vec4 uNCyl; uniform float uNCell; uniform float uNCe
 // occupancy: per block of cells, 0 where the block and its neighbours hold no cloud or precipitation at all; the
 // texture coordinate scale (blocks do not divide the grid exactly) and the block size (box units)
 uniform sampler3D uOcc; uniform vec3 uOccScale; uniform vec3 uOccBlock;
+// the outer grid (a larger, coarser domain around this one): its volume and light, its box (lower-left corner and size, box units; the same top), cells, and the
+// width of the blend band inside this domain's edge. Off (uOOn = 0), the picture is that of this domain alone.
+uniform sampler3D uOVol; uniform sampler3D uOLight; uniform sampler3D uOOcc; uniform int uOOn;
+uniform vec3 uOMin; uniform vec3 uOSize; uniform float uOCell; uniform float uOCellZ; uniform float uOTaper; uniform vec3 uOOccScale;
+uniform vec3 uLo; uniform vec3 uHi;   // the ray's bounds: this domain's box, or the union with the outer grid's
+uniform float uPxAng;  // angle of one pixel (radians)
 uniform int uDbg;   // 1: show the ray's step count (red, of the cap) and refinements (green) instead of the picture; 2: no random start
 const float EXTMAX = ${EXT_MAX.toFixed(3)};
 // weight of the nest at p: 1 inside R - Wf, cos^2 to 0 at R (the feedback's taper), 0 without one
@@ -52,7 +60,27 @@ float nestW(vec3 p){
   float c = cos(1.5707963*(d - a)/uNCyl.w); return c*c;
 }
 vec3 nestQ(vec3 p){ return vec3((p.xy - uNBox.xy)/uNBox.z, p.z/uBox.z); }
-vec2 volAt(vec3 p, float w){ vec2 s = textureLod(uVol, p/uBox, 0.0).rg; if (w > 0.0) s = mix(s, textureLod(uNVol, nestQ(p), 0.0).rg, w); return s; }
+// signed distance (box units) outside this domain's box, along the axes: > 0 outside, < 0 inside
+float edgeD(vec3 p){ return max(max(-p.x, p.x - uBox.x), max(-p.y, p.y - uBox.y)); }
+// weight of the outer grid at p: 1 outside this domain, 0 deeper inside than the blend band (where this domain's edge relaxes to the outer grid)
+float outerW(vec3 p){ return uOOn == 0 ? 0.0 : smoothstep(-uOTaper, 0.0, edgeD(p)); }
+vec3 outerQ(vec3 p){ return (p - uOMin)/uOSize; }
+vec2 volAt(vec3 p, float w){
+  float wo = outerW(p);
+  vec2 s = wo >= 1.0 ? vec2(0.0) : textureLod(uVol, p/uBox, 0.0).rg;
+  if (w > 0.0) s = mix(s, textureLod(uNVol, nestQ(p), 0.0).rg, w);
+  if (wo > 0.0) s = mix(s, textureLod(uOVol, outerQ(p), 0.0).rg, wo);
+  return s;
+}
+// whether the clear-air block at p holds nothing: this domain's occupancy inside its box, the outer grid's outside it and in the blend band
+bool emptyAt(vec3 p){
+  if (uOOn == 0) return textureLod(uOcc, p/uBox*uOccScale, 0.0).r == 0.0;
+  bool e = true;
+  float d = edgeD(p);
+  if (d <= 0.0) e = textureLod(uOcc, p/uBox*uOccScale, 0.0).r == 0.0;
+  if (e && d > -(uOTaper + 2.0*uOccBlock.x)) e = textureLod(uOOcc, outerQ(p)*uOOccScale, 0.0).r == 0.0;
+  return e;
+}
 // sun light (r) and sky light (g) at p: looked up one grid cell toward the sun (the sun is 50 degrees up: that is
 // also most of a cell up, toward the sky), between the light volume's first two mipmap levels. The light of a voxel is that at its centre, so right at the surface of dense cloud
 // it would blend a lit clear voxel with a dark cloudy one by where the surface happens to sit between their centres,
@@ -64,10 +92,12 @@ vec2 lightAt(vec3 p, float w){
   float c = max(uCell, uCellZ);
   vec2 L = textureLod(uLight, (p + uSun*c)/uBox, LLOD).rg;
   if (w > 0.0) L = mix(L, textureLod(uNLight, nestQ(p + uSun*max(uNCell, uNCellZ)), LLOD).rg, w);
+  float wo = outerW(p);
+  if (wo > 0.0) L = mix(L, textureLod(uOLight, outerQ(p + uSun*max(uOCell, uOCellZ)), LLOD).rg, wo);
   return L;
 }
 bool hitBox(vec3 ro, vec3 rd, out float t0, out float t1){
-  vec3 inv = 1.0/rd; vec3 a = (vec3(0.0)-ro)*inv; vec3 b = (uBox-ro)*inv;
+  vec3 inv = 1.0/rd; vec3 a = (uLo-ro)*inv; vec3 b = (uHi-ro)*inv;
   vec3 mn = min(a,b), mx = max(a,b);
   t0 = max(max(mn.x,mn.y),mn.z); t1 = min(min(mx.x,mx.y),mx.z);
   return t1 > max(t0,0.0);
@@ -113,7 +143,13 @@ void main(){
       vec3 p0 = vec3(pg.xy, 0.0);
       vec2 L = lightAt(p0, nestW(p0));
       g = textureLod(uGround, pg.xy/uBox.xy, 0.0).rgb * (0.40*(0.35+0.65*L.g) + 0.95*L.r*max(uSun.z,0.0));
+    } else if (uOOn == 1 && pg.x >= uOMin.x && pg.y >= uOMin.y && pg.x <= uOMin.x + uOSize.x && pg.y <= uOMin.y + uOSize.y) {
+      // beyond this domain, inside the outer grid: the open surface, in the light of the outer grid's clouds
+      vec2 L = lightAt(vec3(pg.xy, 0.0), 1.0);
+      g = uOut * (0.40*(0.35+0.65*L.g) + 0.95*L.r*max(uSun.z,0.0));
     } else g = uOut * (0.40 + 0.95*max(uSun.z,0.0));
+    // this domain's edge, where an outer grid surrounds it
+    if (uOOn == 1) { float lw = 1.5*tg*uPxAng, line = 1.0 - smoothstep(0.5*lw, lw, abs(edgeD(vec3(pg.xy, 0.0)))); g = mix(g, vec3(1.0, 0.82, 0.30), 0.55*line); }
     bg = mix(g, horizon, smoothstep(6.0, 30.0, tg));
   }
   vec3 col = vec3(0.0); float trans = 1.0; int iters = 0, nref = 0;
@@ -140,6 +176,7 @@ void main(){
     // in quarter steps.
     vec3 ard = abs(rd) + 1e-6;
     float dtP = 0.5/max(max(ard.x, ard.y)/uCell, ard.z/uCellZ);
+    float dtOu = uOOn == 1 ? 0.5/max(max(ard.x, ard.y)/uOCell, ard.z/uOCellZ) : dtP;
     float dtN = uNOn == 1 ? 0.5/max(max(ard.x, ard.y)/uNCell, ard.z/uNCellZ) : dtP;
     float dtO = 0.95/max(max(ard.x/uOccBlock.x, ard.y/uOccBlock.y), ard.z/uOccBlock.z);
     float t = t0 + dtO*(uDbg >= 2 ? 0.5 : hash(gl_FragCoord.xy));
@@ -156,7 +193,7 @@ void main(){
       // sample: a short path through a corner; clear air within a block of a clear point holds nothing)
       if (t > t1) { if ((inCloud || tP == t0) && tP < t1 - 1e-7) t = t1; else break; }
       vec3 p = ro + t*rd;
-      if (hold == 0 && sub == 0 && uDbg < 3 && textureLod(uOcc, p/uBox*uOccScale, 0.0).r == 0.0) {
+      if (hold == 0 && sub == 0 && uDbg < 3 && emptyAt(p)) {
         // nothing up to here
         if (!tdone && t > tdist) { col += trans*tc.rgb; trans *= 1.0 - tc.a; tdone = true; }
         inCloud = false; tP = t; bP = 0.0; vP = vec2(0.0); cP = vec3(0.0);
@@ -168,7 +205,7 @@ void main(){
         if (t - tP > 1e-6) { hold = int((t - tP)/min(dtP, dtN)) + 2; t = tP; continue; }
       }
       if (hold > 0) hold--;
-      float w = nestW(p), dtB = w > 0.0 ? dtN : dtP, bThr = 0.3/dtB;
+      float w = nestW(p), dtB = w > 0.0 ? dtN : (outerW(p) >= 1.0 ? dtOu : dtP), bThr = 0.3/dtB;
       vec2 v = bytesAt(p, w), e = extAt(v);
       float b = e.x + e.y;
       if (uDbg != 4 && sub == 0 && refines < 6 && bP < bThr && b >= bThr && t - tP > 0.2*dtB) {
@@ -248,6 +285,15 @@ export class VolumeView {
   private readonly nVol: WebGLTexture;
   private readonly nLight: WebGLTexture;
   private readonly occ: WebGLTexture;
+  private readonly oVol: WebGLTexture;
+  private readonly oLight: WebGLTexture;
+  private readonly oOcc: WebGLTexture;
+  /** the outer grid around the domain (box units), or null */
+  private outer: { nx: number; nz: number; cloud: Uint8Array; x0: number; y0: number; L: number; top: number; taper: number; occScale: V3 } | null = null;
+  /** whether the outer grid is drawn (the page's switch) */
+  private outerShow = true;
+  /** what the outer grid's light was computed for (the opacity, the box height, the cut): it is not made again for the same */
+  private outerLightKey = '';
   /** occupancy grid: texture coordinate scale and the clear-air step (box units) */
   private occScale: V3 = [1, 1, 1]; private occBlock: V3 = [0.01, 0.01, 0.01];
   /** the eye nest (box units: x0, y0, width; cylinder centre, radius, taper), or null */
@@ -299,6 +345,9 @@ export class VolumeView {
     this.nVol = gl.createTexture()!;
     this.nLight = gl.createTexture()!;
     this.occ = gl.createTexture()!;
+    this.oVol = gl.createTexture()!;
+    this.oLight = gl.createTexture()!;
+    this.oOcc = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
     // empty volumes and light until the first frame (the sampler types must be complete)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -390,8 +439,8 @@ export class VolumeView {
   faceNorth(): void { if (this.fly) this.fly.yaw = Math.PI / 2; else this.yaw = -Math.PI / 2; this.dirty = true; }
 
   private clampTarget(): void {
-    const [bx, by, bz] = this.box, t = this.target();
-    this.tgt = [Math.max(-0.25 * bx, Math.min(1.25 * bx, t[0])), Math.max(-0.25 * by, Math.min(1.25 * by, t[1])), bz * 0.15];
+    const [bx, by, bz] = this.box, t = this.target(), { lo, hi } = this.bounds();
+    this.tgt = [Math.max(lo[0] - 0.25 * bx, Math.min(hi[0] + 0.25 * bx, t[0])), Math.max(lo[1] - 0.25 * by, Math.min(hi[1] + 0.25 * by, t[1])), bz * 0.15];
   }
   /** whether a tilt keeps the orbit eye above the ground */
   private eyeAbove(p: number): boolean { return this.target()[2] + this.dist * Math.sin(p) >= 0.003; }
@@ -603,6 +652,44 @@ export class VolumeView {
   /** Drop the eye nest's volume (the nest stopped). */
   clearNest(): void { if (this.nest) { this.nest = null; this.dirty = true; } }
 
+  /** The outer grid's volume (null: none): drawn around the domain, with its own light. */
+  setOuter(o: OuterVolume | null): void {
+    if (!o) { if (this.outer) { this.outer = null; this.dirty = true; } return; }
+    const u = 1 / o.Lx, gl = this.gl;
+    this.upload(this.oVol, o.nx, o.nx, o.nz, o.cloud, o.rain);
+    const B = 8, Bz = Math.max(1, Math.min(4, Math.round(B * (o.L * u / o.nx) / (this.box[2] / o.nz))));
+    const { occ, mx, my, mz } = occupancyGrid(o.nx, o.nx, o.nz, o.cloud, o.rain, B, Bz, null);
+    gl.bindTexture(gl.TEXTURE_3D, this.oOcc);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, mx, my, mz, 0, gl.RED, gl.UNSIGNED_BYTE, occ);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
+    this.outer = { nx: o.nx, nz: o.nz, cloud: o.cloud, x0: o.x0 * u, y0: o.y0 * u, L: o.L * u, top: o.top, taper: o.taper * u, occScale: [o.nx / (mx * B), o.nx / (my * B), o.nz / (mz * Bz)] };
+    this.computeOuterLight(true);
+    this.dirty = true;
+  }
+  /** Draw the outer grid or not (when there is one). */
+  setOuterVisible(on: boolean): void { if (on !== this.outerShow) { this.outerShow = on; this.dirty = true; } }
+  /** whether an outer grid is drawn now */
+  get hasOuter(): boolean { return !!this.outer && this.outerShow; }
+  /** The ray's bounds (box units): the domain's box, with the outer grid's when it is drawn. */
+  private bounds(): { lo: V3; hi: V3 } {
+    const [bx, by, bz] = this.box, o = this.hasOuter ? this.outer : null;
+    if (!o) return { lo: [0, 0, 0], hi: [bx, by, bz] };
+    return { lo: [Math.min(0, o.x0), Math.min(0, o.y0), 0], hi: [Math.max(bx, o.x0 + o.L), Math.max(by, o.y0 + o.L), bz] };
+  }
+  /** The outer grid's sun and sky light (as computeLight, in its own box). */
+  private computeOuterLight(force = false): void {
+    const o = this.outer; if (!o) return;
+    const cp = this.cutPlane(), key = `${this.kExt}|${this.box[2]}|${cp ? cp.n.join(',') + ',' + cp.d : ''}`;
+    if (!force && key === this.outerLightKey) return;
+    this.outerLightKey = key;
+    const shift = cp ? cp.n[0] * o.x0 + cp.n[1] * o.y0 : 0;
+    const { out } = sunSkyLight(o.nx, o.nx, o.nz, o.cloud, [o.L, o.L, this.box[2]], o.top, SUN, this.kExt, cp ? { n: cp.n, d: cp.d - shift } : null, false);
+    this.uploadLight(this.oLight, o.nx, o.nx, o.nz, out);
+  }
+
   /**
    * Sun and sky light of every voxel (bytes: transmittance to the sun, transmittance straight up) from the cloud
    * extinction: one sweep down the levels toward the sun (the light of the level above, shifted toward the sun, times
@@ -612,6 +699,7 @@ export class VolumeView {
     const d = this.data; if (!d) return;
     const { out, od } = sunSkyLight(d.nx, d.ny, d.nz, d.cloud, this.box, d.top, SUN, this.kExt, this.cutPlane(), !!this.nest);
     this.uploadLight(this.light, d.nx, d.ny, d.nz, out);
+    this.computeOuterLight();
     this.odAll = od;
     this.kLight = this.kExt;
     this.computeNestLight();
@@ -830,6 +918,19 @@ export class VolumeView {
     gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_3D, this.occ); gl.uniform1i(u('uOcc'), 7);
     gl.uniform3f(u('uOccScale'), this.occScale[0], this.occScale[1], this.occScale[2]);
     gl.uniform3f(u('uOccBlock'), this.occBlock[0], this.occBlock[1], this.occBlock[2]);
+    const ot = this.hasOuter ? this.outer : null, bd = this.bounds();
+    gl.uniform3f(u('uLo'), bd.lo[0], bd.lo[1], bd.lo[2]); gl.uniform3f(u('uHi'), bd.hi[0], bd.hi[1], bd.hi[2]);
+    gl.uniform1f(u('uPxAng'), 2 * Math.tan(this.fov / 2) / h);
+    gl.uniform1i(u('uOOn'), ot ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_3D, this.oVol); gl.uniform1i(u('uOVol'), 8);
+    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_3D, this.oLight); gl.uniform1i(u('uOLight'), 9);
+    gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_3D, this.oOcc); gl.uniform1i(u('uOOcc'), 10);
+    gl.uniform3f(u('uOMin'), ot ? ot.x0 : 0, ot ? ot.y0 : 0, 0);
+    gl.uniform3f(u('uOSize'), ot ? ot.L : 1, ot ? ot.L : 1, bz);
+    gl.uniform1f(u('uOCell'), ot ? ot.L / ot.nx : 0.01);
+    gl.uniform1f(u('uOCellZ'), ot ? bz / ot.nz : 0.01);
+    gl.uniform1f(u('uOTaper'), ot ? ot.taper : 0);
+    gl.uniform3f(u('uOOccScale'), ot ? ot.occScale[0] : 1, ot ? ot.occScale[1] : 1, ot ? ot.occScale[2] : 1);
     gl.uniform1i(u('uDbg'), DEBUG_MODE);
     gl.uniform1i(u('uTrOn'), trOn ? 1 : 0);
     if (trOn) {

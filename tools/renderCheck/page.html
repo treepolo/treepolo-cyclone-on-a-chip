@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><body style="margin:0"><canvas id="c" style="width:640px;height:400px"></canvas>
+<script type="module">
+import { VolumeView } from '../../dist/app/regional/volume.js';
+const cv=document.getElementById('c'); const view=new VolumeView(cv);
+function blobs(nx,ny,nz,list){const c=new Uint8Array(nx*ny*nz),r=new Uint8Array(nx*ny*nz);
+ for(let k=0;k<nz;k++)for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let v=0,w=0;
+  for(const [x,y,z,R,a,b] of list){const d=Math.hypot((i+.5)/nx-x,(j+.5)/ny*(ny/nx)-y,(k+.5)/nz*0.3-z)/R;if(d<1){v=Math.max(v,a*(1-d*d));w=Math.max(w,b*(1-d*d));}}
+  c[(k*ny+j)*nx+i]=v;r[(k*ny+j)*nx+i]=w;}
+ return [c,r];}
+const nx=48,ny=48,nz=24;
+const main=blobs(nx,ny,nz,[[.3,.3,.08,.18,230,0],[.65,.6,.12,.2,255,200],[.5,.2,.05,.1,180,120],[.8,.8,.15,.12,200,0]]);
+const ground=new Uint8Array(nx*ny*4);for(let i=0;i<nx*ny;i++){ground[4*i]=20;ground[4*i+1]=70+(i%7)*3;ground[4*i+2]=140;ground[4*i+3]=255;}
+window.renderScene=async(s)=>{
+  view.setVolume(nx,ny,nz,main[0],main[1],0.3,15000,null);
+  view.setGround(nx,ny,ground);
+  if(s==='nest'||s==='outernest'){const n=32,nzz=24,[c,r]=blobs(n,n,nzz,[[.5,.5,.1,.15,255,230]]).map(a=>a);
+    // nest box (m): x0,y0,L; cylinder at the centre; Lx=Ly=144000 m
+    const Lx=144000;
+    view.setVolume(nx,ny,nz,main[0],main[1],0.3,15000,{R:30000,dx:1000,dz:625,r:3,rz:1,nx:n,nz:nzz,cells:n*n*nzz,nsub:2,x0:48000,y0:48000,L:48000,cx:72000,cy:72000,Wf:8000,cloud:c,rain:r,Lx,Ly:Lx});}
+  view.setOuter(null);
+  if(s.startsWith('outer')){
+    const n=36,Lx=144000,[c,r]=blobs(n,n,nz,[[.12,.5,.1,.14,255,0],[.85,.25,.12,.16,230,200],[.5,.5,.1,.1,255,255],[.68,.7,.08,.09,255,0],[.33,.3,.06,.07,200,0]]);
+    view.setOuter({nx:n,nz,f:1,dx:12000,dz:625,x0:-Lx,y0:-Lx,L:3*Lx,top:15000,taper:24000,cloud:c,rain:r,Lx});
+  }
+  if(s==='side'||s==='outerside'){view.yaw=-1.9;view.pitch=0.15;view.dist=1.6;}else{view.yaw=-Math.PI/2;view.pitch=0.55;view.dist=s==='outerfar'?3:1.35;}
+  view.render(60);
+  return cv.toDataURL('image/png');
+};
+</script>
