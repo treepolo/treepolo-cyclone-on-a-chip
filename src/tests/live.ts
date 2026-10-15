@@ -8,7 +8,7 @@ import { buildModel, envWind, soundingOf } from '../app/regional/build.js';
 import { setupOf, type RegionalSetup } from '../app/regional/setup.js';
 import { applyLive, changedKeys, liveMerge, type LiveHolder } from '../app/regional/liveSettings.js';
 import { refineInto, makeSampler } from '../regional/refine.js';
-import { nestTargets } from '../regional/twoway.js';
+import { nestTargets, nestGeometry } from '../regional/twoway.js';
 import { buildOuter, openInner, outerSpacing } from '../app/regional/extension.js';
 import { check, summary } from './assert.js';
 
@@ -197,6 +197,22 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
     g.x0 = g.x0! - 10000;
     nestTargets(o, null, inner, g, 1, inner.boundary!);
     check('outer grid: the targets follow the inner box when it moves over the outer grid', Math.abs(inner.boundary!.th[inner.idx(0, 7, k)]! - want(0, 7, g.x0!, g.y0!)) < 1e-9);
+  }
+}
+
+// outer grid with the eye nest: the inner grid is open with an outer grid, the eye nest (a cylinder at the centre) must fit inside the relaxation band's margin, and its box
+// must not reach the edge ring where the outer grid's targets are needed
+{
+  const S: RegionalSetup = { ...setupOf('tc'), preset: 'custom', L: 150000, dx: 5000, top: 15000, dz: 1000, dt: 0, init: 'vortex', initAmp: 20 };
+  const b = buildModel(S, true), inner = b.model, n = 30;
+  const out = buildOuter(inner, S, b.frame, 300000, 15000, true, { rain: new Float64Array(n * n), snow: new Float64Array(n * n) }, null);
+  if (typeof out === 'string') check('outer grid with the eye nest: the outer grid can be built', false, out);
+  else {
+    openInner(inner);
+    const g = nestGeometry(inner.c, 15000, 1000, 500);
+    check('outer grid with the eye nest: a 15 km eye nest fits in the open inner grid', typeof g !== 'string', typeof g === 'string' ? g : '');
+    if (typeof g !== 'string') check('outer grid with the eye nest: its box lies inside the ring where the outer grid sets targets', g.i0 >= out.geom.ring! && g.j0 >= out.geom.ring! && g.i0 + g.np <= inner.c.nx - out.geom.ring! && g.j0 + g.np <= inner.c.ny - out.geom.ring!, `${g.i0}, ${g.np}, ring ${out.geom.ring}`);
+    check('outer grid with the eye nest: one too big for the open inner grid is refused', typeof nestGeometry(inner.c, 70000, 1000, 500) === 'string');
   }
 }
 

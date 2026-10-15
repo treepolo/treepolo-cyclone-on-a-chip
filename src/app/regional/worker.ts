@@ -218,8 +218,12 @@ async function extFromCpu(): Promise<void> {
 /** Add an outer grid around the running model: at least `wantL` m across, spacing near `wantDx` m. Returns a note for the log. */
 async function startExt(wantL: number, wantDx: number): Promise<string> {
   if (!m || !mp || !setup || axi || experiment === 'nest') return '這個實驗不能加外圈 / this experiment cannot have an outer grid';
-  if (eye) return '請先停止眼區細化再加外圈（兩者還不能同時用）/ stop the eye nest first: the two cannot be used together yet';
   if (ext) await extStop();
+  if (eye) {
+    // the inner grid's edges become open and relax to the outer grid: the eye nest must lie inside that band's margin
+    const mc = m.c as { relaxCells?: number }, rc = (mc.relaxCells ?? Math.max(6, Math.round(2500 / m.c.dx))) + 2, g = eye.g;
+    if (g.i0 < rc || g.j0 < rc || g.i0 + g.np > m.c.nx - rc || g.j0 + g.np > m.c.ny - rc) return `眼區細化的框離內圈邊緣不到 ${rc} 格（邊界向外圈鬆弛的帶），請先停止眼區細化、用較小的半徑再開 / the eye nest lies within ${rc} cells of the inner grid's edge (the band that relaxes to the outer grid): stop it and start a smaller one`;
+  }
   await syncFromGpu();
   advanceOrigin();
   const sfc = phys?.surface ?? null, mm = m;
@@ -260,13 +264,13 @@ async function extStop(): Promise<void> {
 /** Advance the models by n outer steps on the GPU (with the eye nest: its sub-steps and feedback in each). */
 function stepGpu(n: number): void {
   const e = eye, link = e?.link;
-  if (e && link) for (let s = 0; s < n; s++) link.step(e.nsub);
+  if (e && link) for (let s = 0; s < n; s++) { if (ext?.link) extPrepare(); link.step(e.nsub); }
   else if (ext?.link) for (let s = 0; s < n; s++) { extPrepare(); gpu!.step(1); }
   else gpu!.step(n);
 }
 /** One outer step on the CPU (with the eye nest's sub-steps and feedback). */
 function stepCpu(): void {
-  if (eye) eye.cpuStep(m!, mp!);
+  if (eye) { if (ext) extPrepareCpu(); eye.cpuStep(m!, mp!); }
   else { if (ext) extPrepareCpu(); m!.step(); mp!.apply(m!.c.dt); }
   addGuard(guardTotals, guardModel(m!));
   if (eye) addGuard(guardTotals, guardModel(eye.m));
@@ -1401,7 +1405,6 @@ async function regridTo(target: RegionalSetup, kind: 'refine' | 'grid'): Promise
  * is at its centre, where the cylinder is. Returns a note for the page; throws with the reason when it cannot start.
  */
 async function startNest(R: number, dx: number, dz: number, recentre: boolean): Promise<string> {
-  if (ext) throw new Error('請先移除外圈（兩者還不能同時用）/ remove the outer grid first: the two cannot be used together yet');
   const mm = m!, mpp = mp!, c = mm.c;
   let where = '';
   if (recentre) {
