@@ -22,7 +22,19 @@ window.renderScene=async(s)=>{
     const n=36,Lx=144000,[c,r]=blobs(n,n,nz,[[.12,.5,.1,.14,255,0],[.85,.25,.12,.16,230,200],[.5,.5,.1,.1,255,255],[.68,.7,.08,.09,255,0],[.33,.3,.06,.07,200,0]]);
     view.setOuter({nx:n,nz,f:1,dx:12000,dz:625,x0:-Lx,y0:-Lx,L:3*Lx,top:15000,taper:24000,cloud:c,rain:r,Lx});
   }
-  if(s==='side'||s==='outerside'){view.yaw=-1.9;view.pitch=0.15;view.dist=1.6;}else{view.yaw=-Math.PI/2;view.pitch=0.55;view.dist=s==='outerfar'?3:1.35;}
+  view.setTall(null);view.setFootprint(null);
+  if(s.startsWith('tall')){
+    const Lx=144000,n=48,nzT=36,Z1=15000,Z2=22500,zs=0.45;
+    const c=new Uint8Array(n*n*nzT),r=new Uint8Array(n*n*nzT);
+    for(let k=0;k<nzT;k++)for(let j=0;j<n;j++)for(let i=0;i<n;i++){let v=0,w=0;
+      for(const [x,y,z,R,a,b] of [[.5,.5,.3,.12,255,0],[.4,.55,.1,.1,230,200],[.62,.4,.38,.07,255,0]]){const d=Math.hypot((i+.5)/n-x,(j+.5)/n-y,((k+.5)/nzT*zs-z))/R;if(d<1){v=Math.max(v,a*(1-d*d));w=Math.max(w,b*(1-d*d));}}
+      c[(k*n+j)*n+i]=v;r[(k*n+j)*n+i]=w;}
+    if(s!=='tallfoot')view.setTall({Z1,Z2,r:2,rz:1,dx:1500,dz:625,nx:n,nz:nzT,cells:n*n*nzT,nsub:1,x0:36000,y0:36000,L:72000,Wf:10800,cloud:c,rain:r,Lx});
+    view.setFootprint([.25,.25,.75,.75]);
+    if(s==='tallnest'){const m2=32,[c2,r2]=blobs(m2,m2,nz,[[.5,.5,.1,.15,255,230]]);
+      view.setVolume(nx,ny,nz,main[0],main[1],0.3,15000,{R:20000,dx:1000,dz:625,r:3,rz:1,nx:m2,nz,cells:m2*m2*nz,nsub:2,x0:52000,y0:52000,L:40000,cx:72000,cy:72000,Wf:5000,cloud:c2,rain:r2,Lx,Ly:Lx});}
+  }
+  if(s==='side'||s==='outerside'||s==='tallside'){view.yaw=-1.9;view.pitch=0.15;view.dist=s==='side'?0.9:s==='tallside'?1.3:1.6;}else{view.yaw=-Math.PI/2;view.pitch=0.55;view.dist=s==='outerfar'?3:1.35;}
   view.render(60);
   return cv.toDataURL('image/png');
 };

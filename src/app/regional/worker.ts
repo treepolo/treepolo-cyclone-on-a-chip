@@ -24,7 +24,8 @@ import { StormCatalog, findStorms, type StormNow } from '../../regional/storms.j
 import { applyWind, FORCING_TAU, MAX_FORCINGS, VORTEX_RATIO, type WindForcing } from '../../regional/forcing.js';
 import { volumeBytes } from '../../regional/display.js';
 import { EyeNest, syncModel } from './eyeNest.js';
-import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type OuterFrame, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
+import { TallNest } from './tallNest.js';
+import { type ChartData, type ChartRequest, type ForcingInfo, type FromRegionalWorker, type GroundField, type NestFrame, type NestInfo, type OuterFrame, type TallFrame, type TallInfo, type NestPayload, type NestSize, type RegionalExperiment, type TcRain, type ToRegionalWorker } from './protocol.js';
 import { nextDt, soundSpeed, bubbleDt, CFL_DEFAULT } from '../../regional/stepControl.js';
 import { T_FLOOR } from '../../core/constants.js';
 import { vortexPatch, applyVortexPatch, type VortexSpec } from '../../regional/vortex.js';
@@ -70,6 +71,7 @@ let forcings: { info: ForcingInfo; f: WindForcing }[] = [], forcingId = 1;
 function syncForcings(): void {
   gpu?.setForcings(forcings.map((x) => x.f));
   eye?.setForcings(forcings.map((x) => x.f));
+  tall?.setForcings(forcings.map((x) => x.f));
   post({ type: 'forcings', list: forcings.map((x) => x.info) });
 }
 /** Drop forcings that have ended; returns true when the list changed. */
@@ -123,8 +125,43 @@ function nestInfo(): NestInfo | null {
 function stopNest(): void {
   if (!eye) return;
   eye.destroy(); eye = null;
+  if (tall) { tall.eyeCoupling(null); tall.eyeCouplingGpu(null); }
   post({ type: 'nest', info: null });
 }
+
+/**
+ * The tall grid (tallNest.ts; the page's "局部加高"): a child of the model over a square part of its domain that reaches higher than the model's lid, or null. It steps after the model (and the
+ * eye nest, which may lie inside it: then it feeds back into it too, and it feeds the model).
+ */
+let tall: TallNest | null = null;
+function tallInfo(): TallInfo | null {
+  if (!tall) return null;
+  const g = tall.g;
+  return { Z1: g.Z1, Z2: g.Z2, r: g.r, rz: g.rz, dx: g.dx, dz: g.dz, nx: g.nx, nz: g.nz, cells: tall.cells, nsub: tall.nsub, x0: g.x0, y0: g.y0, L: g.np * m!.c.dx, Wf: g.Wf };
+}
+/** Drop the tall grid (the model keeps what it was fed back). */
+function stopTall(): void {
+  if (!tall) return;
+  tall.destroy(); tall = null;
+  post({ type: 'tall', info: null });
+}
+/** The eye nest's feedback into the tall grid, set again (either was started, stopped or rebuilt); a note when the eye nest lies in the footprint but cannot feed it. */
+function tallEyeLink(announce: boolean): void {
+  if (!tall) return;
+  const why = tall.eyeCoupling(eye?.g ?? null);
+  if (why && announce) post({ type: 'log', text: `眼區細化的回饋只進主網格，局部加高在眼區處用自己的狀態：${why} / the eye nest feeds the model only; the tall grid keeps its own state there` });
+  tall.eyeCouplingGpu(gpu ? eye?.gpu ?? null : null);
+}
+/** one host step of the tall grid on the GPU (its sub-steps, the eye nest's feedback into it, its feedback into the model) */
+function tallStepGpu(): void {
+  const t = tall!, tl = t.link!, tg = t.gpu!;
+  for (let s = 0; s < t.nsub; s++) { tl.targets((s + 0.5) / t.nsub); tg.step(1); }
+  t.eyeLink?.feedback();
+  tl.feedback();
+}
+/** The tall grid's spec from its geometry (to build it anew from a restored state) */
+const tallSpecOf = (g: TallNest['g'], dxh: number): { cx: number; cy: number; width: number; top: number; r: number; rz: number } =>
+  ({ cx: g.x0 + 0.5 * g.np * dxh, cy: g.y0 + 0.5 * g.np * dxh, width: g.np * dxh, top: g.Z2, r: g.r, rz: g.rz });
 
 /**
  * An outer grid around the running model (extension.ts; the page's "範圍加大"), or null: a coarse model of a larger domain that runs by itself, ahead of the model (the inner
@@ -224,6 +261,10 @@ async function startExt(wantL: number, wantDx: number): Promise<string> {
     const mc = m.c as { relaxCells?: number }, rc = (mc.relaxCells ?? Math.max(6, Math.round(2500 / m.c.dx))) + 2, g = eye.g;
     if (g.i0 < rc || g.j0 < rc || g.i0 + g.np > m.c.nx - rc || g.j0 + g.np > m.c.ny - rc) return `眼區細化的框離內圈邊緣不到 ${rc} 格（邊界向外圈鬆弛的帶），請先停止眼區細化、用較小的半徑再開 / the eye nest lies within ${rc} cells of the inner grid's edge (the band that relaxes to the outer grid): stop it and start a smaller one`;
   }
+  if (tall) {
+    const mc = m.c as { relaxCells?: number }, rc = (mc.relaxCells ?? Math.max(6, Math.round(2500 / m.c.dx))) + 2, g = tall.g;
+    if (g.i0 < rc || g.j0 < rc || g.i0 + g.np > m.c.nx - rc || g.j0 + g.np > m.c.ny - rc) return `局部加高的範圍離內圈邊緣不到 ${rc} 格（邊界向外圈鬆弛的帶），請先停止局部加高、用較小的範圍再開 / the tall grid lies within ${rc} cells of the inner grid's edge (the band that relaxes to the outer grid): stop it and start a smaller one`;
+  }
   await syncFromGpu();
   advanceOrigin();
   const sfc = phys?.surface ?? null, mm = m;
@@ -264,16 +305,27 @@ async function extStop(): Promise<void> {
 /** Advance the models by n outer steps on the GPU (with the eye nest: its sub-steps and feedback in each). */
 function stepGpu(n: number): void {
   const e = eye, link = e?.link;
-  if (e && link) for (let s = 0; s < n; s++) { if (ext?.link) extPrepare(); link.step(e.nsub); }
+  if (tall?.link) {
+    // the model (with the eye nest), then the tall grid
+    for (let s = 0; s < n; s++) {
+      if (ext?.link) extPrepare();
+      if (e && link) link.step(e.nsub); else gpu!.step(1);
+      tallStepGpu();
+    }
+  }
+  else if (e && link) for (let s = 0; s < n; s++) { if (ext?.link) extPrepare(); link.step(e.nsub); }
   else if (ext?.link) for (let s = 0; s < n; s++) { extPrepare(); gpu!.step(1); }
   else gpu!.step(n);
 }
 /** One outer step on the CPU (with the eye nest's sub-steps and feedback). */
 function stepCpu(): void {
+  const old = tall ? parentState(m!) : null;
   if (eye) { if (ext) extPrepareCpu(); eye.cpuStep(m!, mp!); }
   else { if (ext) extPrepareCpu(); m!.step(); mp!.apply(m!.c.dt); }
+  if (tall && old) tall.cpuAfter(m!, old, eye?.m ?? null);
   addGuard(guardTotals, guardModel(m!));
   if (eye) addGuard(guardTotals, guardModel(eye.m));
+  if (tall) addGuard(guardTotals, guardModel(tall.m));
 }
 
 /** One storm analysis of the current CPU model state (level-0 fields; column composites for cells). */
@@ -441,9 +493,10 @@ function batchLimit(n: number, dt: number): number {
 }
 /** The eye nest's sub-steps for the outer step now (CPU: its Courant number computed here; GPU: read back). */
 async function nestFit(): Promise<void> {
-  const e = eye; if (!e || !m) return;
+  if (!m) return;
   const dt = gpu ? gpu.dt : m.c.dt;
-  e.fit(dt, adaptive ? await e.courantRate() : null, cflTarget);
+  if (eye) eye.fit(dt, adaptive ? await eye.courantRate() : null, cflTarget);
+  if (tall) tall.fit(dt, adaptive ? await tall.courantRate() : null, cflTarget);
 }
 /** Keep the state before an interaction (see undo). */
 function takeUndo(): void {
@@ -474,6 +527,7 @@ async function restoreUndo(): Promise<boolean> {
       stopNest();
       try { await startNest(g.R, g.dx, g.dz, false); } catch (e) { post({ type: 'log', text: `眼區細化無法重建，已停止 / the eye nest could not be rebuilt: ${String((e as Error).message ?? e)}` }); }
     }
+    await restartTall();
     gpuBatch = 1;
     return true;
   }
@@ -499,8 +553,17 @@ async function restoreUndo(): Promise<boolean> {
     stopNest();
     try { await startNest(g.R, g.dx, g.dz, false); } catch (e) { post({ type: 'log', text: `眼區細化無法重建，已停止 / the eye nest could not be rebuilt: ${String((e as Error).message ?? e)}` }); }
   }
+  await restartTall();
   gpuBatch = 1;
   return true;
+}
+/** The tall grid starts again from the (restored) state of the model. */
+async function restartTall(): Promise<void> {
+  if (!tall || !m) return;
+  const spec = tallSpecOf(tall.g, m.c.dx);
+  if (gpu && mp) await syncModel(gpu, m, mp);          // (the main grid's CPU state is the restored one)
+  stopTall();
+  try { await startTall(spec); } catch (e) { post({ type: 'log', text: `局部加高無法重建，已停止 / the tall grid could not be rebuilt: ${String((e as Error).message ?? e)}` }); }
 }
 /** After a numerical blow-up: undo the last interaction if it was recent, else stop with an error. */
 async function blowUp(): Promise<void> {
@@ -535,7 +598,7 @@ async function adaptDt(): Promise<void> {
 async function stepAfterChange(bubbleK = 0): Promise<void> {
   if (!m) return;
   // the state guard looks at the changed state (the GPU did, in the edit; its counts come with the Courant reading)
-  if (!gpu) { addGuard(guardTotals, guardModel(m)); if (eye) addGuard(guardTotals, guardModel(eye.m)); }
+  if (!gpu) { addGuard(guardTotals, guardModel(m)); if (eye) addGuard(guardTotals, guardModel(eye.m)); if (tall) addGuard(guardTotals, guardModel(tall.m)); }
   if (!adaptive) return;
   const c = m.c;
   let rate = 0, cmax = 0;
@@ -670,7 +733,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       await waitIdle();
       busy = true;
       try {
-        stopNest(); gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
+        stopNest(); stopTall(); gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null;
         experiment = 'tc_axi'; frameVel = { u: 0, v: 0 }; setup = { ...msg.setup };
         axi = new AxiDriver(axiFromSetup(msg.setup));
         resetOrigin(); stormDomain = null; tracers = null; catalog.reset(); followId = null; clearForcings(); parents = [];
@@ -686,7 +749,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try {
       axi = null;
       const device = msg.backend === 'cpu' ? null : await getGpu();
-      stopNest(); gpu?.destroy(); gpu = null;
+      stopNest(); stopTall(); gpu?.destroy(); gpu = null;
       let info = build(msg.setup, !!device);
       builtGpu = !!device; nestSource = null;
       let note = '';
@@ -709,7 +772,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try {
       axi = null;
       const device = msg.backend === 'cpu' ? null : await getGpu();
-      stopNest(); gpu?.destroy(); gpu = null;
+      stopNest(); stopTall(); gpu?.destroy(); gpu = null;
       let info = buildNest(msg.payload, msg.lat0, msg.lon0, msg.size, !!device);
       builtGpu = !!device; nestSource = { payload: msg.payload, lat0: msg.lat0, lon0: msg.lon0, size: msg.size };
       let note = '';
@@ -759,7 +822,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
     else if (msg.type === 'micro') {
       if (msg.iceSS !== undefined) microOpts.iceSS = !!msg.iceSS;
       if (msg.liqTau !== undefined && Number.isFinite(msg.liqTau)) microOpts.liqTau = Math.max(0, msg.liqTau);
-      gpu?.syncMicro(); eye?.gpu?.syncMicro();
+      gpu?.syncMicro(); eye?.gpu?.syncMicro(); tall?.gpu?.syncMicro();
       post({ type: 'log', text: `雲物理開關 / cloud-physics switches: 冰過飽和 ${microOpts.iceSS ? '開' : '關'} ice supersaturation ${microOpts.iceSS ? 'on' : 'off'}；液態水過飽和 ${microOpts.liqTau > 0 ? `開，凝結時間 ${fmtNum(microOpts.liqTau / 60)} 分 on, condensation time ${fmtNum(microOpts.liqTau / 60)} min` : '關 off'}` });
     }
     else if (msg.type === 'tracers') {
@@ -802,6 +865,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           time: t, steps: m.steps, dt: gpu ? gpu.dt : c.dt, frameVel, dpEnv, adaptive, nest, origin, setup };
         const buffer = packSave(meta, arrays);
         post({ type: 'saveData', meta, buffer }, [buffer]);
+        if (tall) post({ type: 'log', text: '存檔只含主網格（局部加高的部分不存）/ the save holds the main grid only (the tall grid is not saved)' });
         if (eye) post({ type: 'log', text: '存檔只含外圍網格（細化區以其平均存在外圍網格裡），載入後可再開始眼區細化 / the save holds the outer grid (with the nest averaged into it); start the eye nest again after loading' });
       } catch (e) { post({ type: 'error', message: `存檔失敗 / save failed: ${String(e)}` }); }
       busy = false; running = wasRunning;
@@ -816,7 +880,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
           setup?: RegionalSetup | null; tcEnv?: Partial<AxiParams> | null; tornadoEnv?: TornadoEnv | null };
         if (meta.kind !== 'regional') throw new Error('不是區域模式存檔 / not a regional save');
         if (M.experiment === 'tc_axi') {
-          stopNest(); gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null; experiment = 'tc_axi'; frameVel = { u: 0, v: 0 };
+          stopNest(); stopTall(); gpu?.destroy(); gpu = null; m = null; mp = null; tracker = null; nestSource = null; experiment = 'tc_axi'; frameVel = { u: 0, v: 0 };
           axi = new AxiDriver({ ...AXI_DEFAULTS, ...LEGACY_TC, ...((meta as unknown as { axi?: AxiParams }).axi ?? {}) });
           axi.restore(arrays as Record<string, Float32Array>, M.time, M.steps);
           setup = M.setup ?? setupOf('tc_axi');
@@ -828,7 +892,7 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
         }
         axi = null;
         const device = msg.backend === 'cpu' ? null : await getGpu();
-        stopNest(); gpu?.destroy(); gpu = null;
+        stopNest(); stopTall(); gpu?.destroy(); gpu = null;
         let info: { dt: number; description: string; land?: Uint8Array | null };
         if (M.nest) {
           const n = M.nest as { lat0: number; lon0: number; size: NestSize; preset: string; day: number; nlat: number; nlon: number; K: number };
@@ -879,11 +943,27 @@ self.onmessage = async (ev: MessageEvent<ToRegionalWorker>): Promise<void> => {
       try {
         await syncFromGpu();
         advanceOrigin();
-        stopNest();
+        stopNest(); stopTall();
         if (msg.type === 'nestStart') post({ type: 'log', text: await startNest(msg.R, msg.dx, msg.dz, true) });
         else post({ type: 'log', text: '已停止眼區細化；外圍網格保留細化區回饋的平均 / eye nest stopped; the outer grid keeps what the nest fed back' });
         await sendFrame();
       } catch (e) { post({ type: 'error', message: `眼區細化失敗 / eye nest failed: ${String((e as Error).message ?? e)}` }); }
+      finally { busy = false; running = wasRunning; }
+    }
+    else if (msg.type === 'tallStart' || msg.type === 'tallStop') {
+      if (!setup || experiment === 'nest' || axi || !m || !mp) return;
+      if (msg.type === 'tallStop' && !tall) return;
+      const wasRunning = running; running = false;
+      await waitIdle();
+      busy = true;
+      try {
+        await syncFromGpu();
+        advanceOrigin();
+        stopTall();
+        if (msg.type === 'tallStart') post({ type: 'log', text: await startTall(msg.spec) });
+        else post({ type: 'log', text: '已停止局部加高；主網格保留它回饋的平均 / tall grid stopped; the main grid keeps what it fed back' });
+        await sendFrame();
+      } catch (e) { post({ type: 'error', message: `局部加高失敗 / tall grid failed: ${String((e as Error).message ?? e)}` }); }
       finally { busy = false; running = wasRunning; }
     }
     else if (msg.type === 'refine') {
@@ -1185,7 +1265,7 @@ async function followStorm(): Promise<void> {
 async function moveDomain(a: { du: number; dv: number; di: number; dj: number }): Promise<void> {
   if (!m || !mp) return;
   if (!a.du && !a.dv && !a.di && !a.dj) return;
-  if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); eye?.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; if (physCfg) physCfg.frameVel = frameVel; }
+  if (a.du || a.dv) { m.shiftFrame(a.du, a.dv); eye?.shiftFrame(a.du, a.dv); tall?.shiftFrame(a.du, a.dv); frameVel.u += a.du; frameVel.v += a.dv; if (physCfg) physCfg.frameVel = frameVel; }
   if (ext && (a.du || a.dv)) {
     // the outer grid is in the same moving frame as the inner one
     await extToCpu(); ext.o.model.shiftFrame(a.du, a.dv); if (ext.o.cfg) ext.o.cfg.frameVel = { ...frameVel }; await extFromCpu();
@@ -1200,11 +1280,13 @@ async function moveDomain(a: { du: number; dv: number; di: number; dj: number })
     if (ext) { await extToCpu(); outerTargets(ext.o.model, null, m, ext.o.geom, 1, m.boundary!); }          // (the columns that come in take the outer grid's state)
     if (m.c.lateral === 'open') enterEnvironment(a.di, a.dj);
     eye?.roll(m, { rain: mp.rainAcc, snow: mp.snowAcc }, a.di, a.dj, sf ?? null);
+    tall?.roll(m, { rain: mp.rainAcc, snow: mp.snowAcc }, a.di, a.dj, sf ?? null);
     if (sf) post({ type: 'land', land: landMask() });
     if (forcings.length) {
       const Lx = m.c.nx * m.c.dx, Ly = m.c.ny * m.c.dy;
       for (const x of forcings) { x.f.x = ((x.f.x + a.di * m.c.dx) % Lx + Lx) % Lx; x.f.y = ((x.f.y + a.dj * m.c.dy) % Ly + Ly) % Ly; x.info.x = x.f.x; x.info.y = x.f.y; }
       eye?.setForcings(forcings.map((x) => x.f));
+      tall?.setForcings(forcings.map((x) => x.f));
       post({ type: 'forcings', list: forcings.map((x) => x.info) });
     }
   }
@@ -1230,10 +1312,22 @@ async function moveDomain(a: { du: number; dv: number; di: number; dj: number })
 /** Rebuild the eye nest's GPU model and coupling for a newly built outer GPU model (stops the nest if that fails). */
 async function nestGpuUp(): Promise<void> {
   extRelink();
+  if (eye && gpu) await eyeGpuUp();
+  await tallGpuUp();
+}
+async function eyeGpuUp(): Promise<void> {
   if (!eye || !gpu) return;
   const reason = await eye.gpuUp(gpu);
   if (reason) { stopNest(); post({ type: 'log', text: `眼區細化的 GPU 模式建立失敗，已停止 / the eye nest's GPU model failed, stopped: ${reason.slice(0, 200)}` }); }
   else eye.fit(gpu.dt);
+}
+/** Rebuild the tall grid's GPU model and couplings for a newly built GPU model of the main grid (stops the tall grid if that fails). */
+async function tallGpuUp(): Promise<void> {
+  if (!tall || !gpu) return;
+  const reason = await tall.gpuUp(gpu);
+  if (reason) { stopTall(); post({ type: 'log', text: `局部加高的 GPU 模式建立失敗，已停止 / the tall grid's GPU model failed, stopped: ${reason.slice(0, 200)}` }); return; }
+  tall.fit(gpu.dt);
+  tallEyeLink(false);
 }
 
 /**
@@ -1289,6 +1383,14 @@ async function applySettings(want: RegionalSetup): Promise<string> {
     if (inner.cfg) inner.cfg.frameVel = frameVel;
     if (ri.physics) { eye.rehook(); eye.surfaceFrom(mm, phys?.surface ?? null); }
   }
+  // the tall grid: the same changes in its own grid
+  if (tall) {
+    const inner = { m: tall.m, cfg: tall.cfg, phys: tall.phys };
+    const ri = applyLive(inner, next, old, frameVel, true);
+    tall.cfg = inner.cfg; tall.phys = inner.phys;
+    if (inner.cfg) inner.cfg.frameVel = frameVel;
+    if (ri.physics) { tall.rehook(); tall.surfaceFrom(mm, phys?.surface ?? null); }
+  }
   // the outer grid has the same settings
   if (ext) {
     await extToCpu();
@@ -1343,8 +1445,8 @@ async function regridTo(target: RegionalSetup, kind: 'refine' | 'grid'): Promise
   try {
     await syncFromGpu();
     advanceOrigin();
-    const hadNest = !!eye;
-    stopNest();
+    const hadNest = !!eye, hadTall = !!tall;
+    stopNest(); stopTall();
     const mc = m!, mpc = mp!, fromDx = mc.c.dx, frameC = { ...frameVel }, trackC = tracker?.position ?? null, originC = { ...origin };
     const Lc = mc.c.nx * mc.c.dx, Lcy = mc.c.ny * mc.c.dy, Lf = target.L;
     const sfC = phys?.surface ? { tsk: Float64Array.from(phys.surface.tsk), wet: Float64Array.from(phys.surface.wet) } : null;
@@ -1391,6 +1493,7 @@ async function regridTo(target: RegionalSetup, kind: 'refine' | 'grid'): Promise
     if (keep) { forcings = forcingsC; syncForcings(); } else clearForcings();
     if (keep && tpC && mf.c.nz * mf.c.dz >= mc.c.nz * mc.c.dz - 1e-6) setupTracers(tpC); else setupTracers();
     if (hadNest) note += ' · 眼區細化已停止（它屬於舊網格），要的話請重新開啟 / the eye nest was stopped (it belonged to the old grid): start it again if you want';
+    if (hadTall) note += ' · 局部加高已停止（它屬於舊網格）/ the tall grid was stopped (it belonged to the old grid)';
     if (!keep && kind === 'grid' && forcingsC.length) note += ' · 持續風已清除（範圍變了）/ the lasting winds were cleared (the domain changed)';
     const c = mf.c;
     post({ type: 'ready', land: landMask() ?? info.land, experiment, nx: c.nx, ny: c.ny, nz: c.nz, dx: c.dx, dz: c.dz, dt: info.dt, description: info.description, backend: gpu ? 'gpu' : 'cpu', note,
@@ -1398,6 +1501,26 @@ async function regridTo(target: RegionalSetup, kind: 'refine' | 'grid'): Promise
     await sendFrame();
   } catch (e) { post({ type: 'error', message: `${kind === 'refine' ? '細化' : '改網格'}失敗 / grid change failed: ${String(e)}` }); }
   finally { busy = false; running = wasRunning; }
+}
+
+/** Start the tall grid of `spec` (tall.ts): built from the running model, with its GPU model and coupling. Returns a note for the log; throws a message when it cannot. */
+async function startTall(spec: { cx: number; cy: number; width: number; top: number; r: number; rz: number }): Promise<string> {
+  const mm = m!, mpp = mp!;
+  const n = TallNest.build(mm, { rain: mpp.rainAcc, snow: mpp.snowAcc }, setup!, frameVel, phys?.surface ?? null, spec, !!gpu);
+  if (typeof n === 'string') throw new Error(n);
+  n.setForcings(forcings.map((x) => x.f));
+  n.fit(gpu ? gpu.dt : mm.c.dt);
+  if (gpu) {
+    const reason = await n.gpuUp(gpu);
+    if (reason) { n.destroy(); throw new Error(`GPU: ${reason.slice(0, 300)}`); }
+  }
+  tall = n;
+  tallEyeLink(true);
+  post({ type: 'tall', info: tallInfo() });
+  const g = n.g, km = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${Math.round(d)} m`);
+  const lowTop = g.Z2 < g.Z1 + 6000 ? '；新頂比原頂高不到 6 km，海綿層會蓋住原頂附近 / the new top is less than 6 km above the old: the Rayleigh layer covers the old top' : '';
+  return `局部加高：${km(g.np * mm.c.dx)} 見方的範圍、新頂 ${km(g.Z2)}（原本 ${km(g.Z1)}）、Δx ${km(g.dx)}（主網格的 1/${g.r}）、Δz ${km(g.dz)}（1/${g.rz}），${(n.cells / 1e6).toFixed(2)} M 格，每個主網格步 ${n.nsub} 個子步；雙向耦合，蓋子與海綿層在新頂${lowTop}` +
+    ` / tall grid: ${km(g.np * mm.c.dx)} square, top ${km(g.Z2)} (was ${km(g.Z1)}), Δx ${km(g.dx)}, Δz ${km(g.dz)}, ${(n.cells / 1e6).toFixed(2)} M cells, ${n.nsub} sub-steps per step; two-way, the lid and Rayleigh layer at the new top`;
 }
 
 /**
@@ -1428,6 +1551,7 @@ async function startNest(R: number, dx: number, dz: number, recentre: boolean): 
     if (reason) { n.destroy(); throw new Error(`GPU: ${reason.slice(0, 300)}`); }
   }
   eye = n;
+  tallEyeLink(true);
   post({ type: 'nest', info: nestInfo() });
   const g = n.g, km = (d: number): string => (d >= 1000 ? `${+(d / 1000).toFixed(2)} km` : `${Math.round(d)} m`);
   return `眼區細化：半徑 ${km(g.R)} 的圓柱，Δx ${km(g.dx)}（外圍的 1/${g.r}）、Δz ${km(g.dz)}（1/${g.rz}），${(n.cells / 1e6).toFixed(2)} M 格，每個外圍步 ${n.nsub} 個內部步；雙向耦合${where ? '；' + where : ''}` +
@@ -1466,6 +1590,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     physCfg.surface = { tsk: sf.tsk, wet: sf.wet };
     gpu?.setSurface(sf.tsk, sf.wet);
     eye?.surfaceFrom(mm, sf);
+    tall?.surfaceFrom(mm, sf);
     return msg.kind === 'sst' && want < SURFACE_MIN ? `海溫低於絕對零度，改成 ${SURFACE_MIN} K / the temperature is made ${SURFACE_MIN} K: nothing is colder than absolute zero` : '';
   }
   // on the GPU the change is made there by small kernels (no read-back of the state, which takes long on large grids),
@@ -1473,7 +1598,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
   const onGpu = !!gpu && msg.type !== 'environment';
   if (onGpu) takeUndoGpu(); else { await syncFromGpu(); takeUndo(); }
   gpuBatch = 1;
-  const top = nz * mm.c.dz, notes: string[] = [];
+  const top = Math.max(nz * mm.c.dz, tall?.g.Z2 ?? 0), notes: string[] = [];
   const done = (what: string): string => { const g = takeGuard(); if (g) notes.push(g); return `${what}${notes.length ? `（${notes.join('；')}）` : ''}`; };
   // sizes: at least two cells across, at most the whole domain; the depth at most the whole model height
   const clampR = (r: number | undefined, d: number): number => {
@@ -1500,9 +1625,9 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const f: WindForcing = { x: msg.x, y: msg.y, z: Math.max(0, Math.min(top, msg.z || 0)), R, H, speed, dir, form: msg.form, sign: msg.sign === -1 ? -1 : 1, ratio };
     const what = `${msg.form === 'vortex' ? (f.sign > 0 ? `氣旋（逆時針、輻合，輻合風 ${fmtNum(ratio)} 倍）/ cyclone (counter-clockwise, converging, radial ${fmtNum(ratio)}× tangential)` : `反氣旋（順時針、輻散，輻散風 ${fmtNum(ratio)} 倍）/ anticyclone (clockwise, diverging, radial ${fmtNum(ratio)}× tangential)`) : msg.form === 'push' ? '推送 / push' : msg.form === 'rotate' ? (f.sign > 0 ? '逆時針旋轉 / counter-clockwise' : '順時針旋轉 / clockwise') : (f.sign > 0 ? '輻合 / converging' : '輻散 / diverging')} ${fmtNum(speed)} m/s`;
     if (msg.minutes === 0) {
-      const fe = eye ? { ...f, x: f.x - eye.x0, y: f.y - eye.y0 } : f;
-      if (onGpu) { gpu!.windOnce(f); eye?.gpu?.windOnce(fe); }
-      else { applyWind(mm, [f], 'once'); if (eye) applyWind(eye.m, [fe], 'once'); }
+      const fe = eye ? { ...f, x: f.x - eye.x0, y: f.y - eye.y0 } : f, ft = tall ? { ...f, x: f.x - tall.g.x0, y: f.y - tall.g.y0 } : f;
+      if (onGpu) { gpu!.windOnce(f); eye?.gpu?.windOnce(fe); tall?.gpu?.windOnce(ft); }
+      else { applyWind(mm, [f], 'once'); if (eye) applyWind(eye.m, [fe], 'once'); if (tall) applyWind(tall.m, [ft], 'once'); }
       await stepAfterChange();
       return done(`一次風 / wind once: ${what} at (${(f.x / 1000).toFixed(0)}, ${(f.y / 1000).toFixed(0)}) km, ${(f.z / 1000).toFixed(1)} km high; ${reach(R, H, f.z)}`);
     }
@@ -1537,7 +1662,8 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (onGpu) {
       gpu!.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, mode, amount, ox: 0, oy: 0 });
       if (eye) eye.gpu?.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, mode, amount, ox: eye.x0, oy: eye.y0 });
-    } else { moisten(mm, 0, 0); if (eye) moisten(eye.m, eye.x0, eye.y0); }
+      if (tall) tall.gpu?.edit({ kind: 'moisture', x: msg.x, y: msg.y, z: msg.z, R, H, mode, amount, ox: tall.g.x0, oy: tall.g.y0 });
+    } else { moisten(mm, 0, 0); if (eye) moisten(eye.m, eye.x0, eye.y0); if (tall) moisten(tall.m, tall.g.x0, tall.g.y0); }
     // what the model does with vapour beyond ice saturation in the cold (ice.ts): the relative humidity over water stays below
     // the ratio of the two saturations, so a chart of it cannot show 100 % there
     const kc = Math.max(0, Math.min(nz - 1, Math.floor(msg.z / mm.c.dz))), Tc = mm.th0[kc]! * mm.pi0[kc]!;
@@ -1577,7 +1703,8 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (onGpu) {
       gpu!.edit({ kind: 'condensate', phase: msg.phase, mode, amount, x: msg.x, y: msg.y, z: msg.z, R, H, ox: 0, oy: 0 });
       if (eye) eye.gpu?.edit({ kind: 'condensate', phase: msg.phase, mode, amount, x: msg.x, y: msg.y, z: msg.z, R, H, ox: eye.x0, oy: eye.y0 });
-    } else { apply(mm, 0, 0); if (eye) apply(eye.m, eye.x0, eye.y0); }
+      if (tall) tall.gpu?.edit({ kind: 'condensate', phase: msg.phase, mode, amount, x: msg.x, y: msg.y, z: msg.z, R, H, ox: tall.g.x0, oy: tall.g.y0 });
+    } else { apply(mm, 0, 0); if (eye) apply(eye.m, eye.x0, eye.y0); if (tall) apply(tall.m, tall.g.x0, tall.g.y0); }
     await stepAfterChange();
     const what = liquid ? '液態水（雲水＋雨）/ liquid water (cloud water + rain)' : '固態水（冰＋雪＋霰）/ solid water (ice + snow + graupel)';
     const how = mode === 'set' ? (raw <= 0 ? '全部移除 / all removed' : `設為 / set to ${fmtNum(raw)} g/kg`) : mode === 'mul' ? `×${fmtNum(amount)}` : `${raw >= 0 ? '+' : '−'}${fmtNum(Math.abs(raw))} g/kg`;
@@ -1604,7 +1731,8 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     if (onGpu) {
       gpu!.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, floorT: T_FLOOR, warm, ox: 0, oy: 0 });
       if (eye) eye.gpu?.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, floorT: T_FLOOR, warm, ox: eye.x0, oy: eye.y0 });
-    } else { bubble(mm, 0, 0); if (eye) bubble(eye.m, eye.x0, eye.y0); }
+      if (tall) tall.gpu?.edit({ kind: 'bubble', x: msg.x, y: msg.y, z: zc, rh, rz, amp, floorT: T_FLOOR, warm, ox: tall.g.x0, oy: tall.g.y0 });
+    } else { bubble(mm, 0, 0); if (eye) bubble(eye.m, eye.x0, eye.y0); if (tall) bubble(tall.m, tall.g.x0, tall.g.y0); }
     const kc = Math.max(0, Math.min(nz - 1, Math.floor(zc / mm.c.dz)));
     if (!warm && (mm.th0[kc]! + amp) * mm.pi0[kc]! < T_FLOOR) notes.push(`最冷處到了下限 ${T_FLOOR} K（−173 °C），不能再冷 / the coldest air reached ${T_FLOOR} K, the floor`);
     await stepAfterChange(Math.abs(amp));
@@ -1617,9 +1745,9 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
     const H = clampH(msg.depth), z = Math.max(0, Math.min(top, Number.isFinite(msg.z) ? msg.z : 0));
     const rm = msg.rm > 0 ? Math.min(msg.rm, 0.8 * R) : R / 5;
     const spec: VortexSpec = { x: msg.x, y: msg.y, z, R, rm, H, vmax: Math.max(0, Number.isFinite(msg.vmax) ? msg.vmax : 30), dir: msg.dir === -1 ? -1 : 1 };
-    const patch = vortexPatch(mm, spec, 0, 0), ep = eye ? vortexPatch(eye.m, spec, eye.x0, eye.y0) : null;
-    if (onGpu) { gpu!.addPatch(patch); if (eye && ep) eye.gpu?.addPatch(ep); }
-    else { applyVortexPatch(mm, patch); if (eye && ep) applyVortexPatch(eye.m, ep); }
+    const patch = vortexPatch(mm, spec, 0, 0), ep = eye ? vortexPatch(eye.m, spec, eye.x0, eye.y0) : null, tp = tall ? vortexPatch(tall.m, spec, tall.g.x0, tall.g.y0) : null;
+    if (onGpu) { gpu!.addPatch(patch); if (eye && ep) eye.gpu?.addPatch(ep); if (tall && tp) tall.gpu?.addPatch(tp); }
+    else { applyVortexPatch(mm, patch); if (eye && ep) applyVortexPatch(eye.m, ep); if (tall && tp) applyVortexPatch(tall.m, tp); }
     await stepAfterChange();
     const dp = patch.dpCentre;
     return done(`${msg.kind === 'warm' ? '放暖心渦旋 / warm-core vortex' : '放冷心渦旋 / cold-core vortex'} ${spec.dir > 0 ? '逆時針 / counter-clockwise' : '順時針 / clockwise'}：最強風 / strongest wind ${fmtNum(spec.vmax)} m/s，最大風半徑約 / radius of maximum wind about ${fmtNum(rm / 1000)} km，最強風高度 / at ${(z / 1000).toFixed(1)} km，地面氣壓${dp <= 0 ? '降' : '升'} / surface pressure ${dp <= 0 ? '−' : '+'}${fmtNum(Math.abs(dp))} hPa at (${(msg.x / 1000).toFixed(0)}, ${(msg.y / 1000).toFixed(0)}) km; ${reach(R, H, z)}`);
@@ -1646,6 +1774,7 @@ async function interact(msg: Extract<ToRegionalWorker, { type: 'perturb' | 'pain
   };
   change(mm, true);
   if (eye) change(eye.m, false);
+  if (tall) change(tall.m, false);
   if (ext) { await extToCpu(); change(ext.o.model, true); await extFromCpu(); }          // (the outer grid has the same environment)
   if (gpu) {
     // the damping-layer wind and the boundary targets live in the GPU model's tables: rebuild it
@@ -1667,6 +1796,7 @@ async function syncFromGpu(): Promise<void> {
   if (!gpu || !m || !mp) return;
   await syncModel(gpu, m, mp);
   await eye?.sync();
+  await tall?.sync();
 }
 
 /** set by sendFrameRaw when the state is numerically unstable */
@@ -1701,7 +1831,7 @@ async function sendFrameRaw(): Promise<void> {
   const planeAt = new Map<number, LevelPlanes>();
   const sliceK = req?.slice ? Math.max(0, Math.min(nz - 1, req.slice.k | 0)) : -1;
   let k15 = 0; for (let k = 0; k < nz; k++) if (Math.abs(m.zc[k]! - 1500) < Math.abs(m.zc[k15]! - 1500)) k15 = k;
-  let charts: ChartData | null = null, trOut: Float32Array | null = null, nestOut: NestFrame | null = null, outerOut: OuterFrame | null | undefined;
+  let charts: ChartData | null = null, trOut: Float32Array | null = null, nestOut: NestFrame | null = null, outerOut: OuterFrame | null | undefined, tallOut: TallFrame | null = null;
   const transfer = new Set<ArrayBuffer>([cloud.buffer, rain.buffer]);
   /** the eye nest's volume at this moment (before the GPU steps on); false when it is numerically unstable */
   const nestVolume = async (): Promise<boolean> => {
@@ -1710,6 +1840,16 @@ async function sendFrameRaw(): Promise<void> {
     const v = await e.volume(volMode, subgrid);
     if (!Number.isFinite(v.wmax) || !Number.isFinite(v.wmin) || Math.max(v.wmax, -v.wmin) > W_BLOWUP) return false;
     nestOut = { ...info, cloud: v.cloud, rain: v.rain };
+    transfer.add(v.cloud.buffer as ArrayBuffer); transfer.add(v.rain.buffer as ArrayBuffer);
+    return true;
+  };
+  /** the tall grid's volume at this moment; false when it is numerically unstable */
+  const tallVolume = async (): Promise<boolean> => {
+    const t = tall, info = tallInfo();
+    if (!t || !info) return true;
+    const v = await t.volume(volMode, subgrid);
+    if (!Number.isFinite(v.wmax) || !Number.isFinite(v.wmin) || Math.max(v.wmax, -v.wmin) > W_BLOWUP) return false;
+    tallOut = { ...info, cloud: v.cloud, rain: v.rain };
     transfer.add(v.cloud.buffer as ArrayBuffer); transfer.add(v.rain.buffer as ArrayBuffer);
     return true;
   };
@@ -1751,7 +1891,7 @@ async function sendFrameRaw(): Promise<void> {
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const q = m.idx(i, j, 0); mp.rainAcc[j * nx + i] = d.rain[q]!; mp.snowAcc[j * nx + i] = d.snow[q]!; }
     m.time = tNow; m.steps = sNow;
     if (!Number.isFinite(wmax) || !Number.isFinite(wmin) || Math.max(wmax, -wmin) > W_BLOWUP) { blowPending = true; return; }
-    if (!await nestVolume() || !await outerVolume()) { blowPending = true; return; }
+    if (!await nestVolume() || !await tallVolume() || !await outerVolume()) { blowPending = true; return; }
     updateSwath(m, col);
     if (req) charts = await buildCharts(req, col, planeAt, sliceK, gpu);
     // the state of a 'full' recording is read before the GPU steps on
@@ -1769,7 +1909,7 @@ async function sendFrameRaw(): Promise<void> {
     // cloud: extinction of cloud water, sub-grid cloud, ice and snow (anvils are mostly snow); channel 2: extinction of
     // precipitation (rain + graupel), updraft or vorticity (display.ts; the GPU display kernel packs the same bytes)
     ({ wmax, wmin, qcmax, qrmax } = volumeBytes(m, cloud, rain, volMode, subgrid));
-    if (!await nestVolume() || !await outerVolume()) { blowPending = true; return; }
+    if (!await nestVolume() || !await tallVolume() || !await outerVolume()) { blowPending = true; return; }
     if (req || (keep && rec.tier !== 'view')) {
       col = columnDiagnostics(m, subgrid);
       planeAt.set(0, modelPlanes(m, 0));
@@ -1852,7 +1992,7 @@ async function sendFrameRaw(): Promise<void> {
   if (recOut) for (const b of recArrays(recOut)) transfer.add(b as ArrayBuffer);
   post({ type: 'frame', time: m.time, nx, ny, nz, dx, dz, cloud, rain, ground: g, groundField: ground, groundRange: [lo, hi],
     stats: { wmax, wmin, qcmax, qrmax, rainmax, vmax, dp, rmw, eyewalls, zetaMax, vGround, dbzMax, uhMax, uhMin, capeMax, storm, storms: catalog.active, mainId: main?.id ?? null, vtProfile, tornado, tcRain: isTc() ? tcRain : null, shear },
-    origin: { ...origin }, charts, tracers: trOut, nest: nestOut, ...(outerOut !== undefined ? { outer: outerOut } : {}), stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt, step: stepInfo(gpu ? gpu.dt : m.c.dt), keep, rec: recOut }, [...transfer]);
+    origin: { ...origin }, charts, tracers: trOut, nest: nestOut, tall: tallOut, ...(outerOut !== undefined ? { outer: outerOut } : {}), stepsPerSecond: rate, dt: gpu ? gpu.dt : m.c.dt, step: stepInfo(gpu ? gpu.dt : m.c.dt), keep, rec: recOut }, [...transfer]);
 }
 
 /** The step size control of a frame: mode, target Courant number, nominal step and the Courant numbers of the step now. */

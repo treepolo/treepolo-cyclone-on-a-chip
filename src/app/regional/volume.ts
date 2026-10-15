@@ -10,13 +10,15 @@
 // nearest particle colour and its distance from the eye; the ray march composites that colour where the
 // ray passes that distance, so clouds in front hide the particles behind them.
 import { EXT_MAX } from '../../regional/display.js';
-import type { NestFrame, OuterFrame } from './protocol.js';
+import type { NestFrame, OuterFrame, TallFrame } from './protocol.js';
 import { nestSunSkyLight, occupancyGrid, sunSkyLight, type V3 } from './light.js';
 
 /** The eye nest's volume for the view, with the outer domain's width and height (m). */
 export type NestVolume = NestFrame & { Lx: number; Ly: number };
 /** The outer grid's volume for the view, with the inner domain's width (m: the unit of the box). */
 export type OuterVolume = OuterFrame & { Lx: number };
+/** The tall grid's volume for the view, with the domain's width (m: the unit of the box). */
+export type TallVolume = TallFrame & { Lx: number };
 
 const VS = `#version 300 es
 in vec2 aPos; out vec2 vUv;
@@ -47,13 +49,19 @@ uniform sampler3D uOcc; uniform vec3 uOccScale; uniform vec3 uOccBlock;
 // width of the blend band inside this domain's edge. Off (uOOn = 0), the picture is that of this domain alone.
 uniform sampler3D uOVol; uniform sampler3D uOLight; uniform sampler3D uOOcc; uniform int uOOn;
 uniform vec3 uOMin; uniform vec3 uOSize; uniform float uOCell; uniform float uOCellZ; uniform float uOTaper; uniform vec3 uOOccScale;
+// the tall grid (a grid over a square part of the domain that reaches higher than the domain's top): its volume, light and occupancy, its box (lower-left corner and width, box units), its
+// height (box units), cells and the width of the taper at the footprint's edge. Off (uTOn = 0), the picture is that without it.
+uniform sampler3D uTVol; uniform sampler3D uTLight; uniform sampler3D uTOcc; uniform int uTOn;
+uniform vec3 uTBox; uniform float uTTop; uniform float uTCell; uniform float uTCellZ; uniform float uTWf; uniform vec3 uTOccScale;
+// a rectangle drawn on the ground (the footprint a tall grid would have): x0, y0, x1, y1 in box units
+uniform vec4 uFoot; uniform int uFootOn;
 uniform vec3 uLo; uniform vec3 uHi;   // the ray's bounds: this domain's box, or the union with the outer grid's
 uniform float uPxAng;  // angle of one pixel (radians)
 uniform int uDbg;   // 1: show the ray's step count (red, of the cap) and refinements (green) instead of the picture; 2: no random start
 const float EXTMAX = ${EXT_MAX.toFixed(3)};
 // weight of the nest at p: 1 inside R - Wf, cos^2 to 0 at R (the feedback's taper), 0 without one
 float nestW(vec3 p){
-  if (uNOn == 0) return 0.0;
+  if (uNOn == 0 || (uTOn == 1 && p.z > uBox.z)) return 0.0;
   float d = length(p.xy - uNCyl.xy), a = uNCyl.z - uNCyl.w;
   if (d >= uNCyl.z) return 0.0;
   if (d <= a) return 1.0;
@@ -63,22 +71,37 @@ vec3 nestQ(vec3 p){ return vec3((p.xy - uNBox.xy)/uNBox.z, p.z/uBox.z); }
 // signed distance (box units) outside this domain's box, along the axes: > 0 outside, < 0 inside
 float edgeD(vec3 p){ return max(max(-p.x, p.x - uBox.x), max(-p.y, p.y - uBox.y)); }
 // weight of the outer grid at p: 1 outside this domain, 0 deeper inside than the blend band (where this domain's edge relaxes to the outer grid)
-float outerW(vec3 p){ return uOOn == 0 ? 0.0 : smoothstep(-uOTaper, 0.0, edgeD(p)); }
+float outerW(vec3 p){ return uOOn == 0 || (uTOn == 1 && p.z > uBox.z) ? 0.0 : smoothstep(-uOTaper, 0.0, edgeD(p)); }
+// weight of the tall grid at p: 1 inside its footprint from the taper's width on, sin^2 to 0 at the footprint's edge, 0 outside
+float tallW(vec3 p){
+  if (uTOn == 0) return 0.0;
+  float d = min(min(p.x - uTBox.x, uTBox.x + uTBox.z - p.x), min(p.y - uTBox.y, uTBox.y + uTBox.z - p.y));
+  if (d <= 0.0) return 0.0;
+  if (d >= uTWf) return 1.0;
+  float s = sin(1.5707963*d/uTWf); return s*s;
+}
+vec3 tallQ(vec3 p){ return vec3((p.xy - uTBox.xy)/uTBox.z, p.z/uTTop); }
 vec3 outerQ(vec3 p){ return (p - uOMin)/uOSize; }
 vec2 volAt(vec3 p, float w){
-  float wo = outerW(p);
-  vec2 s = wo >= 1.0 ? vec2(0.0) : textureLod(uVol, p/uBox, 0.0).rg;
+  float wo = outerW(p), wt = tallW(p);
+  vec2 s = (wo >= 1.0 || (uTOn == 1 && p.z > uBox.z)) ? vec2(0.0) : textureLod(uVol, p/uBox, 0.0).rg;
+  if (wt > 0.0) s = mix(s, textureLod(uTVol, tallQ(p), 0.0).rg, wt);
   if (w > 0.0) s = mix(s, textureLod(uNVol, nestQ(p), 0.0).rg, w);
   if (wo > 0.0) s = mix(s, textureLod(uOVol, outerQ(p), 0.0).rg, wo);
   return s;
 }
 // whether the clear-air block at p holds nothing: this domain's occupancy inside its box, the outer grid's outside it and in the blend band
 bool emptyAt(vec3 p){
-  if (uOOn == 0) return textureLod(uOcc, p/uBox*uOccScale, 0.0).r == 0.0;
+  if (uOOn == 0 && uTOn == 0) return textureLod(uOcc, p/uBox*uOccScale, 0.0).r == 0.0;
   bool e = true;
-  float d = edgeD(p);
-  if (d <= 0.0) e = textureLod(uOcc, p/uBox*uOccScale, 0.0).r == 0.0;
-  if (e && d > -(uOTaper + 2.0*uOccBlock.x)) e = textureLod(uOOcc, outerQ(p)*uOOccScale, 0.0).r == 0.0;
+  float d = uOOn == 1 ? edgeD(p) : -1.0;
+  if (d <= 0.0 && p.z <= uBox.z) e = textureLod(uOcc, p/uBox*uOccScale, 0.0).r == 0.0;
+  if (e && uOOn == 1 && p.z <= uBox.z && d > -(uOTaper + 2.0*uOccBlock.x)) e = textureLod(uOOcc, outerQ(p)*uOOccScale, 0.0).r == 0.0;
+  if (e && uTOn == 1) {
+    // inside the tall grid's footprint (and a block beyond it: the blend at its edge)
+    float m = 2.0*uOccBlock.x, dd = min(min(p.x - uTBox.x, uTBox.x + uTBox.z - p.x), min(p.y - uTBox.y, uTBox.y + uTBox.z - p.y));
+    if (dd > -m) e = textureLod(uTOcc, clamp(tallQ(p), vec3(0.0), vec3(1.0))*uTOccScale, 0.0).r == 0.0;
+  }
   return e;
 }
 // sun light (r) and sky light (g) at p: looked up one grid cell toward the sun (the sun is 50 degrees up: that is
@@ -90,7 +113,9 @@ bool emptyAt(vec3 p){
 const float LLOD = 0.6;
 vec2 lightAt(vec3 p, float w){
   float c = max(uCell, uCellZ);
-  vec2 L = textureLod(uLight, (p + uSun*c)/uBox, LLOD).rg;
+  vec2 L = (uTOn == 1 && p.z > uBox.z) ? vec2(1.0) : textureLod(uLight, (p + uSun*c)/uBox, LLOD).rg;
+  float wt = tallW(p);
+  if (wt > 0.0) L = mix(L, textureLod(uTLight, tallQ(p + uSun*max(uTCell, uTCellZ)), LLOD).rg, wt);
   if (w > 0.0) L = mix(L, textureLod(uNLight, nestQ(p + uSun*max(uNCell, uNCellZ)), LLOD).rg, w);
   float wo = outerW(p);
   if (wo > 0.0) L = mix(L, textureLod(uOLight, outerQ(p + uSun*max(uOCell, uOCellZ)), LLOD).rg, wo);
@@ -150,6 +175,8 @@ void main(){
     } else g = uOut * (0.40 + 0.95*max(uSun.z,0.0));
     // this domain's edge, where an outer grid surrounds it
     if (uOOn == 1) { float lw = 1.5*tg*uPxAng, line = 1.0 - smoothstep(0.5*lw, lw, abs(edgeD(vec3(pg.xy, 0.0)))); g = mix(g, vec3(1.0, 0.82, 0.30), 0.55*line); }
+    // the footprint of a tall grid (drawn or about to be)
+    if (uFootOn == 1) { float lw = 1.5*tg*uPxAng, ed = abs(max(max(uFoot.x - pg.x, pg.x - uFoot.z), max(uFoot.y - pg.y, pg.y - uFoot.w))); g = mix(g, vec3(0.35, 1.0, 0.55), 0.6*(1.0 - smoothstep(0.5*lw, lw, ed))); }
     bg = mix(g, horizon, smoothstep(6.0, 30.0, tg));
   }
   vec3 col = vec3(0.0); float trans = 1.0; int iters = 0, nref = 0;
@@ -177,6 +204,7 @@ void main(){
     vec3 ard = abs(rd) + 1e-6;
     float dtP = 0.5/max(max(ard.x, ard.y)/uCell, ard.z/uCellZ);
     float dtOu = uOOn == 1 ? 0.5/max(max(ard.x, ard.y)/uOCell, ard.z/uOCellZ) : dtP;
+    float dtTa = uTOn == 1 ? 0.5/max(max(ard.x, ard.y)/uTCell, ard.z/uTCellZ) : dtP;
     float dtN = uNOn == 1 ? 0.5/max(max(ard.x, ard.y)/uNCell, ard.z/uNCellZ) : dtP;
     float dtO = 0.95/max(max(ard.x/uOccBlock.x, ard.y/uOccBlock.y), ard.z/uOccBlock.z);
     float t = t0 + dtO*(uDbg >= 2 ? 0.5 : hash(gl_FragCoord.xy));
@@ -205,7 +233,7 @@ void main(){
         if (t - tP > 1e-6) { hold = int((t - tP)/min(dtP, dtN)) + 2; t = tP; continue; }
       }
       if (hold > 0) hold--;
-      float w = nestW(p), dtB = w > 0.0 ? dtN : (outerW(p) >= 1.0 ? dtOu : dtP), bThr = 0.3/dtB;
+      float w = nestW(p), dtB = w > 0.0 ? dtN : (tallW(p) > 0.0 ? min(dtP, dtTa) : (outerW(p) >= 1.0 ? dtOu : dtP)), bThr = 0.3/dtB;
       vec2 v = bytesAt(p, w), e = extAt(v);
       float b = e.x + e.y;
       if (uDbg != 4 && sub == 0 && refines < 6 && bP < bThr && b >= bThr && t - tP > 0.2*dtB) {
@@ -288,6 +316,14 @@ export class VolumeView {
   private readonly oVol: WebGLTexture;
   private readonly oLight: WebGLTexture;
   private readonly oOcc: WebGLTexture;
+  private readonly tVol: WebGLTexture;
+  private readonly tLight: WebGLTexture;
+  private readonly tOcc: WebGLTexture;
+  /** the tall grid (box units: footprint corner and width; metres: the heights), or null */
+  private tall: { nx: number; nz: number; cloud: Uint8Array; x0: number; y0: number; L: number; Z1: number; Z2: number; Wf: number; occScale: V3 } | null = null;
+  private tallLightKey = '';
+  /** a rectangle on the ground (box units x0, y0, x1, y1), or null */
+  private foot: [number, number, number, number] | null = null;
   /** the outer grid around the domain (box units), or null */
   private outer: { nx: number; nz: number; cloud: Uint8Array; x0: number; y0: number; L: number; top: number; taper: number; occScale: V3 } | null = null;
   /** whether the outer grid is drawn (the page's switch) */
@@ -348,6 +384,9 @@ export class VolumeView {
     this.oVol = gl.createTexture()!;
     this.oLight = gl.createTexture()!;
     this.oOcc = gl.createTexture()!;
+    this.tVol = gl.createTexture()!;
+    this.tLight = gl.createTexture()!;
+    this.tOcc = gl.createTexture()!;
     this.groundTex = gl.createTexture()!;
     // empty volumes and light until the first frame (the sampler types must be complete)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -669,15 +708,44 @@ export class VolumeView {
     this.computeOuterLight(true);
     this.dirty = true;
   }
+  /** The tall grid's volume (null: none): drawn over its footprint, reaching above the domain's top, with its own light. */
+  setTall(t: TallVolume | null): void {
+    if (!t) { if (this.tall) { this.tall = null; this.dirty = true; } return; }
+    const u = 1 / t.Lx, gl = this.gl, bzT = this.box[2] * t.Z2 / t.Z1;
+    this.upload(this.tVol, t.nx, t.nx, t.nz, t.cloud, t.rain);
+    const B = 8, Bz = Math.max(1, Math.min(4, Math.round(B * (t.L * u / t.nx) / (bzT / t.nz))));
+    const { occ, mx, my, mz } = occupancyGrid(t.nx, t.nx, t.nz, t.cloud, t.rain, B, Bz, null);
+    gl.bindTexture(gl.TEXTURE_3D, this.tOcc);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, mx, my, mz, 0, gl.RED, gl.UNSIGNED_BYTE, occ);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    for (const w of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, w, gl.CLAMP_TO_EDGE);
+    this.tall = { nx: t.nx, nz: t.nz, cloud: t.cloud, x0: t.x0 * u, y0: t.y0 * u, L: t.L * u, Z1: t.Z1, Z2: t.Z2, Wf: t.Wf * u, occScale: [t.nx / (mx * B), t.nx / (my * B), t.nz / (mz * Bz)] };
+    this.computeTallLight(true);
+    this.dirty = true;
+  }
+  /** The tall grid's sun and sky light (as computeLight, in its own box: its own cloud only). */
+  private computeTallLight(force = false): void {
+    const t = this.tall; if (!t) return;
+    const bzT = this.box[2] * t.Z2 / t.Z1, cp = this.cutPlane(), key = `${this.kExt}|${this.box[2]}|${cp ? cp.n.join(',') + ',' + cp.d : ''}`;
+    if (!force && key === this.tallLightKey) return;
+    this.tallLightKey = key;
+    const shift = cp ? cp.n[0] * t.x0 + cp.n[1] * t.y0 : 0;
+    const { out } = sunSkyLight(t.nx, t.nx, t.nz, t.cloud, [t.L, t.L, bzT], t.Z2, SUN, this.kExt, cp ? { n: cp.n, d: cp.d - shift } : null, false);
+    this.uploadLight(this.tLight, t.nx, t.nx, t.nz, out);
+  }
+  /** A rectangle drawn on the ground (box units: x0, y0, x1, y1; null: none): the footprint a tall grid has or would have. */
+  setFootprint(r: [number, number, number, number] | null): void { this.foot = r; this.dirty = true; }
   /** Draw the outer grid or not (when there is one). */
   setOuterVisible(on: boolean): void { if (on !== this.outerShow) { this.outerShow = on; this.dirty = true; } }
   /** whether an outer grid is drawn now */
   get hasOuter(): boolean { return !!this.outer && this.outerShow; }
   /** The ray's bounds (box units): the domain's box, with the outer grid's when it is drawn. */
   private bounds(): { lo: V3; hi: V3 } {
-    const [bx, by, bz] = this.box, o = this.hasOuter ? this.outer : null;
-    if (!o) return { lo: [0, 0, 0], hi: [bx, by, bz] };
-    return { lo: [Math.min(0, o.x0), Math.min(0, o.y0), 0], hi: [Math.max(bx, o.x0 + o.L), Math.max(by, o.y0 + o.L), bz] };
+    const [bx, by, bz] = this.box, o = this.hasOuter ? this.outer : null, t = this.tall, hz = t ? Math.max(bz, bz * t.Z2 / t.Z1) : bz;
+    if (!o) return { lo: [0, 0, 0], hi: [bx, by, hz] };
+    return { lo: [Math.min(0, o.x0), Math.min(0, o.y0), 0], hi: [Math.max(bx, o.x0 + o.L), Math.max(by, o.y0 + o.L), hz] };
   }
   /** The outer grid's sun and sky light (as computeLight, in its own box). */
   private computeOuterLight(force = false): void {
@@ -700,6 +768,7 @@ export class VolumeView {
     const { out, od } = sunSkyLight(d.nx, d.ny, d.nz, d.cloud, this.box, d.top, SUN, this.kExt, this.cutPlane(), !!this.nest);
     this.uploadLight(this.light, d.nx, d.ny, d.nz, out);
     this.computeOuterLight();
+    this.computeTallLight();
     this.odAll = od;
     this.kLight = this.kExt;
     this.computeNestLight();
@@ -931,6 +1000,20 @@ export class VolumeView {
     gl.uniform1f(u('uOCellZ'), ot ? bz / ot.nz : 0.01);
     gl.uniform1f(u('uOTaper'), ot ? ot.taper : 0);
     gl.uniform3f(u('uOOccScale'), ot ? ot.occScale[0] : 1, ot ? ot.occScale[1] : 1, ot ? ot.occScale[2] : 1);
+    const tl = this.tall;
+    gl.uniform1i(u('uTOn'), tl ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_3D, this.tVol); gl.uniform1i(u('uTVol'), 11);
+    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_3D, this.tLight); gl.uniform1i(u('uTLight'), 12);
+    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_3D, this.tOcc); gl.uniform1i(u('uTOcc'), 13);
+    const bzT = tl ? bz * tl.Z2 / tl.Z1 : bz;
+    gl.uniform3f(u('uTBox'), tl ? tl.x0 : 0, tl ? tl.y0 : 0, tl ? tl.L : 1);
+    gl.uniform1f(u('uTTop'), bzT);
+    gl.uniform1f(u('uTCell'), tl ? tl.L / tl.nx : 0.01);
+    gl.uniform1f(u('uTCellZ'), tl ? bzT / tl.nz : 0.01);
+    gl.uniform1f(u('uTWf'), tl ? Math.max(tl.Wf, 1e-6) : 1);
+    gl.uniform3f(u('uTOccScale'), tl ? tl.occScale[0] : 1, tl ? tl.occScale[1] : 1, tl ? tl.occScale[2] : 1);
+    gl.uniform1i(u('uFootOn'), this.foot ? 1 : 0);
+    gl.uniform4f(u('uFoot'), this.foot ? this.foot[0] : 0, this.foot ? this.foot[1] : 0, this.foot ? this.foot[2] : 0, this.foot ? this.foot[3] : 0);
     gl.uniform1i(u('uDbg'), DEBUG_MODE);
     gl.uniform1i(u('uTrOn'), trOn ? 1 : 0);
     if (trOn) {

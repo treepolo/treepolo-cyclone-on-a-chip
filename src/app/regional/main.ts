@@ -9,13 +9,14 @@ import { Missions } from './missions.js';
 import { SetupForm } from './setupForm.js';
 import { LiveForm, GridForm } from './liveForm.js';
 import { defaultDt, type RegionalSetup } from './setup.js';
+import { TallForm } from './tallForm.js';
 import type { StormNow } from '../../regional/storms.js';
 import { Tools3D } from './tools3d.js';
 import { ReplayStore, type ReplayFrame } from './replay.js';
 import { ReplayCharts } from './replayCharts.js';
 import { mountReplayPanel } from './replayPanel.js';
 import type { ReplayMeta } from '../../regional/replayData.js';
-import type { ChartData, FromRegionalWorker, GroundField, RegionalFrame, NestInfo, NestPayload, NestSize, OuterFrame, RegionalExperiment, ToRegionalWorker } from './protocol.js';
+import type { ChartData, FromRegionalWorker, GroundField, RegionalFrame, NestInfo, NestPayload, NestSize, OuterFrame, TallFrame, RegionalExperiment, ToRegionalWorker } from './protocol.js';
 import { nestGeometry, nestCells } from '../../regional/twoway.js';
 import type { RegionalConfig } from '../../regional/core.js';
 
@@ -43,6 +44,10 @@ let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
 let lastVol: ReplayFrame | null = null, refining = false;
 /** the outer grid's volume (the last one sent; null: none) and the one the 3-D view holds */
 let lastOuter: OuterFrame | null = null, shownOuter: OuterFrame | null = null;
+/** the tall grid's volume (the last frame's; null: none) and the one the 3-D view holds */
+let lastTall: TallFrame | null = null, shownTall: TallFrame | null = null;
+/** an outer grid exists (the inner grid's edges are open then) */
+let extOn = false;
 // (read-only, for the browser tests)
 (window as unknown as { regionalDebug: () => ReplayFrame | null }).regionalDebug = (): ReplayFrame | null => lastVol;
 // replay: frames the worker marks to be kept (the recording settings are in the replay panel); a replay file loaded from disk
@@ -61,6 +66,8 @@ function showVolume(f: ReplayFrame): void {
   // the outer grid goes with the live frame (a replay holds none)
   const want = f === lastVol ? lastOuter : null;
   if (want !== shownOuter) { view.setOuter(want ? { ...want, Lx: f.Lx } : null); shownOuter = want; }
+  const wantT = f === lastVol ? lastTall : null;
+  if (wantT !== shownTall) { view.setTall(wantT ? { ...wantT, Lx: f.Lx } : null); shownTall = wantT; }
 }
 const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), {
   request: (req) => { if (replayIdx !== null) void replayChartsNow(); else send({ type: 'charts', req }); },
@@ -89,7 +96,7 @@ const charts = new RegionalCharts($<HTMLCanvasElement>('chart'), $('chartBar'), 
 worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
   if (m.type === 'follow') { $<HTMLInputElement>('followNow').checked = m.on; return; }
-  if (m.type === 'ext') { gridForm.setExt(m.info); if (!m.info) { lastOuter = null; if (shownOuter) { view.setOuter(null); shownOuter = null; } } return; }
+  if (m.type === 'ext') { extOn = !!m.info; syncTallHost(); gridForm.setExt(m.info); if (!m.info) { lastOuter = null; if (shownOuter) { view.setOuter(null); shownOuter = null; } } return; }
   if (m.type === 'settings') { form.set(m.setup); live.set(m.setup); gridForm.set(m.setup); log(m.note); return; }
   if (m.type === 'ready') {
     // a new model ends the replay (a refinement keeps the recording, but not a replay file shown)
@@ -113,6 +120,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     cb.textContent = m.coarsenTo ? `粗化到 ${km(m.coarsenTo)} / Coarsen` : '粗化 / Coarsen';
     cb.title = m.coarsenBack ? '回到細化前的網格（細化的部分平均回去）/ back to the grid before the refinement (the refined run averaged into it)' : '平均到較粗的網格接著算 / continue on a coarser grid (averaged)';
     nestOk = !!m.nestOk;
+    syncTallHost();
+    tallForm.setRunning(null);
     $<HTMLButtonElement>('eyeGo').disabled = !nestOk;
     eyeInfo();
     if (m.setup) { form.set(m.setup); live.set(m.setup); gridForm.set(m.setup); }
@@ -149,6 +158,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
       rgba[4 * i] = c[0] * 255; rgba[4 * i + 1] = c[1] * 255; rgba[4 * i + 2] = c[2] * 255; rgba[4 * i + 3] = 255;
     }
     if (m.outer !== undefined) lastOuter = m.outer;
+    lastTall = m.tall ?? null;
+    tallForm.setStorm(m.stats.storm);
     lastVol = { t: m.time, nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dz: m.dz, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, cloud: m.cloud, rain: m.rain, ground: rgba, storms: m.stats.storms ?? [], nest: m.nest,
       stats: m.stats, origin: m.origin };
     if (m.nest) showNest(m.nest);
@@ -179,6 +190,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     showStorms(s.storms ?? [], s.mainId ?? null, m);
     $('legend').textContent = m.groundField === 'none' ? '深藍 = 海、深綠 = 陸地 / dark blue = sea, dark green = land' : `${lo.toFixed(1)} … ${hi.toFixed(1)} ${m.groundField === 'rain' || m.groundField === 'snow' ? 'mm' : m.groundField === 'wind' ? 'm/s' : 'K'}`;
   } else if (m.type === 'error') { failSave?.(new Error(m.message)); log(`錯誤 / Error: ${m.message}`); running = false; sync(); $<HTMLButtonElement>('eyeGo').disabled = !nestOk; if (runner.running) void runner.abort(`error: ${m.message}`); }
+  else if (m.type === 'tall') { tallForm.setRunning(m.info); if (!m.info) { lastTall = null; if (shownTall) { view.setTall(null); shownTall = null; } } $<HTMLButtonElement>('tallGo').disabled = !!m.info || !tallForm.spec(); }
   else if (m.type === 'nest') { showNest(m.info); $<HTMLButtonElement>('eyeGo').disabled = !nestOk; if (!m.info) view.clearNest(); }
   else if (m.type === 'saveData') pendingSave?.({ meta: m.meta, data: m.buffer });
   else if (m.type === 'paused') { log(m.reason); running = false; $('run').textContent = '執行 / Run'; $('ovRun').textContent = '▶'; if (runner.running) void runner.end('done'); }
@@ -526,6 +538,17 @@ function showNest(n: NestInfo | null): void {
   $('eyeNow').textContent = n ? `細化中 / running: 半徑 ${kmTxt(n.R)}，Δx ${kmTxt(n.dx)}、Δz ${kmTxt(n.dz)}，${(n.cells / 1e6).toFixed(2)} M 格，每個外圍步 ${n.nsub} 個內部步 / inner steps per outer step`
     : '未細化 / not running';
 }
+/** The tall grid block knows the model's grid (an outer grid makes the edges open). */
+function syncTallHost(): void {
+  const g = gridNow;
+  tallForm.setHost(g.nx && !curNestExp() ? { nx: g.nx, ny: g.ny, nz: g.nz, dx: g.dx, dz: g.dz, dt: g.dt, open: g.open || extOn } : null);
+}
+const curNestExp = (): boolean => curExp === 'nest' || curExp === 'tc_axi';
+const tallForm = new TallForm({
+  start: (spec) => { log('局部加高建立中… / Starting the tall grid…'); send({ type: 'tallStart', spec }); },
+  stop: () => send({ type: 'tallStop' }),
+  footprint: (r) => view.setFootprint(r),
+});
 for (const id of ['eyeR', 'eyeDx', 'eyeDz']) $(id).oninput = eyeInfo;
 $('eyeFit').onclick = eyeFit;
 $('secEye').addEventListener('toggle', () => { if (($('secEye') as HTMLDetailsElement).open) eyeFit(); });

@@ -55,6 +55,9 @@ export type ToRegionalWorker =
    *  running domain, coupled both ways (twoway.ts); replaces a running one */
   | { type: 'nestStart'; R: number; dx: number; dz: number }
   | { type: 'nestStop' }
+  /** a tall grid over a square part of the domain (tall.ts: the footprint's centre and width, the new top (m), the ratios) / take it away */
+  | { type: 'tallStart'; spec: { cx: number; cy: number; width: number; top: number; r: number; rz: number } }
+  | { type: 'tallStop' }
   /** back to the coarser grid (the kept one, with the fine run averaged into it) */
   | { type: 'coarsen' }
   | { type: 'save' }
@@ -158,6 +161,17 @@ export interface OuterFrame {
   cloud: Uint8Array; rain: Uint8Array;
 }
 
+/** The running tall grid (the page's "局部加高"): its grid and where it lies in the domain (m, domain coordinates). */
+export interface TallInfo {
+  Z1: number; Z2: number; r: number; rz: number; dx: number; dz: number; nx: number; nz: number; cells: number;
+  /** child steps per model step now */
+  nsub: number;
+  /** the footprint's lower-left corner and width, the feedback taper width */
+  x0: number; y0: number; L: number; Wf: number;
+}
+/** The tall grid's 3-D view bytes ([k][j][i], nx x nx x nz) with its geometry. */
+export interface TallFrame extends TallInfo { cloud: Uint8Array; rain: Uint8Array }
+
 export interface RegionalFrame {
   type: 'frame';
   time: number;               // s
@@ -199,6 +213,8 @@ export interface RegionalFrame {
   tracers: Float32Array | null;
   /** the eye nest's volume (null: none) */
   nest: NestFrame | null;
+  /** the tall grid's volume (null: none) */
+  tall?: TallFrame | null;
   /** the outer grid's volume: absent = the same as the last one sent, null = no outer grid */
   outer?: OuterFrame | null;
   stepsPerSecond: number;
@@ -225,6 +241,8 @@ export type FromRegionalWorker =
       setup: import('./setup.js').RegionalSetup | null }
   /** the eye nest started, changed or stopped (null) */
   | { type: 'nest'; info: NestInfo | null }
+  /** the tall grid started, changed or stopped (null) */
+  | { type: 'tall'; info: TallInfo | null }
   /** the outer grid around the model now (null: none) */
   | { type: 'ext'; info: { L: number; dx: number; nx: number; cells: number } | null }
   /** surface changed (painting): land mask per column (1 land) */

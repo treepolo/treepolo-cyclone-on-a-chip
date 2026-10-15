@@ -140,6 +140,8 @@ export class TallNest {
   eyeCoupling(e: NestGeom | null): string {
     this.eyeIn = null;
     if (!e) return '';
+    const g = this.g;
+    if (e.i0 + e.np <= g.i0 || e.i0 >= g.i0 + g.np || e.j0 + e.np <= g.j0 || e.j0 >= g.j0 + g.np) return '';       // (apart from the footprint: nothing to couple)
     const r = eyeInTall(this.g, e);
     if (typeof r === 'string') return r;
     this.eyeIn = r;

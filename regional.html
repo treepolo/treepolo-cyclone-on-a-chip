@@ -137,6 +137,19 @@ a{color:#8fc1ff}
 <div id="eyeNow" class="muted">未細化 / not running</div>
 </details>
 
+<details id="secTall"><summary>局部加高 / Taller grid in a part of the domain</summary>
+<div class="muted">在範圍裡選一塊方形，把那一塊的模式頂加高：那一塊用自己的網格（水平、垂直和主網格相同或更細的整數分之一）從地面算到新頂，蓋子和海綿層在新頂，原本的蓋子在那一塊裡不再擋著；主網格是它的外圍，雙向耦合（側邊向主網格鬆弛，每一步把平均回饋給主網格）。可以和眼區細化、外圈同時用。要整個範圍加高用「網格」的模式頂。加高的部分目前不能比主網格粗。/ A square part of the domain gets a higher top: it is computed from the ground to the new top on its own grid (the same as the model's or finer by whole numbers), with the lid and Rayleigh layer at the new top, and the old lid no longer stops it there; the model is its surroundings, coupled both ways. It can be used with the eye nest and the outer grid. For the whole domain use the model top in Grid. The added height cannot yet be coarser than the model.</div>
+<label class="f"><span>中心 / Centre</span><select id="tallAt"><option value="centre">範圍中央 / Domain centre</option><option value="storm">目前風暴位置 / The storm now</option></select></label>
+<label class="f"><span>寬度 / Width (km)</span><input id="tallW" type="number" min="10" step="5" value="100" /></label>
+<div class="controls"><button id="tallMax" type="button">最寬 / Widest</button></div>
+<label class="f"><span>新頂 / New top (km)</span><input id="tallTop" type="number" min="1" step="1" value="24" /></label>
+<label class="f" title="整數：加高區的水平格距＝主網格的 1/這個數 / whole number: the spacing across is the model's divided by it"><span>水平倍數 / Across ×</span><input id="tallR" type="number" min="1" max="32" step="1" value="1" /></label>
+<label class="f" title="整數：加高區的垂直格距＝主網格的 1/這個數 / whole number: the spacing up is the model's divided by it"><span>垂直倍數 / Up ×</span><input id="tallRz" type="number" min="1" max="8" step="1" value="1" /></label>
+<div id="tallInfo" class="muted"></div>
+<div class="controls"><button id="tallGo" disabled>開始加高 / Start</button><button id="tallStop" disabled>停止加高 / Stop</button></div>
+<div id="tallNow" class="muted">未加高 / not running</div>
+</details>
+
 <details id="secView" open><summary>顯示 / Display</summary>
 <label class="f"><span>地面 / Ground</span><select id="ground"><option value="rain">累積雨量 / Accumulated rain</option><option value="snow">累積雪與霰 / Snow + graupel</option><option value="wind">地面風速 / Surface wind</option><option value="theta">地面溫度擾動 / Surface θ′</option><option value="none" selected>海陸（只看雲）/ Sea and land only</option></select></label>
 <div id="legend" class="muted"></div>

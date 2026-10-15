@@ -132,11 +132,11 @@ export class GridForm {
     const s = this.value(), c = this.cur, cells = setupCells(s), nz = Math.round(s.top / s.dz), nx = Math.round(s.L / s.dx);
     const bigger = s.L > c.L + 1, other = Math.abs(s.top - c.top) >= 1 || Math.abs(s.dz - c.dz) >= 1e-9, shrink = s.L < c.L - 1;
     const parts = [`${nx}×${nx}×${nz} = ${(cells / 1e6).toFixed(cells < 1e6 ? 2 : 1)} M 格點 / cells`];
-    if (this.ext) parts.push(`外圈：${(this.ext.L / 1000).toFixed(0)} km、Δx ${(this.ext.dx / 1000).toFixed(1)} km、${(this.ext.cells / 1e6).toFixed(2)} M 格（單向，內圈邊界向外圈鬆弛；3D 畫面和圖表只看內圈）/ outer grid`);
+    if (this.ext) parts.push(`外圈：${(this.ext.L / 1000).toFixed(0)} km、Δx ${(this.ext.dx / 1000).toFixed(1)} km、${(this.ext.cells / 1e6).toFixed(2)} M 格（單向，內圈邊界向外圈鬆弛；3D 畫面畫出外圈，圖表只看內圈）/ outer grid`);
     if (bigger && other) parts.push('⚠ 範圍加大（外圈）和模式頂／垂直格距不能一次改 / a larger domain (outer grid) and a new top or spacing cannot be changed at once');
     if (bigger && !other) parts.push('範圍比現在大：按「加外圈」，內圈（現在的模式）不動，外面加一圈粗網格 / a larger domain: the model stays as it is, a coarse grid is added around it');
     if (cells > 30e6 && !bigger) parts.push('⚠ 太大（上限 30 M）/ too large (limit 30 M)');
-    if (edited && (shrink || other) && !bigger) parts.push('按「套用網格」後模擬接著跑（狀態內插到新網格，眼區細化與外圈會停止）/ Apply continues the run on the new grid (the eye nest and the outer grid stop)');
+    if (edited && (shrink || other) && !bigger) parts.push('按「套用網格」後模擬接著跑（狀態內插到新網格，眼區細化、局部加高與外圈會停止）/ Apply continues the run on the new grid (the eye nest, the tall grid and the outer grid stop)');
     this.info.textContent = parts.join(' · ');
     this.applyBtn.disabled = bigger || !(shrink || other) || cells > 30e6;
     this.outerBtn.hidden = !bigger || other;
