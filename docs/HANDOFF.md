@@ -1,6 +1,6 @@
 # 交接文件 / Handoff
 
-新對話請先讀這份，再讀 `docs/ROADMAP.md`（待辦與順序）與 `docs/ARCHITECTURE.md`。
+新對話請先讀 `docs/OVERVIEW.md`（模擬器的功能、技術與程式地圖總覽），再讀這份，再讀 `docs/ROADMAP.md`（待辦與順序）與 `docs/ARCHITECTURE.md`。
 
 ## 使用者與溝通
 - 用**正體中文**回覆，語氣溫暖、不要冷淡；進度報告簡潔。

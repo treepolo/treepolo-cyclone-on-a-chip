@@ -4,6 +4,8 @@
 
 A personal 3D planetary atmosphere simulator. Weather must emerge from real equations in SI units; nothing in the code generates a weather system directly.
 
+> **完整介紹（功能、技術、程式地圖、驗證狀態、給 AI 的指引）見 [`docs/OVERVIEW.md`](docs/OVERVIEW.md)。**
+
 ## 目前狀態 / Status（v0.2）
 
 v0.1 起為**完整重新設計**（原因與路線圖見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)；驗收結果見 [`docs/RESULTS_R1_DRY.md`](docs/RESULTS_R1_DRY.md)、[`docs/RESULTS_R2_R5.md`](docs/RESULTS_R2_R5.md)）：
