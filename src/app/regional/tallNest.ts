@@ -55,7 +55,7 @@ export class TallNest {
     const g = tallGeometry(p.c, spec);
     if (typeof g === 'string') return g;
     if (tallCells(g) > TALL_MAX_CELLS) return `${(tallCells(g) / 1e6).toFixed(1)} M 格 / too many cells`;
-    const b = buildModel({ ...setup, preset: 'custom', L: g.nx * g.dx, dx: g.dx, dz: g.dz, top: g.Z2, dt: 0, boundary: 'open', follow: false, init: 'none', initAmp: 0 }, gpuOk);
+    const b = buildModel({ ...setup, preset: 'custom', L: g.nx * g.dx, dx: g.dx, dz: g.dz, top: g.Z2, dt: 0, boundary: 'open', shape: 'square', follow: false, init: 'none', initAmp: 0 }, gpuOk);
     const c = b.model;
     if (c.c.nx !== g.nx || c.c.ny !== g.nx || c.c.nz !== g.nz) return `內部錯誤：局部加高網格不符 / internal error: tall grid ${c.c.nx} x ${c.c.nz}, expected ${g.nx} x ${g.nz}`;
     const cc = c.c as { relaxCells?: number; relaxTau?: number };

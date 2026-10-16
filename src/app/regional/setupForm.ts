@@ -25,6 +25,8 @@ export const FIELDS: Field[] = [
   { key: 'dt', label: '步長 / Step size Δt (s, 0 = 自動 auto)', group: 'grid', kind: 'num', step: 1, show: notAxi, tip: '0 = 依格距自動選擇；太大會數值發散 / 0 picks one from the grid spacing; too large blows up' },
   { key: 'boundary', label: '側邊界 / Boundaries', group: 'grid', kind: 'sel', options: [['periodic', '週期 / periodic'], ['open', '開放 / open']], show: notAxi,
     tip: '週期：從一邊出去的空氣從對邊回來；開放：邊緣向環境場鬆弛 / periodic: what leaves one side enters the other; open: the edges relax to the environment' },
+  { key: 'shape', label: '範圍形狀 / Shape', group: 'grid', kind: 'sel', options: [['square', '方形 / square'], ['circle', '圓形（開放邊界）/ circle (open boundaries)']], show: notAxi,
+    tip: '圓形：網格仍是方形，但圓外鬆弛到環境（像開放邊界），所以風暴往每個方向離邊界一樣遠；圓形一定是開放邊界 / circle: the grid is still square, but outside the circle the model relaxes to the environment (like an open boundary), so a storm is as far from the edge in every direction; a circle always has open boundaries' },
   { key: 'follow', label: '計算範圍跟隨風暴 / Domain follows the storm', group: 'grid', kind: 'chk', show: notAxi },
   { key: 'lat', label: '緯度 / Latitude (°)', group: 'env', kind: 'num', step: 1, tip: '決定科氏力；0° 沒有地球自轉效應 / sets the Coriolis force; 0° has no rotation' },
   { key: 'surface', label: '地表 / Surface', group: 'env', kind: 'sel', options: [['sea', '海洋 / sea'], ['land', '陸地 / land']], show: notAxi },

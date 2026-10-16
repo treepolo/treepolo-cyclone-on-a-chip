@@ -94,6 +94,8 @@ export function buildModel(input: RegionalSetup, gpuOk: boolean): Built {
     nx, ny: nx, nz, dx: s.dx, dy: s.dx, dz: s.dz, dt, nsound: s.dx <= 250 ? 8 : 6, f, beta: s.sounding === 'wk82' ? 0.2 : 0.3, divDamp: 0.1,
     dampDepth: Math.min(6000, 0.3 * s.top), dampRate: 1 / 300, kdiff2: 0,
     lateral: open ? 'open' : 'periodic', relaxCells: Math.max(6, Math.round(2500 / s.dx)), relaxTau: 300,
+    // a circular domain: no relaxation inside the circle's inner radius, growing over the relaxation width to the circle's edge, full beyond it (the corners)
+    ...(s.shape === 'circle' ? { relaxCyl: { r: Math.max(1, nx / 2 - Math.max(6, Math.round(2500 / s.dx))), w: Math.max(6, Math.round(2500 / s.dx)) } } : {}),
     // a background wind on a rotating domain is geostrophic (balanced by the large-scale pressure gradient it implies)
     geostrophic: f !== 0 && s.wind !== 'calm',
   };

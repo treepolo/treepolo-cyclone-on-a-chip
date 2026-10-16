@@ -24,7 +24,7 @@ const PAINT: Tool[] = ['land', 'sea', 'sst'];
 const windForm = (f: string): 'push' | 'rotate' | 'converge' | 'vortex' => (f === 'push' ? 'push' : f === 'in' || f === 'out' ? 'converge' : f === 'cyc' || f === 'anti' ? 'vortex' : 'rotate');
 const DIRS = ['北 N', '東北 NE', '東 E', '東南 SE', '南 S', '西南 SW', '西 W', '西北 NW'];
 
-interface Grid { Lx: number; Ly: number; top: number; dx: number; dz: number; /** the run has a surface to paint; takes interactions at all (not the axisymmetric model) */ paint: boolean; interact: boolean }
+interface Grid { /** the domain is a circle: nothing to point at outside it */ circle?: boolean; Lx: number; Ly: number; top: number; dx: number; dz: number; /** the run has a surface to paint; takes interactions at all (not the axisymmetric model) */ paint: boolean; interact: boolean }
 
 export class Tools3D {
   private tool: Tool = 'view';
@@ -116,6 +116,8 @@ export class Tools3D {
   }
 
   /** New domain: sizes for the defaults (radius about a twelfth of the domain, at least 3 cells). */
+  /** The domain is (or is no longer) a circle. */
+  setCircle(on: boolean): void { if (this.grid) this.grid.circle = on; }
   setGrid(g: Grid): void {
     this.grid = g;
     const r = Math.max(3 * g.dx, Math.min(g.Lx / 12, 150000)) / 1000;
@@ -222,6 +224,7 @@ export class Tools3D {
   private ground(cx: number, cy: number): { x: number; y: number } | null {
     const g = this.grid, p = this.view.pickPlane(cx, cy, 0); if (!g || !p) return null;
     const [bx, by] = this.view.boxSize, x = p[0] / bx * g.Lx, y = p[1] / by * g.Ly;
+    if (g.circle && Math.hypot(x - g.Lx / 2, y - g.Ly / 2) > g.Lx / 2) return null;
     return x >= 0 && y >= 0 && x <= g.Lx && y <= g.Ly ? { x, y } : null;
   }
 

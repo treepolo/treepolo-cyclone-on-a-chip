@@ -48,7 +48,7 @@ treepolo Cyclone on a Chip（晶片上的旋風）是個人用的**瀏覽器內 
 ### 3.1 動力
 `core.ts`：全可壓縮、非靜力、笛卡兒 C 網格（CM1/WRF 一族）。預報 u、v、w、θ、π′（Exner 擾動）與水物質純量；水平均勻靜力基準態 θ₀(z)、qv₀、π₀、ρ₀。
 Wicker–Skamarock RK3＋聲波分裂（垂直 w–π′ 為 Crank–Nicolson 逐柱隱式、散度阻尼）；5 階上風偏向通量平流（近蓋子／地面降階）；正定通量限制器用於水氣；
-側邊界週期或開放（Davies 鬆弛帶 `relaxCells`、`relaxTau`；也可圓柱形鬆弛 `relaxCyl` 給巢狀）；頂部蓋子（w=0）加 Rayleigh 海綿層（`min(6 km, 0.3·頂)`，鬆弛到基準態或巢狀目標）。
+側邊界週期或開放（Davies 鬆弛帶 `relaxCells`、`relaxTau`；也可圓柱形鬆弛 `relaxCyl`：眼區細化的圓柱，以及「圓形範圍」設定 `RegionalSetup.shape='circle'`，方形網格但圓外鬆弛到環境）；頂部蓋子（w=0）加 Rayleigh 海綿層（`min(6 km, 0.3·頂)`，鬆弛到基準態或巢狀目標）。
 **重要假設：垂直格距是均勻的**（`dz` 在 core/GPU/physics/cumulus/diagnostics 等上百處用純量）。因此「加高部分比主網格粗」需要拉伸垂直格距，尚未做（見 `DEV_PLAN_nesting.md` Step 4）。
 座標系可 Galilean 移動（`shiftFrame`）、整格平移（`roll`，領域跟著風暴走）。科氏力在 f 平面；有背景風時地轉（科氏力作用在 u−ub）。
 

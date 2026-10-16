@@ -5,7 +5,7 @@ import { weismanKlemp } from '../regional/kessler.js';
 import { applyWind, FORCING_TAU } from '../regional/forcing.js';
 import { RegionalPhysics } from '../regional/physics.js';
 import { buildModel, envWind, soundingOf } from '../app/regional/build.js';
-import { setupOf, type RegionalSetup } from '../app/regional/setup.js';
+import { setupOf, sanitize, type RegionalSetup } from '../app/regional/setup.js';
 import { applyLive, changedKeys, liveMerge, type LiveHolder } from '../app/regional/liveSettings.js';
 import { refineInto, makeSampler } from '../regional/refine.js';
 import { nestTargets, nestGeometry } from '../regional/twoway.js';
@@ -214,6 +214,40 @@ const base: RegionalConfig = { nx: 64, ny: 1, nz: 32, dx: 200, dy: 200, dz: 200,
     if (typeof g !== 'string') check('outer grid with the eye nest: its box lies inside the ring where the outer grid sets targets', g.i0 >= out.geom.ring! && g.j0 >= out.geom.ring! && g.i0 + g.np <= inner.c.nx - out.geom.ring! && g.j0 + g.np <= inner.c.ny - out.geom.ring!, `${g.i0}, ${g.np}, ring ${out.geom.ring}`);
     check('outer grid with the eye nest: one too big for the open inner grid is refused', typeof nestGeometry(inner.c, 70000, 1000, 500) === 'string');
   }
+}
+
+// a circular domain: the set-up keeps it open, the model relaxes outside the inscribed circle (nothing inside, full in the corners), the setting can be changed while running
+{
+  const S0: RegionalSetup = { ...setupOf('tc'), preset: 'custom', L: 300000, dx: 15000, top: 15000, dz: 1000, dt: 0, init: 'none', initAmp: 0 };
+  const circle = sanitize({ ...S0, shape: 'circle', boundary: 'periodic' });
+  check('circle: a circular domain is always open (sanitize), a square one keeps its boundary', circle.shape === 'circle' && circle.boundary === 'open' && sanitize({ ...S0, shape: 'square' }).boundary === 'periodic' && sanitize({ ...S0, shape: undefined as unknown as 'square' }).shape === 'square');
+  const m = buildModel(circle, false).model, c = m.c as { relaxCyl?: { r: number; w: number }; relaxCells?: number; lateral?: string }, nx = m.c.nx;
+  check('circle: the model has the relaxation circle: inner radius = half the width less the relaxation width, that width wide', !!c.relaxCyl && c.relaxCyl.w === c.relaxCells && Math.abs(c.relaxCyl.r + c.relaxCyl.w - nx / 2) < 1e-9 && c.lateral === 'open', `${c.relaxCyl?.r}, ${c.relaxCyl?.w}`);
+  check('circle: a square set-up has none', (buildModel({ ...S0, shape: 'square', boundary: 'open' }, false).model.c as { relaxCyl?: unknown }).relaxCyl === undefined);
+  // the relaxation itself (one evaluation of the tendency, no step): zero at the centre, the full rate at the middle of an edge and in a corner, which the square has only at the edge
+  const run = (mm: RegionalModel): { ctr: number; edge: number; corner: number } => {
+    const mi = mm as unknown as { fu: Float64Array; fv: Float64Array; fw: Float64Array; fth: Float64Array; fpp: Float64Array; fsc: Float64Array[]; relaxBoundaries(): void; ensureWork(): void };
+    mi.ensureWork();
+    mm.boundary!.u.fill(0); for (const a of [mi.fu, mi.fv, mi.fw, mi.fth, mi.fpp, ...mi.fsc]) a.fill(0);
+    mm.u.fill(10);
+    mi.relaxBoundaries();
+    const k = 3, q = (i: number, j: number): number => mm.idx(i, j, k);
+    return { ctr: mi.fu[q(nx / 2, nx / 2)]!, edge: mi.fu[q(nx / 2, 0)]!, corner: mi.fu[q(0, 0)]! };
+  };
+  const rc = run(m), sq = run(buildModel({ ...S0, shape: 'square', boundary: 'open' }, false).model);
+  check('circle: the tendency relaxing u to the target is 0 at the centre, nearly the full rate at the middle of an edge (the circle touches it) and the full rate in the corner', rc.ctr === 0 && rc.edge < 0 && rc.corner <= rc.edge && rc.edge < 0.7 * rc.corner, `${rc.ctr}, ${rc.edge}, ${rc.corner}`);
+  check('circle: the square keeps its centre of the edge strong and its corner as strong (the edge ring), and has none between the corner and the centre far from the edge', sq.ctr === 0 && sq.edge < 0, `${sq.edge}`);
+  // changed while running: a periodic square becomes a circle (open, the circle), and back
+  const base = { ...S0, shape: 'square' as const, boundary: 'periodic' as const };
+  const b = buildModel(base, false), h = { m: b.model, cfg: b.physics, phys: b.physics ? new RegionalPhysics(b.model, b.physics) : null };
+  const to = sanitize({ ...base, shape: 'circle' });
+  const r1 = applyLive(h, to, base, b.frame, false);
+  const hc = h.m.c as { relaxCyl?: { r: number; w: number }; lateral?: string };
+  check('circle: applied while running a periodic square becomes an open circle (the relaxation targets made)', !!hc.relaxCyl && hc.lateral === 'open' && !!h.m.boundary && r1.notes.length >= 1);
+  applyLive(h, { ...to, shape: 'square' }, to, b.frame, false);
+  check('circle: and back to the square (no circle; the boundaries stay open)', hc.relaxCyl === undefined && hc.lateral === 'open');
+  const key = changedKeys(base, to);
+  check('circle: the change shows as a changed live setting', key.includes('shape') && key.includes('boundary'));
 }
 
 summary('live');

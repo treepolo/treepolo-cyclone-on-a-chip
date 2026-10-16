@@ -56,7 +56,7 @@ export function buildOuter(inner: RegionalModel, setup: RegionalSetup, frame: { 
   if (nT <= np) return `外圈的總範圍要比內圈（${(c.nx * c.dx / 1000).toFixed(0)} km）大 / the outer domain must be larger than the inner one (${(c.nx * c.dx / 1000).toFixed(0)} km)`;
   if (nT * nT * c.nz > OUTER_MAX_CELLS) return `外圈 ${(nT * nT * c.nz / 1e6).toFixed(1)} M 格，上限 ${OUTER_MAX_CELLS / 1e6} M / the outer grid has ${(nT * nT * c.nz / 1e6).toFixed(1)} M cells, at most ${OUTER_MAX_CELLS / 1e6} M`;
   const i0 = (nT - np) / 2, r = Math.round(sp / c.dx);
-  const os: RegionalSetup = { ...setup, preset: 'custom', L: nT * sp, dx: sp, dz: c.dz, top: c.nz * c.dz, dt: 0, init: 'none', initAmp: 0, follow: false };
+  const os: RegionalSetup = { ...setup, preset: 'custom', L: nT * sp, dx: sp, dz: c.dz, top: c.nz * c.dz, dt: 0, init: 'none', initAmp: 0, follow: false, shape: 'square' };
   const b = buildModel(os, gpuOk), m = b.model;
   if (m.c.nx !== nT || m.c.nz !== c.nz) return `內部錯誤：外圈網格 ${m.c.nx} x ${m.c.nz}，應為 ${nT} x ${c.nz} / internal error: outer grid ${m.c.nx} x ${m.c.nz}, expected ${nT} x ${c.nz}`;
   // the inner grid's frame and base wind (a change of the environment by an interaction included)

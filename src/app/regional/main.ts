@@ -42,6 +42,8 @@ let nest: { payload: NestPayload; lat0: number; lon0: number; size: NestSize } |
 const missions = new Missions($('missions'), (s) => log(s));
 let curExp: RegionalExperiment = 'supercell', curTc = false, curSea = false;
 let lastVol: ReplayFrame | null = null, refining = false;
+/** the domain is a circle (the corners are not drawn) */
+let curCircle = false;
 /** the outer grid's volume (the last one sent; null: none) and the one the 3-D view holds */
 let lastOuter: OuterFrame | null = null, shownOuter: OuterFrame | null = null;
 /** the tall grid's volume (the last frame's; null: none) and the one the 3-D view holds */
@@ -97,7 +99,7 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
   const m = ev.data;
   if (m.type === 'follow') { $<HTMLInputElement>('followNow').checked = m.on; return; }
   if (m.type === 'ext') { extOn = !!m.info; syncTallHost(); gridForm.setExt(m.info); if (!m.info) { lastOuter = null; if (shownOuter) { view.setOuter(null); shownOuter = null; } } return; }
-  if (m.type === 'settings') { form.set(m.setup); live.set(m.setup); gridForm.set(m.setup); log(m.note); return; }
+  if (m.type === 'settings') { curCircle = m.setup.shape === 'circle'; tools.setCircle(curCircle); form.set(m.setup); live.set(m.setup); gridForm.set(m.setup); log(m.note); return; }
   if (m.type === 'ready') {
     // a new model ends the replay (a refinement keeps the recording, but not a replay file shown)
     if (!refining || fileMode) { replay.clear(); endReplay(); }
@@ -135,7 +137,8 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     document.querySelectorAll<HTMLElement>('.stormOnly').forEach((el) => { el.hidden = curTc; });
     charts.setGrid({ nx: m.nx, ny: m.ny, nz: m.nz, dx: m.dx, dy: m.dx, dz: m.dz, experiment: m.experiment, land: m.land, tc: m.tc, sea: curSea }, refining);
     showSurface();
-    tools.setGrid({ Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, dx: m.dx, dz: m.dz, paint: m.setup ? m.setup.fluxes && !presetAxi(m.setup) : m.experiment === 'nest', interact: m.experiment !== 'tc_axi' });
+    curCircle = m.setup?.shape === 'circle';
+    tools.setGrid({ circle: curCircle, Lx: m.nx * m.dx, Ly: m.ny * m.dx, top: m.nz * m.dz, dx: m.dx, dz: m.dz, paint: m.setup ? m.setup.fluxes && !presetAxi(m.setup) : m.experiment === 'nest', interact: m.experiment !== 'tc_axi' });
     missions.reset({ e: m.experiment, tc: m.tc });
     refining = false;
     replayPanel.onReady(m.tc, m.experiment === 'tc_axi');
@@ -148,8 +151,10 @@ worker.onmessage = (ev: MessageEvent<FromRegionalWorker>): void => {
     const [lo, hi] = m.groundRange, rgba = new Uint8Array(m.nx * m.ny * 4);
     // plain surface: sea (tropical cyclones, sea points of a nest) or land (convective storms, land points)
     const bare = (i: number): [number, number, number] => ((land ? !land[i] : curSea) ? [0.10, 0.17, 0.30] : [0.16, 0.22, 0.16]);
+    const circ = curCircle, hx = m.nx / 2, hy = m.ny / 2;
     for (let i = 0; i < m.ground.length; i++) {
       const v = m.ground[i]!;
+      if (circ && ((i % m.nx + 0.5 - hx) ** 2 + (Math.floor(i / m.nx) + 0.5 - hy) ** 2 > hx * hx)) { rgba[4 * i] = 12; rgba[4 * i + 1] = 17; rgba[4 * i + 2] = 28; rgba[4 * i + 3] = 255; continue; }
       let c: [number, number, number];
       if (m.groundField === 'theta') c = diverging(v / hi);
       else if (m.groundField === 'none') c = bare(i);

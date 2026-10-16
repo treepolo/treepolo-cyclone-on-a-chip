@@ -159,6 +159,20 @@ function tallStepGpu(): void {
   t.eyeLink?.feedback();
   tl.feedback();
 }
+/** The 3-D view's bytes ([k][j][i]) cleared outside the circle inscribed in the nx x ny columns. */
+function clipToCircle(cloud: Uint8Array, rain: Uint8Array, nx: number, ny: number, nz: number): void {
+  const r2 = (nx / 2) * (nx / 2), cx = nx / 2, cy = ny / 2;
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    if ((i + 0.5 - cx) ** 2 + (j + 0.5 - cy) ** 2 <= r2) continue;
+    for (let k = 0; k < nz; k++) { const o = (k * ny + j) * nx + i; cloud[o] = 0; rain[o] = 0; }
+  }
+}
+/** whether the box of whole cells (lower-left cell i0, j0, np cells across) lies inside the circular domain (always true for a square one) */
+function insideCircle(i0: number, j0: number, np: number): boolean {
+  const cyl = m?.c.relaxCyl; if (!cyl || !m) return true;
+  const cx = m.c.nx / 2, cy = m.c.ny / 2;
+  return [[i0, j0], [i0 + np, j0], [i0, j0 + np], [i0 + np, j0 + np]].every(([a, b]) => Math.hypot(a! - cx, b! - cy) <= cyl.r - 1);
+}
 /** The tall grid's spec from its geometry (to build it anew from a restored state) */
 const tallSpecOf = (g: TallNest['g'], dxh: number): { cx: number; cy: number; width: number; top: number; r: number; rz: number } =>
   ({ cx: g.x0 + 0.5 * g.np * dxh, cy: g.y0 + 0.5 * g.np * dxh, width: g.np * dxh, top: g.Z2, r: g.r, rz: g.rz });
@@ -255,6 +269,7 @@ async function extFromCpu(): Promise<void> {
 /** Add an outer grid around the running model: at least `wantL` m across, spacing near `wantDx` m. Returns a note for the log. */
 async function startExt(wantL: number, wantDx: number): Promise<string> {
   if (!m || !mp || !setup || axi || experiment === 'nest') return '這個實驗不能加外圈 / this experiment cannot have an outer grid';
+  if (setup.shape === 'circle') return '圓形範圍還不能加外圈（先把範圍形狀改回方形）/ a circular domain cannot have an outer grid yet: make the shape square first';
   if (ext) await extStop();
   if (eye) {
     // the inner grid's edges become open and relax to the outer grid: the eye nest must lie inside that band's margin
@@ -1362,6 +1377,8 @@ async function applySettings(want: RegionalSetup): Promise<string> {
   const mm = m!, mpp = mp!, old = setup!;
   let next = liveMerge(old, want);
   const pre: string[] = [];
+  if (ext && next.shape !== old.shape) { next = { ...next, shape: old.shape, boundary: old.boundary }; pre.push('外圈存在時範圍形狀不能改 / the shape cannot change while there is an outer grid'); }
+  if ((eye || tall) && next.shape === 'circle' && old.shape !== 'circle') { next = { ...next, shape: old.shape, boundary: old.boundary }; pre.push('請先停止眼區細化與局部加高再改成圓形（它們的框要在圓內）/ stop the eye nest and the tall grid before making the domain a circle (their boxes must lie inside it)'); }
   if (ext && next.boundary !== old.boundary) { next = { ...next, boundary: old.boundary }; pre.push('外圈存在時側邊界不能改（內圈的邊界向外圈鬆弛）/ the boundaries cannot change while there is an outer grid'); }
   const keys = changedKeys(old, next);
   if (!keys.length) return '設定沒有變 / nothing changed';
@@ -1508,6 +1525,7 @@ async function startTall(spec: { cx: number; cy: number; width: number; top: num
   const mm = m!, mpp = mp!;
   const n = TallNest.build(mm, { rain: mpp.rainAcc, snow: mpp.snowAcc }, setup!, frameVel, phys?.surface ?? null, spec, !!gpu);
   if (typeof n === 'string') throw new Error(n);
+  if (!insideCircle(n.g.i0, n.g.j0, n.g.np)) { n.destroy(); throw new Error('局部加高的範圍超出圓形範圍（四個角要在圓內，離圓邊至少 1 格）：請縮小寬度 / the tall grid reaches out of the circular domain: use a narrower footprint'); }
   n.setForcings(forcings.map((x) => x.f));
   n.fit(gpu ? gpu.dt : mm.c.dt);
   if (gpu) {
@@ -1544,6 +1562,7 @@ async function startNest(R: number, dx: number, dz: number, recentre: boolean): 
   }
   const n = EyeNest.build(mm, { rain: mpp.rainAcc, snow: mpp.snowAcc }, setup!, frameVel, phys?.surface ?? null, R, dx, dz, !!gpu);
   if (typeof n === 'string') throw new Error(n);
+  if (!insideCircle(n.g.i0, n.g.j0, n.g.np)) { n.destroy(); throw new Error('眼區細化的框超出圓形範圍（四個角要在圓內，離圓邊至少 1 格）：請縮小半徑 / the eye nest box reaches out of the circular domain: use a smaller radius'); }
   n.setForcings(forcings.map((x) => x.f));
   n.fit(gpu ? gpu.dt : c.dt);
   if (gpu) {
@@ -1921,6 +1940,7 @@ async function sendFrameRaw(): Promise<void> {
     advanceOrigin();
     trOut = tracers ? tracers.pos.slice() : null;
   }
+  if (m.c.relaxCyl) clipToCircle(cloud, rain, nx, ny, nz);         // (a circular domain: nothing is drawn outside the circle)
   const g = new Float32Array(nx * ny);
   transfer.add(g.buffer);
   let vmax = 0, rainmax = 0;

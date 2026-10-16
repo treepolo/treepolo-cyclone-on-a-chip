@@ -15,7 +15,7 @@ import { RegionalPhysics, type RegionalPhysicsConfig } from '../../regional/phys
 import { envWind, physicsOf, soundingOf } from './build.js';
 import { sanitize, type RegionalSetup } from './setup.js';
 
-export const LIVE_KEYS = ['lat', 'boundary', 'surface', 'sst', 'fluxes', 'sounding', 'qvBL', 'wind', 'windU', 'windR', 'windDepth', 'radiation', 'radRate', 'vmin', 'gust', 'cumulus', 'blNoise'] as const;
+export const LIVE_KEYS = ['lat', 'boundary', 'shape', 'surface', 'sst', 'fluxes', 'sounding', 'qvBL', 'wind', 'windU', 'windR', 'windDepth', 'radiation', 'radRate', 'vmin', 'gust', 'cumulus', 'blNoise'] as const;
 export type LiveKey = (typeof LIVE_KEYS)[number];
 const PHYS_KEYS: readonly LiveKey[] = ['fluxes', 'radiation', 'radRate', 'vmin', 'gust', 'blNoise', 'cumulus'];
 const WIND_KEYS: readonly LiveKey[] = ['wind', 'windU', 'windR', 'windDepth'];
@@ -83,6 +83,16 @@ export function applyLive(h: LiveHolder, next: RegionalSetup, old: RegionalSetup
       c.lateral = 'periodic'; m.boundary = null;
       notes.push('側邊界改成週期：從一邊出去的空氣從對邊回來（兩邊原本不連續的地方會有一小段調整）/ boundaries are periodic now: what leaves one side enters the other');
     }
+  }
+  // the shape of the domain: a circle (the corners relax to the environment too) or the whole square
+  if (!child && ch.has('shape')) {
+    const cc = c as { relaxCyl?: { r: number; w: number } };
+    if (next.shape === 'circle') {
+      const nr = Math.max(6, c.relaxCells ?? Math.round(2500 / m.c.dx));
+      c.lateral = 'open'; c.relaxCells = nr; c.relaxTau = c.relaxTau ?? 300; cc.relaxCyl = { r: Math.max(1, m.c.nx / 2 - nr), w: nr };
+      if (!m.boundary) m.boundary = environmentTargets(m);
+      notes.push('範圍改成圓形：圓外鬆弛到環境（邊界是開放的）/ the domain is a circle now: outside it the model relaxes to the environment');
+    } else { delete cc.relaxCyl; notes.push('範圍改回方形 / the domain is the whole square again'); }
   }
   // environmental wind: the difference of the environments is added everywhere
   if (windCh) {
